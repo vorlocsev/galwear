@@ -304,23 +304,37 @@ if [ -n "$SW" ]; then
     echo 40 > /proc/sys/vm/watermark_scale_factor
 fi
 
-# ---- GPU. CONFIG_MALI_SEC_UTILIZATION is on in the kernel config now, so the
-# Mali DVFS governor should see real utilization and scale 200-667 by itself.
-# Until that build is flashed and verified, keep pinning: with utilization
-# stuck at 0 (the old config) the governor parks at 200 MHz and the UI crawls.
-# Verify on the new kernel: /sys/class/misc/mali0/device/gpu_utilization goes
-# non-zero while the screen animates, and the clock drops to 200 MHz when idle.
-# Then touch /oem/r800dev/android/GPU_SCALE (/opt/usr/r800dev/android from
-# Tizen) and the governor owns the clock; remove the file to pin again.
+# ---- GPU. Keep the historical 667 MHz minimum unless the governor is
+# explicitly selected. The sysfs readback is "effective / requested", or
+# "-1" if no effective lock. Never interpret a thermal cap as a failure
+# to be overridden, and never write dvfs_max_lock or thermal controls.
 G=/sys/class/misc/mali0/device
 if [ -f /oem/r800dev/android/GPU_SCALE ]; then
     k "gpu: DVFS left to the governor (GPU_SCALE)"
 else
-    ( for i in $($B seq 1 60); do
-          echo 667 > $G/dvfs_min_lock 2>/dev/null
-          $B grep -q 667 $G/dvfs_min_lock 2>/dev/null && break
-          $B sleep 1
-      done ) &
+    (
+        for i in $($B seq 1 60); do
+            if [ -r "$G/dvfs_min_lock" ] && [ -w "$G/dvfs_min_lock" ]; then
+                state=$($B cat "$G/dvfs_min_lock" 2>/dev/null) || state=
+                case "$state" in
+                    "667 / 667") k "gpu: existing 667 MHz request"; break ;;
+                    -1)
+                        if echo 667 > "$G/dvfs_min_lock" 2>/dev/null; then
+                            state=$($B cat "$G/dvfs_min_lock" 2>/dev/null) || state=
+                            case "$state" in
+                                "667 / 667") k "gpu: 667 MHz minimum requested"; break ;;
+                                *) k "gpu: unconfirmed minimum request ($state); not forcing retry"; break ;;
+                            esac
+                        fi
+                        ;;
+                    "" ) ;;
+                    *) k "gpu: existing lock ($state); leaving it alone"; break ;;
+                esac
+            fi
+            [ "$i" = 60 ] && k "gpu: minimum lock unavailable"
+            $B sleep 1
+        done
+    ) &
 fi
 
 # ---- after boot: one-time setup, then Wi-Fi and the telnet shell
