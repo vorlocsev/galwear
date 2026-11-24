@@ -2,7 +2,7 @@ name: SM-R800 integrated regression and HAL link (NON-RELEASE)
 on:
   push:
     branches:
-      - development/r800-decon-abi-20261125
+      - development/r800-decon-fence-ownership-20261125
   workflow_dispatch:
     inputs:
       kernel_repeatability:
@@ -61,6 +61,9 @@ jobs:
           test "$(git -C "$RUNNER_TEMP/decon-source" rev-parse FETCH_HEAD)" = 50db73fc799f20a7120a8b5f653b16cc123d856f
           git -C "$RUNNER_TEMP/decon-source" show FETCH_HEAD:drivers/video/fbdev/exynos/dpu30/decon.h > "$RUNNER_TEMP/decon.h"
           python3 build/r800_decon_abi_check.py --kernel-header "$RUNNER_TEMP/decon.h" --mirror src/hal/r800_decon_abi.h --ndk "$ANDROID_HOME/ndk/27.2.12479018" --scratch "$RUNNER_TEMP/decon-abi"
+      - name: Check full kernel patch against pinned source
+        run: |
+          sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/r800-patch-source" "$RUNNER_TEMP/r800-patch-check.json"
       - name: Compile and link all four HALs
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
