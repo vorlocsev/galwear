@@ -26281,7 +26281,15 @@ diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
 diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
 --- a/drivers/soc/samsung/exynos-pm.c
 +++ b/drivers/soc/samsung/exynos-pm.c
-@@ -37,6 +37,11 @@
+@@ -7,6 +7,7 @@
+  *
+  */
+ 
++#include <linux/moduleparam.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/notifier.h>
+@@ -37,6 +38,11 @@
  #define EXYNOS_PMU_EINT_WAKEUP_MASK	0x060C
  #define BOOT_CPU			0
  #define CPU_INFORM4			0x0870
@@ -26293,7 +26301,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  
  extern u32 exynos_eint_to_pin_num(int eint);
  #define EXYNOS_EINT_PEND(b, x)      ((b) + 0xA00 + (((x) >> 3) * 4))
-@@ -261,8 +266,20 @@
+@@ -261,8 +267,37 @@
  #define SLEEP_AUD_ON   10
  #endif
  
@@ -26302,11 +26310,28 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
 +static bool r800_pm_prepared;
 +static unsigned int r800_pm_mode;
 +static bool r800_psci_attempted;
++/* Independent of Android wake locks; experimental opt-in only. */
++static bool r800_allow_system_suspend;
++module_param(r800_allow_system_suspend, bool, 0600);
++
++static int r800_suspend_policy(void)
++{
++	if (!READ_ONCE(r800_allow_system_suspend))
++		return -EPERM;
++	return READ_ONCE(r800_pm_fault);
++}
++
++static int r800_suspend_begin(suspend_state_t state)
++{
++	return r800_suspend_policy();
++}
 +
  static int exynos_pm_syscore_suspend(void)
  {
 +	int ret;
 +
++	if (!READ_ONCE(r800_allow_system_suspend))
++		return -EPERM;
 +	if (r800_pm_fault) {
 +		pr_err("r800-pm: suspend blocked after CAL failure (%d)\n", r800_pm_fault);
 +		return r800_pm_fault;
@@ -26314,7 +26339,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  #if 0 
  	if (!exynos_check_cp_status()) {
  		pr_info("%s %s: sleep canceled by CP reset \n",
-@@ -270,6 +287,10 @@
+@@ -270,6 +305,10 @@
  		return -EINVAL;
  	}
  #endif
@@ -26325,7 +26350,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	pm_info->is_usbl2_suspend = false;
  	if (pm_info->usbl2_suspend_available) {
  		if (!IS_ERR_OR_NULL(pm_info->usb_is_connect))
-@@ -277,27 +298,49 @@
+@@ -277,27 +316,49 @@
  	}
  
  	if (pm_info->is_usbl2_suspend || pm_dbg->test_usbl2_suspend) {
@@ -26381,7 +26406,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	if (!pm_info->is_early_wakeup)
  		pr_debug("%s %s: post sleep, preparing to return\n",
  						EXYNOS_PM_PREFIX, __func__);
-@@ -312,42 +355,70 @@
+@@ -312,45 +373,77 @@
  {
  	unsigned int psci_index;
  	unsigned int prev_mif = 0, post_mif = 0;
@@ -26391,6 +26416,9 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  
 +	if (!r800_pm_prepared)
 +		return -EINVAL;
++	ret = r800_suspend_policy();
++	if (ret)
++		return ret;
  	psci_index = pm_info->suspend_psci_idx;
  
  	/* Send an IPI if test_early_wakeup flag is set */
@@ -26463,6 +26491,10 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  }
  
  static const struct platform_suspend_ops exynos_pm_ops = {
++	.begin		= r800_suspend_begin,
+ 	.enter		= exynos_pm_enter,
+ 	.valid		= suspend_valid_only_mem,
+ };
 diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos-powermode.c
 --- a/drivers/soc/samsung/exynos-powermode.c
 +++ b/drivers/soc/samsung/exynos-powermode.c
