@@ -28570,6 +28570,123 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-i
  static inline void pmucal_rae_write(struct pmucal_seq *seq)
  {
  	if (seq->mask == U32_MAX)
+@@ -190,9 +221,15 @@
+ 
+ void pmucal_rae_save_seq(struct pmucal_seq *seq, unsigned int seq_size)
+ {
+-	int i;
++	unsigned int i;
+ 
++	/* A fresh snapshot must not inherit validity or skip state. */
+ 	for (i = 0; i < seq_size; i++) {
++		seq[i].need_restore = false;
++		seq[i].need_skip = false;
++	}
++
++	for (i = 0; i < seq_size; i++) {
+ 		switch (seq[i].access_type) {
+ 		case PMUCAL_COND_SAVE_RESTORE:
+ 			if (!pmucal_rae_check_condition(&seq[i]))
+@@ -203,16 +240,11 @@
+ 			break;
+ 		case PMUCAL_READ:
+ 			pmucal_rae_read(&seq[i]);
+-			seq[i].need_restore = false;
+ 			break;
+ 		case PMUCAL_COND_READ:
+ 			if (pmucal_rae_check_condition(&seq[i]))
+ 				pmucal_rae_read(&seq[i]);
+ 			break;
+-		case PMUCAL_CHECK_SKIP:
+-		case PMUCAL_COND_CHECK_SKIP:
+-		case PMUCAL_WAIT:
+-			break;
+ 		default:
+ 			break;
+ 		}
+@@ -221,51 +253,40 @@
+ 
+ int pmucal_rae_restore_seq(struct pmucal_seq *seq, unsigned int seq_size)
+ {
+-	int i, ret;
++	unsigned int i;
++	int ret = 0;
++	bool skip_next = false;
+ 
+ 	for (i = 0; i < seq_size; i++) {
+-		if (seq[i].need_skip) {
+-			seq[i].need_skip = false;
++		bool saved = seq[i].need_restore;
++
++		/* A snapshot entry is consumed even if skipped or gated off. */
++		seq[i].need_restore = false;
++		seq[i].need_skip = false;
++		if (skip_next) {
++			skip_next = false;
+ 			continue;
+ 		}
+ 
+ 		switch (seq[i].access_type) {
+ 		case PMUCAL_COND_SAVE_RESTORE:
+-			if (!pmucal_rae_check_condition(&seq[i]))
++			if (!saved || !pmucal_rae_check_condition(&seq[i]))
+ 				break;
+ 		case PMUCAL_SAVE_RESTORE:
+-			if (seq[i].need_restore) {
+-				seq[i].need_restore = false;
++			if (saved)
+ 				pmucal_rae_write(&seq[i]);
+-			}
+ 			break;
+ 		case PMUCAL_CHECK_SKIP:
+-			if (pmucal_rae_check_value(&seq[i])) {
+-				if ((i+1) < seq_size)
+-					seq[i+1].need_skip = true;
+-			} else {
+-				if ((i+1) < seq_size)
+-					seq[i+1].need_skip = false;
+-			}
++			skip_next = pmucal_rae_check_value(&seq[i]);
+ 			break;
+ 		case PMUCAL_COND_CHECK_SKIP:
+-			if (pmucal_rae_check_condition(&seq[i])) {
+-				if (pmucal_rae_check_value(&seq[i])) {
+-					if ((i+1) < seq_size)
+-						seq[i+1].need_skip = true;
+-				} else {
+-					if ((i+1) < seq_size)
+-						seq[i+1].need_skip = false;
+-				}
+-			} else {
+-				if ((i+1) < seq_size)
+-					seq[i+1].need_skip = true;
+-			}
++			skip_next = !pmucal_rae_check_condition(&seq[i]) ||
++				    pmucal_rae_check_value(&seq[i]);
+ 			break;
+ 		case PMUCAL_WAIT:
+ 			ret = pmucal_rae_wait(&seq[i]);
+ 			if (ret)
+-				return ret;
++				goto invalidate;
+ 			break;
+ 		case PMUCAL_WRITE:
+ 			pmucal_rae_write(&seq[i]);
+@@ -276,6 +297,14 @@
+ 	}
+ 
+ 	return 0;
++
++invalidate:
++	/* A failed restore is not a reusable snapshot. No implicit replay. */
++	for (; i < seq_size; i++) {
++		seq[i].need_restore = false;
++		seq[i].need_skip = false;
++	}
++	return ret;
+ }
+ 
+ /**
 diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.h b/drivers/soc/samsung/cal-if/pmucal_rae.h
 --- a/drivers/soc/samsung/cal-if/pmucal_rae.h
 +++ b/drivers/soc/samsung/cal-if/pmucal_rae.h
