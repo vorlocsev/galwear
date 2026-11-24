@@ -974,6 +974,7 @@ static int64_t mono_ns(void)
 #define VSYNC_REOPEN_NS 2000000000LL
 #define VSYNC_MAX_AGE_NS (3 * VSYNC_PERIOD_NS)
 #define VSYNC_BAD_LIMIT 3
+#define VSYNC_SILENT_NS 5000000000LL
 
 /* Sysfs returns a decimal CLOCK_MONOTONIC timestamp, optionally with newline. */
 static int64_t parse_vsync(const char *buf)
@@ -1022,13 +1023,20 @@ static void *vsync_loop(void *arg)
 {
 	struct r800_hwc *h = arg;
 	int vfd = -1, bad = 0;
-	int64_t last_hw = 0, last_sent = 0, reopen_at = 0;
+	int64_t last_hw = 0, last_sent = 0, reopen_at = 0, last_valid_at = 0;
 	unsigned long hw_count = 0, sw_count = 0;
 
 	while (!atomic_load(&h->stopping)) {
 		pthread_mutex_lock(&h->lock);
-		while (!h->vsync_enabled && !atomic_load(&h->stopping))
+		while (!h->vsync_enabled && !atomic_load(&h->stopping)) {
+			/* No timeout/reopen work while the framework disables VSync. */
+			if (vfd >= 0) {
+				close(vfd);
+				vfd = -1;
+			}
+			reopen_at = 0;
 			pthread_cond_wait(&h->cond, &h->lock);
+		}
 		pthread_mutex_unlock(&h->lock);
 		if (atomic_load(&h->stopping))
 			break;
@@ -1048,6 +1056,7 @@ static void *vsync_loop(void *arg)
 				}
 				pthread_mutex_unlock(&h->lock);
 				last_hw = 0;
+				last_valid_at = mono_ns();
 				bad = 0;
 			}
 		}
@@ -1066,6 +1075,7 @@ static void *vsync_loop(void *arg)
 					int64_t hw = read_hw_vsync(vfd);
 					if (fresh_vsync(hw, mono_ns()) && hw > last_hw) {
 						last_hw = hw;
+						last_valid_at = mono_ns();
 						bad = 0;
 						if (hw > last_sent + VSYNC_PERIOD_NS / 2)
 							ts = hw;
@@ -1074,7 +1084,9 @@ static void *vsync_loop(void *arg)
 					}
 				}
 			}
-			if (lost) {
+			/* Silent TE may be normal in ambient mode. Retry sparingly,
+			 * without mode-setting or resetting the framebuffer. */
+			if (lost || mono_ns() - last_valid_at >= VSYNC_SILENT_NS) {
 				close(vfd);
 				vfd = -1;
 				reopen_at = mono_ns() + VSYNC_REOPEN_NS;
