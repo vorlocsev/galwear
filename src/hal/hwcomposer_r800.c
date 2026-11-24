@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <linux/fb.h>
 #include <poll.h>
 #include <pthread.h>
@@ -78,6 +79,8 @@ struct r800_hwc {
 	hwc_composer_device_1_t base;      /* must be first */
 	const hwc_procs_t *procs;
 	const gralloc_module_t *gralloc;
+	void *gralloc_lib;
+	atomic_int stopping;
 
 	int fb_fd;
 	struct fb_var_screeninfo var;
@@ -120,7 +123,7 @@ static void fb_fill(struct r800_hwc *h, uint32_t col);
 static int handle_geom(buffer_handle_t hnd, int w, int ht, int *stride, int *fmt);
 
 /* ---- gralloc (looked up at run time: the NDK has no libhardware stub) ---- */
-static const gralloc_module_t *load_gralloc(void)
+static const gralloc_module_t *load_gralloc(struct r800_hwc *h)
 {
 	typedef int (*hw_get_module_t)(const char *, const struct hw_module_t **);
 	void *lib = dlopen("libhardware.so", RTLD_NOW);
@@ -132,8 +135,10 @@ static const gralloc_module_t *load_gralloc(void)
 	const struct hw_module_t *mod = NULL;
 	if (!get || get(GRALLOC_HARDWARE_MODULE_ID, &mod) || !mod) {
 		LOGE("hw_get_module(gralloc) failed");
+		dlclose(lib);
 		return NULL;
 	}
+	h->gralloc_lib = lib;
 	LOGI("gralloc module '%s' by '%s'", mod->name, mod->author);
 	return (const gralloc_module_t *)mod;
 }
@@ -272,6 +277,18 @@ static int wait_fence(int fd)
 }
 
 /* ---- framebuffer ---- */
+static void fb_close(struct r800_hwc *h)
+{
+	if (h->fb_mem) {
+		munmap(h->fb_mem, h->fix.smem_len);
+		h->fb_mem = NULL;
+	}
+	if (h->fb_fd >= 0) {
+		close(h->fb_fd);
+		h->fb_fd = -1;
+	}
+}
+
 static int fb_open(struct r800_hwc *h)
 {
 	h->fb_fd = open("/dev/graphics/fb0", O_RDWR | O_CLOEXEC);
@@ -282,8 +299,10 @@ static int fb_open(struct r800_hwc *h)
 		return -errno;
 	}
 	if (ioctl(h->fb_fd, FBIOGET_FSCREENINFO, &h->fix) || ioctl(h->fb_fd, FBIOGET_VSCREENINFO, &h->var)) {
-		LOGE("FBIOGET_*SCREENINFO: %s", strerror(errno));
-		return -errno;
+		int r = -errno;
+		LOGE("FBIOGET_*SCREENINFO: %s", strerror(-r));
+		fb_close(h);
+		return r;
 	}
 	/* CPU copy supports only the existing 32bpp framebuffer geometry. */
 	if (!h->var.xres || !h->var.yres || h->var.bits_per_pixel != 32 ||
@@ -291,13 +310,16 @@ static int fb_open(struct r800_hwc *h)
 	    (uint64_t)h->var.xres * 4 > h->fix.line_length ||
 	    (uint64_t)h->var.yres * h->fix.line_length > h->fix.smem_len) {
 		LOGE("unsupported framebuffer geometry");
+		fb_close(h);
 		return -EINVAL;
 	}
 	h->fb_mem = mmap(NULL, h->fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, h->fb_fd, 0);
 	if (h->fb_mem == MAP_FAILED) {
-		LOGE("mmap fb0 (%u bytes): %s", h->fix.smem_len, strerror(errno));
+		int r = -errno;
+		LOGE("mmap fb0 (%u bytes): %s", h->fix.smem_len, strerror(-r));
 		h->fb_mem = NULL;
-		return -errno;
+		fb_close(h);
+		return r;
 	}
 	LOGI("fb0 %ux%u (virt %ux%u) %ubpp line %u smem %u, %ux%u mm",
 	     h->var.xres, h->var.yres, h->var.xres_virtual, h->var.yres_virtual,
@@ -921,13 +943,15 @@ static void *vsync_loop(void *arg)
 	else
 		last_hw = read_hw_vsync(vfd);   /* arms POLLPRI */
 
-	for (;;) {
+	while (!atomic_load(&h->stopping)) {
 		int64_t ts = 0, now;
 
 		pthread_mutex_lock(&h->lock);
-		while (!h->vsync_enabled)
+		while (!h->vsync_enabled && !atomic_load(&h->stopping))
 			pthread_cond_wait(&h->cond, &h->lock);
 		pthread_mutex_unlock(&h->lock);
+		if (atomic_load(&h->stopping))
+			break;
 		{
 			static unsigned long wakes;
 			if (wakes++ < 8)
@@ -984,11 +1008,16 @@ static void *vsync_loop(void *arg)
 			LOGI("vsync #%lu: %s ts=%lld", hw_count + sw_count,
 			     sw_count && ts != last_hw ? "filled" : "TE", (long long)ts);
 		last_sent = ts;
-		if (h->procs && h->procs->vsync && h->vsync_enabled)
-			h->procs->vsync(h->procs, 0, ts);
+		pthread_mutex_lock(&h->lock);
+		const hwc_procs_t *procs = h->vsync_enabled && !atomic_load(&h->stopping) ? h->procs : NULL;
+		pthread_mutex_unlock(&h->lock);
+		if (procs && procs->vsync)
+			procs->vsync(procs, 0, ts);
 		if (((hw_count + sw_count) & 1023) == 0)
 			LOGI("vsync: %lu from TE, %lu filled in", hw_count, sw_count);
 	}
+	if (vfd >= 0)
+		close(vfd);
 	return NULL;
 }
 
@@ -1107,13 +1136,15 @@ static void *doze_idle_loop(void *arg)
 	struct r800_hwc *h = arg;
 
 	pthread_mutex_lock(&h->doze_lock);
-	for (;;) {
+	while (!atomic_load(&h->stopping)) {
 		int ms;
 		int64_t due;
 		struct timespec t;
 
-		while (h->power_mode != HWC_POWER_MODE_DOZE || h->doze_susp)
+		while (!atomic_load(&h->stopping) && (h->power_mode != HWC_POWER_MODE_DOZE || h->doze_susp))
 			pthread_cond_wait(&h->doze_cond, &h->doze_lock);
+		if (atomic_load(&h->stopping))
+			break;
 		ms = doze_idle_ms();
 		if (ms <= 0) {
 			/* disabled: look again in a while */
@@ -1147,6 +1178,7 @@ static void *doze_idle_loop(void *arg)
 				LOGI("doze: DECON suspended after %d ms idle", ms);
 		}
 	}
+	pthread_mutex_unlock(&h->doze_lock);
 	return NULL;
 }
 
@@ -1222,7 +1254,10 @@ static int r800_query(hwc_composer_device_1_t *dev, int what, int *value)
 
 static void r800_register_procs(hwc_composer_device_1_t *dev, hwc_procs_t const *procs)
 {
-	((struct r800_hwc *)dev)->procs = procs;
+	struct r800_hwc *h = (struct r800_hwc *)dev;
+	pthread_mutex_lock(&h->lock);
+	h->procs = procs;
+	pthread_mutex_unlock(&h->lock);
 }
 
 static int r800_get_display_configs(hwc_composer_device_1_t *dev, int disp, uint32_t *configs, size_t *num)
@@ -1268,10 +1303,43 @@ static void r800_dump(hwc_composer_device_1_t *dev, char *buf, int len)
 		 h->gpu_frames, h->ovl_fail, h->fmt_verified, h->ovl_off);
 }
 
+/* The native HWC wrapper must quiesce its external calls before close.
+ * Internal workers are always stopped and joined before releasing resources. */
+static void stop_workers(struct r800_hwc *h)
+{
+	atomic_store(&h->stopping, 1);
+	pthread_mutex_lock(&h->lock);
+	if (h->vsync_enabled && h->fb_fd >= 0) {
+		uint32_t off = 0;
+		ioctl(h->fb_fd, R800_S3CFB_SET_VSYNC_INT, &off);
+	}
+	h->vsync_enabled = 0;
+	h->procs = NULL;
+	pthread_cond_broadcast(&h->cond);
+	pthread_mutex_unlock(&h->lock);
+	pthread_mutex_lock(&h->doze_lock);
+	pthread_cond_broadcast(&h->doze_cond);
+	pthread_mutex_unlock(&h->doze_lock);
+}
+
 static int r800_close(hw_device_t *dev)
 {
-	(void)dev;
-	return 0;   /* lives for the process lifetime */
+	struct r800_hwc *h = (struct r800_hwc *)dev;
+	if (pthread_equal(pthread_self(), h->vsync_thread) ||
+	    pthread_equal(pthread_self(), h->idle_thread))
+		return -EDEADLK;
+	stop_workers(h);
+	pthread_join(h->vsync_thread, NULL);
+	pthread_join(h->idle_thread, NULL);
+	fb_close(h);
+	if (h->gralloc_lib)
+		dlclose(h->gralloc_lib);
+	pthread_cond_destroy(&h->doze_cond);
+	pthread_mutex_destroy(&h->doze_lock);
+	pthread_cond_destroy(&h->cond);
+	pthread_mutex_destroy(&h->lock);
+	free(h);
+	return 0;
 }
 
 static int r800_open(const hw_module_t *module, const char *name, hw_device_t **device)
@@ -1285,7 +1353,7 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 		return -EINVAL;
 	}
 
-	if (strcmp(name, HWC_HARDWARE_COMPOSER))
+	if (!device || !name || strcmp(name, HWC_HARDWARE_COMPOSER))
 		return -EINVAL;
 	h = calloc(1, sizeof(*h));
 	if (!h)
@@ -1293,10 +1361,16 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 	h->fb_fd = -1;
 	h->layer_stride = stride;
 	LOGI("fixed HWC layer stride %zu", stride);
-	pthread_mutex_init(&h->lock, NULL);
-	pthread_cond_init(&h->cond, NULL);
-	pthread_mutex_init(&h->doze_lock, NULL);
-	pthread_cond_init(&h->doze_cond, NULL);
+	*device = NULL;
+	atomic_init(&h->stopping, 0);
+	int r = pthread_mutex_init(&h->lock, NULL);
+	if (r) goto fail_alloc;
+	r = pthread_cond_init(&h->cond, NULL);
+	if (r) goto fail_lock;
+	r = pthread_mutex_init(&h->doze_lock, NULL);
+	if (r) goto fail_cond;
+	r = pthread_cond_init(&h->doze_cond, NULL);
+	if (r) goto fail_doze_lock;
 
 	h->power_mode = HWC_POWER_MODE_NORMAL;   /* the panel is on at start */
 	h->base.common.tag = HARDWARE_DEVICE_TAG;
@@ -1315,15 +1389,25 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 	h->base.getDisplayConfigs = r800_get_display_configs;
 	h->base.getDisplayAttributes = r800_get_display_attributes;
 
-	if (fb_open(h)) {
-		LOGE("framebuffer unavailable (errno %d): frames will be dropped", errno);
-	} else {
-		LOGE("fb ok: %ux%u %ubpp smem=%u", h->var.xres, h->var.yres,
-		     h->var.bits_per_pixel, h->fix.smem_len);
+	r = fb_open(h);
+	if (r) {
+		LOGE("framebuffer unavailable (%d); refusing incomplete HWC open", r);
+		r = -r;
+		goto fail_resources;
 	}
-	h->gralloc = load_gralloc();
-	pthread_create(&h->vsync_thread, NULL, vsync_loop, h);
-	pthread_create(&h->idle_thread, NULL, doze_idle_loop, h);
+	h->gralloc = load_gralloc(h);
+	if (!h->gralloc || !h->gralloc->lock || !h->gralloc->unlock) {
+		r = ENODEV;
+		goto fail_resources;
+	}
+	r = pthread_create(&h->vsync_thread, NULL, vsync_loop, h);
+	if (r) goto fail_resources;
+	r = pthread_create(&h->idle_thread, NULL, doze_idle_loop, h);
+	if (r) {
+		stop_workers(h);
+		pthread_join(h->vsync_thread, NULL);
+		goto fail_resources;
+	}
 
 	if (h->fb_mem) {
 		/* The initramfs had fb0 open and released it at handover, which
@@ -1351,6 +1435,20 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 	*device = &h->base.common;
 	LOGI("opened (HWC 1.4, DECON overlays for <=3 plain layers, else client composition -> DECON zero-copy)");
 	return 0;
+
+fail_resources:
+	fb_close(h);
+	if (h->gralloc_lib) dlclose(h->gralloc_lib);
+	pthread_cond_destroy(&h->doze_cond);
+fail_doze_lock:
+	pthread_mutex_destroy(&h->doze_lock);
+fail_cond:
+	pthread_cond_destroy(&h->cond);
+fail_lock:
+	pthread_mutex_destroy(&h->lock);
+fail_alloc:
+	free(h);
+	return -r;
 }
 
 static struct hw_module_methods_t r800_methods = { .open = r800_open };
