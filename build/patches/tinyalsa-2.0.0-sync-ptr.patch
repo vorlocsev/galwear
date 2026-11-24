@@ -1,0 +1,17 @@
+diff --git a/src/pcm.c b/src/pcm.c
+--- a/src/pcm.c
++++ b/src/pcm.c
+@@ -605,6 +605,13 @@ static int pcm_sync_ptr(struct pcm *pcm, int flags)
+             }
+         }
+     } else {
++        /* R800: readi/writei move appl_ptr in the kernel. On the
++         * compat SYNC_PTR path a status query without these bits
++         * instead writes back cached userspace control values.
++         * Preserve the write-back semantics for actual mmap clients.
++         */
++        if (!(pcm->flags & PCM_MMAP))
++            flags |= SNDRV_PCM_SYNC_PTR_APPL | SNDRV_PCM_SYNC_PTR_AVAIL_MIN;
+         pcm->sync_ptr->flags = flags;
+         if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_SYNC_PTR,
+                             pcm->sync_ptr) < 0) {
