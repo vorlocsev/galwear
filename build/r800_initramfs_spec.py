@@ -76,8 +76,10 @@ def validate_init(path: Path) -> dict:
 
 
 def generate_spec(init_binary: Path, out_file: Path) -> dict:
+    # Check the supplied path before resolving it, otherwise a symlink could
+    # bypass validate_init()'s explicit file-origin check.
+    info = validate_init(init_binary)
     image = init_binary.resolve(strict=True)
-    info = validate_init(image)
     # gen_init_cpio's file lines do not support shell quoting; refuse spaces
     # and newlines rather than produce an ambiguous or unsafe archive recipe.
     if any(c.isspace() for c in str(image)):
