@@ -971,98 +971,147 @@ static int64_t mono_ns(void)
 	return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
+#define VSYNC_REOPEN_NS 2000000000LL
+#define VSYNC_MAX_AGE_NS (3 * VSYNC_PERIOD_NS)
+#define VSYNC_BAD_LIMIT 3
+
+/* Sysfs returns a decimal CLOCK_MONOTONIC timestamp, optionally with newline. */
+static int64_t parse_vsync(const char *buf)
+{
+	char *end;
+	if (*buf < '0' || *buf > '9')
+		return 0;
+	errno = 0;
+	long long value = strtoll(buf, &end, 10);
+	if (errno == ERANGE || value <= 0)
+		return 0;
+	if (*end == '\n')
+		end++;
+	return *end ? 0 : value;
+}
+
 static int64_t read_hw_vsync(int fd)
 {
 	char buf[32];
 	ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
-	if (n <= 0)
+	if (n <= 0 || n == sizeof(buf) - 1 || memchr(buf, 0, (size_t)n))
 		return 0;
 	buf[n] = 0;
-	return strtoll(buf, NULL, 10);
+	return parse_vsync(buf);
+}
+
+static int fresh_vsync(int64_t hw, int64_t now)
+{
+	return hw > 0 && hw <= now && now - hw <= VSYNC_MAX_AGE_NS;
+}
+
+/* Prefer the latest valid hardware phase; after a long gap, skip missed
+ * periods rather than replaying old callbacks. Always advance last_sent. */
+static int64_t next_vsync(int64_t now, int64_t last_hw, int64_t last_sent)
+{
+	int64_t base = last_hw > 0 && last_hw <= now ? last_hw : last_sent;
+	if (base <= 0 || base > now)
+		base = now;
+	int64_t target = now - (now - base) % VSYNC_PERIOD_NS;
+	if (target <= last_sent + VSYNC_PERIOD_NS / 2 || target < now)
+		target += VSYNC_PERIOD_NS;
+	return target;
 }
 
 static void *vsync_loop(void *arg)
 {
 	struct r800_hwc *h = arg;
-	int vfd = open(R800_VSYNC_NODE, O_RDONLY | O_CLOEXEC);
-	int64_t last_hw = 0, last_sent = 0;
+	int vfd = -1, bad = 0;
+	int64_t last_hw = 0, last_sent = 0, reopen_at = 0;
 	unsigned long hw_count = 0, sw_count = 0;
 
-	if (vfd < 0)
-		LOGE("vsync: %s: %s, timer vsync only", R800_VSYNC_NODE, strerror(errno));
-	else
-		last_hw = read_hw_vsync(vfd);   /* arms POLLPRI */
-
 	while (!atomic_load(&h->stopping)) {
-		int64_t ts = 0, now;
-
 		pthread_mutex_lock(&h->lock);
 		while (!h->vsync_enabled && !atomic_load(&h->stopping))
 			pthread_cond_wait(&h->cond, &h->lock);
 		pthread_mutex_unlock(&h->lock);
 		if (atomic_load(&h->stopping))
 			break;
-		{
-			static unsigned long wakes;
-			if (wakes++ < 8)
-				LOGI("vsync thread awake (vfd %d last_hw %lld now %lld)", vfd,
-				     (long long)last_hw, (long long)mono_ns());
-		}
 
-		if (vfd >= 0) {
-			/* up to ~1.3 periods for the next TE */
-			struct pollfd p = { .fd = vfd, .events = POLLPRI | POLLERR };
-			int pr = poll(&p, 1, 22);
-			{
-				static unsigned long polls;
-				if (polls++ < 12)
-					LOGI("vsync poll %d revents %#x", pr, p.revents);
+		int64_t now = mono_ns(), ts = 0;
+		if (vfd < 0 && now >= reopen_at) {
+			reopen_at = now + VSYNC_REOPEN_NS;
+			vfd = open(R800_VSYNC_NODE, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+			if (vfd >= 0) {
+				/* Arm POLLPRI and re-enable TE notifications after rebind.
+				 * The pinned DECON setter is idempotent for equal states. */
+				(void)read_hw_vsync(vfd);
+				pthread_mutex_lock(&h->lock);
+				if (h->vsync_enabled && !atomic_load(&h->stopping)) {
+					uint32_t on = 1;
+					ioctl(h->fb_fd, R800_S3CFB_SET_VSYNC_INT, &on);
+				}
+				pthread_mutex_unlock(&h->lock);
+				last_hw = 0;
+				bad = 0;
 			}
+		}
+		now = mono_ns();
+		int64_t target = next_vsync(now, last_hw, last_sent);
+		if (vfd >= 0) {
+			struct pollfd p = { .fd = vfd, .events = POLLPRI | POLLERR };
+			int timeout = (int)((target - now + 999999) / 1000000);
+			int pr = poll(&p, 1, timeout);
+			int lost = pr < 0 && errno != EINTR;
 			if (pr > 0) {
-				int64_t hw = read_hw_vsync(vfd);
-				{
-					static unsigned long reads;
-					if (reads++ < 12)
-						LOGI("vsync read %lld (last %lld)", (long long)hw, (long long)last_hw);
+				/* POLLPRI|POLLERR together is normal for sysfs_notify. */
+				if (p.revents & (POLLHUP | POLLNVAL)) {
+					lost = 1;
+				} else if (p.revents & (POLLPRI | POLLERR)) {
+					int64_t hw = read_hw_vsync(vfd);
+					if (fresh_vsync(hw, mono_ns()) && hw > last_hw) {
+						last_hw = hw;
+						bad = 0;
+						if (hw > last_sent + VSYNC_PERIOD_NS / 2)
+							ts = hw;
+					} else if (++bad >= VSYNC_BAD_LIMIT) {
+						lost = 1;
+					}
 				}
-				if (hw > last_hw) {
-					last_hw = hw;
-					/* a timer vsync just covered this refresh */
-					if (hw > last_sent + VSYNC_PERIOD_NS / 2)
-						ts = hw;
-				}
-				if (ts)
-					hw_count++;
-				else
-					continue;
+			}
+			if (lost) {
+				close(vfd);
+				vfd = -1;
+				reopen_at = mono_ns() + VSYNC_REOPEN_NS;
+				LOGW("vsync node lost; using timer until reopen");
 			}
 		}
 
 		if (!ts) {
-			/* no TE: next point on the last real vsync's grid */
-			int64_t base = last_hw ? last_hw : (last_sent ? last_sent : mono_ns());
-			int64_t k;
+			/* Even duplicate TE or persistent POLLERR must not starve
+			 * software callbacks. Use the deadline computed before poll. */
+			struct timespec t = { (time_t)(target / 1000000000LL),
+					      (long)(target % 1000000000LL) };
+			int rc;
+			do {
+				rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+			} while (rc == EINTR && !atomic_load(&h->stopping));
+			if (rc || atomic_load(&h->stopping))
+				continue;
 			now = mono_ns();
-			k = (now - base) / VSYNC_PERIOD_NS + 1;
-			ts = base + k * VSYNC_PERIOD_NS;
-			if (ts <= last_sent + VSYNC_PERIOD_NS / 2)
-				ts += VSYNC_PERIOD_NS;
-			{
-				struct timespec t = { (time_t)(ts / 1000000000LL), (long)(ts % 1000000000LL) };
-				clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
-			}
+			if (now < target)
+				continue;
+			/* If scheduling was delayed, emit only the newest grid point. */
+			ts = now - (now - target) % VSYNC_PERIOD_NS;
 			sw_count++;
+		} else {
+			hw_count++;
 		}
 
-		if (hw_count + sw_count <= 6)
-			LOGI("vsync #%lu: %s ts=%lld", hw_count + sw_count,
-			     sw_count && ts != last_hw ? "filled" : "TE", (long long)ts);
-		last_sent = ts;
+		if (ts <= last_sent)
+			continue;
 		pthread_mutex_lock(&h->lock);
 		const hwc_procs_t *procs = h->vsync_enabled && !atomic_load(&h->stopping) ? h->procs : NULL;
 		pthread_mutex_unlock(&h->lock);
-		if (procs && procs->vsync)
+		if (procs && procs->vsync) {
+			last_sent = ts;
 			procs->vsync(procs, 0, ts);
+		}
 		if (((hw_count + sw_count) & 1023) == 0)
 			LOGI("vsync: %lu from TE, %lu filled in", hw_count, sw_count);
 	}
