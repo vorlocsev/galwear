@@ -323,6 +323,7 @@ static int flush_pending[N_HANDLES];
 /* context sensor state (lock) */
 static int ctx_enabled[N_HANDLES];
 static float offbody_state = 1.0f;   /* last known: 1 on body, 0 off */
+static int offbody_known;           /* do not invent a wear state before first report */
 static int offbody_report;           /* report the current state on next poll */
 /* steps: the counter is monotonic since the HAL started; a smaller hub total
    means the pedometer restarted from 0, so its last total goes into the base */
@@ -332,7 +333,9 @@ static int step_report[N_HANDLES];   /* counter handles: report on next poll */
 static int step_detect_pending;      /* step detector events still to deliver */
 static int ctx_fd = -1, ctx_wfd = -1;
 static char ctx_buf[256];
-static int ctx_len;
+static int ctx_len, ctx_discard;
+#define STEP_PENDING_MAX 64
+#define CTX_READ_BUDGET 4096
 
 /*
  * Heart rate in bursts. Fit's "Background heart rate" has Play Services record
@@ -603,8 +606,8 @@ static int dev_activate(struct sensors_poll_device_t *dev, int handle, int enabl
 		pthread_mutex_lock(&lock);
 		ctx_enabled[handle] = !!enabled;
 		/* on-change: deliver the current state right after activation */
-		if (handle == H_OFFBODY && enabled)
-			offbody_report = 1;
+		if (handle == H_OFFBODY)
+			offbody_report = enabled && offbody_known;
 		/* on-change: the current total right away (0 before any step) */
 		if ((handle == H_STEP_COUNTER || handle == H_STEP_COUNTER_WAKE) && enabled)
 			step_report[handle] = 1;
@@ -805,7 +808,7 @@ static void ctx_open(void)
 	if (ctx_fd < 0)
 		return;
 	ctx_wfd = open(CTX_FIFO, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-	ctx_len = 0;
+	ctx_len = ctx_discard = 0;
 	LOGI("context fifo open (%d/%d)", ctx_fd, ctx_wfd);
 }
 
@@ -844,59 +847,86 @@ static void step_drain(sensors_event_t *data, int count, int *n_out)
 	}
 }
 
-/* parse complete lines from the context FIFO into events */
+/* Exact protocol: W/D timestamp, O wear state, P nonnegative step total. */
+static int parse_context_line(const char *line, long long *value)
+{
+	if (!line[0] || line[1] != ' ' ||
+	    (line[0] != 'W' && line[0] != 'D' && line[0] != 'O' && line[0] != 'P'))
+		return -EINVAL;
+	int r = parse_enable_mask(line + 2, value);
+	if (r)
+		return r;
+	if (line[0] == 'O' && *value != 1 && *value != 2)
+		return -EINVAL;
+	return line[0];
+}
+
+static uint64_t step_add(uint64_t a, uint64_t b)
+{
+	return b > UINT64_MAX - a ? UINT64_MAX : a + b;
+}
+
+/* caller holds lock */
+static void ctx_line(const char *line, sensors_event_t *data, int count, int *n_out)
+{
+	long long raw;
+	int kind = parse_context_line(line, &raw);
+	if (kind == 'W' && ctx_enabled[H_WRIST_TILT])
+		ctx_event(&data[(*n_out)++], H_WRIST_TILT, 1.0f);
+	else if (kind == 'D' && ctx_enabled[H_UNGAZE])
+		ctx_event(&data[(*n_out)++], H_UNGAZE, 1.0f);
+	else if (kind == 'O') {
+		float st = raw == 1 ? 1.0f : 0.0f;
+		int changed = !offbody_known || st != offbody_state || offbody_report;
+		offbody_known = 1;
+		offbody_state = st;
+		offbody_report = 0;
+		if (changed && ctx_enabled[H_OFFBODY])
+			ctx_event(&data[(*n_out)++], H_OFFBODY, st);
+	} else if (kind == 'P') {
+		int first = step_raw < 0;
+		long long d = first ? 0 : raw >= step_raw ? raw - step_raw : raw;
+		if (!first && raw < step_raw)
+			step_base = step_add(step_base, (uint64_t)step_raw);
+		step_raw = raw;
+		step_total = step_add(step_base, (uint64_t)raw);
+		if (d > 0 || first)
+			for (int h = H_STEP_COUNTER; h <= H_STEP_COUNTER_WAKE; h++)
+				step_report[h] = ctx_enabled[h];
+		if (ctx_enabled[H_STEP_DETECTOR]) {
+			int room = STEP_PENDING_MAX - step_detect_pending;
+			step_detect_pending += d > room ? room : (int)d;
+		}
+		step_drain(data, count, n_out);
+	}
+}
+
+/* Read bounded bytes without consuming later complete records once the
+ * caller's output array fills. Context events are low-rate. Discard an
+ * entire overlong/NUL-containing record, not only its first fragment. */
 static void ctx_read(sensors_event_t *data, int count, int *n_out)
 {
-	ssize_t r;
-	while ((r = read(ctx_fd, ctx_buf + ctx_len, sizeof(ctx_buf) - 1 - ctx_len)) > 0) {
-		ctx_len += r;
-		ctx_buf[ctx_len] = 0;
-		char *line = ctx_buf, *nl;
-		while ((nl = strchr(line, '\n'))) {
-			*nl = 0;
-			pthread_mutex_lock(&lock);
-			if (line[0] == 'W') {
-				if (ctx_enabled[H_WRIST_TILT] && *n_out < count)
-					ctx_event(&data[(*n_out)++], H_WRIST_TILT, 1.0f);
-			} else if (line[0] == 'D') {
-				if (ctx_enabled[H_UNGAZE] && *n_out < count)
-					ctx_event(&data[(*n_out)++], H_UNGAZE, 1.0f);
-			} else if (line[0] == 'O') {
-				/* Samsung wear_on: 1 = worn, 2 = taken off */
-				float st = atoi(line + 1) == 1 ? 1.0f : 0.0f;
-				if (st != offbody_state || offbody_report) {
-					offbody_state = st;
-					offbody_report = 0;
-					if (ctx_enabled[H_OFFBODY] && *n_out < count)
-						ctx_event(&data[(*n_out)++], H_OFFBODY, st);
-				}
-			} else if (line[0] == 'P') {
-				long long raw = atoll(line + 1);
-				if (raw >= 0) {
-					int first = step_raw < 0;
-					long long d = first ? 0 :
-						      raw >= step_raw ? raw - step_raw : raw;
-					if (!first && raw < step_raw)
-						step_base += step_raw;
-					step_raw = raw;
-					step_total = step_base + raw;
-					if (d > 0 || first)
-						for (int h = H_STEP_COUNTER; h <= H_STEP_COUNTER_WAKE; h++)
-							step_report[h] = ctx_enabled[h];
-					/* the hub reports totals, not single steps: one detector
-					   event per new step, capped so a burst can't flood */
-					if (ctx_enabled[H_STEP_DETECTOR])
-						step_detect_pending += d > 64 ? 64 : (int)d;
-					step_drain(data, count, n_out);
-				}
+	for (int budget = CTX_READ_BUDGET; budget > 0 && *n_out < count; budget--) {
+		char ch;
+		ssize_t r = read(ctx_fd, &ch, 1);
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r != 1)
+			break;
+		if (ch == '\n') {
+			if (!ctx_discard) {
+				ctx_buf[ctx_len] = 0;
+				pthread_mutex_lock(&lock);
+				ctx_line(ctx_buf, data, count, n_out);
+				pthread_mutex_unlock(&lock);
 			}
-			pthread_mutex_unlock(&lock);
-			line = nl + 1;
+			ctx_len = ctx_discard = 0;
+		} else if (!ctx_discard) {
+			if (!ch || ctx_len >= (int)sizeof(ctx_buf) - 1)
+				ctx_discard = 1;
+			else
+				ctx_buf[ctx_len++] = ch;
 		}
-		ctx_len -= line - ctx_buf;
-		memmove(ctx_buf, line, ctx_len);
-		if (ctx_len >= (int)sizeof(ctx_buf) - 1)
-			ctx_len = 0; /* garbage without newline */
 	}
 }
 
