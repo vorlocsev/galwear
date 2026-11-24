@@ -16,6 +16,7 @@ import hashlib
 import time
 import argparse
 import r800_safety
+import r800_geometry
 
 # Protocol Constants
 ODIN_PORT = 13579
@@ -202,7 +203,15 @@ def flash_ap_package(ap_path: str, host: str = "0.0.0.0", port: int = ODIN_PORT,
             send_control_packet(sock, CMD_PIT, 3, expect_resp=True)
             pit_map = r800_safety.parse_pit_strict(bytes(pit_data))
             r800_safety.validate_r800_pit(pit_map)
-            print(f"  [+] Successfully parsed device PIT ({len(pit_map)} partition mappings).")
+            # Complete geometry audit before any CMD_FILE_TRANSFER (102).
+            geometry = r800_geometry.parse_pit_geometry(bytes(pit_data))
+            transfer_plan = r800_geometry.plan_image_transfers(geometry, members)
+            print(f"  [+] Live PIT validated ({len(pit_map)} flash-file mappings).")
+            print("  [+] Assumed 512-byte sector geometry / 128-KiB padded-transfer check:")
+            for item in transfer_plan:
+                print(f"      {item['image']}: {item['image_bytes']} bytes "
+                      f"(padded {item['transmitted_padded_bytes']}) / "
+                      f"capacity {item['assumed_partition_bytes']} bytes")
         else:
             raise r800_safety.SafetyError("No valid live PIT; refusing all writes.")
 
