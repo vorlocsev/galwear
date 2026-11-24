@@ -28491,11 +28491,11 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_local.c b/drivers/soc/samsung/cal
  int pmucal_local_is_enabled(unsigned int pd_id)
  {
 -	int i;
-+	int i, ret;
++	int ret;
  
  	dbg_snapshot_pmu(pd_id, __func__, DSS_FLAG_IN);
  
-@@ -140,14 +140,19 @@
+@@ -140,27 +140,21 @@
  		return -EINVAL;
  	}
  
@@ -28507,13 +28507,77 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_local.c b/drivers/soc/samsung/cal
  	}
  
 -	pmucal_rae_handle_seq(pmucal_pd_list[pd_id].status,
-+	ret = pmucal_rae_handle_seq(pmucal_pd_list[pd_id].status,
++	ret = pmucal_rae_read_status(pmucal_pd_list[pd_id].status,
  				pmucal_pd_list[pd_id].num_status);
-+	if (ret) {
-+		pr_err("%s %s: status sequence failed (pd_id:%u, ret:%d)\n",
+-
+-	for (i = 0; i < pmucal_pd_list[pd_id].num_status; i++) {
+-		if (pmucal_pd_list[pd_id].status[i].value !=
+-				pmucal_pd_list[pd_id].status[i].mask)
+-			break;
+-	}
++	if (ret < 0)
++		pr_err("%s %s: status read failed (pd_id:%u, ret:%d)\n",
 +		       PMUCAL_PREFIX, __func__, pd_id, ret);
-+		return ret < 0 ? ret : -EIO;
-+	}
  
- 	for (i = 0; i < pmucal_pd_list[pd_id].num_status; i++) {
- 		if (pmucal_pd_list[pd_id].status[i].value !=
+ 	dbg_snapshot_pmu(pd_id, __func__, DSS_FLAG_OUT);
+ 
+-	if (i == pmucal_pd_list[pd_id].num_status)
+-		return 1;
+-	else
+-		return 0;
++	return ret;
+ }
+ 
+ void pmucal_local_set_smc_id(unsigned int pd_id, unsigned int need_smc)
+diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-if/pmucal_rae.c
+--- a/drivers/soc/samsung/cal-if/pmucal_rae.c
++++ b/drivers/soc/samsung/cal-if/pmucal_rae.c
+@@ -128,6 +128,37 @@
+ 	seq->value = (reg & seq->mask);
+ }
+ 
++/*
++ * Local power-domain status tables must consist of unconditional reads.
++ * Validate the whole table before accessing MMIO; never reuse seq->value.
++ * The mapping created by pmucal_rae_init spans SZ_64K per base.
++ */
++int pmucal_rae_read_status(const struct pmucal_seq *seq, unsigned int seq_size)
++{
++	unsigned int i;
++	bool enabled = true;
++
++	if (!seq || !seq_size)
++		return -EINVAL;
++	for (i = 0; i < seq_size; i++) {
++		if (seq[i].access_type != PMUCAL_READ || !seq[i].mask)
++			return -EINVAL;
++		if (!seq[i].base_pa || !seq[i].base_va)
++			return -ENXIO;
++		if ((seq[i].offset & 3) || seq[i].offset > SZ_64K - sizeof(u32))
++			return -EINVAL;
++	}
++
++	for (i = 0; i < seq_size; i++) {
++		u32 value = __raw_readl(seq[i].base_va + seq[i].offset);
++
++		if ((value & seq[i].mask) != seq[i].mask)
++			enabled = false;
++	}
++
++	return enabled ? 1 : 0;
++}
++
+ static inline void pmucal_rae_write(struct pmucal_seq *seq)
+ {
+ 	if (seq->mask == U32_MAX)
+diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.h b/drivers/soc/samsung/cal-if/pmucal_rae.h
+--- a/drivers/soc/samsung/cal-if/pmucal_rae.h
++++ b/drivers/soc/samsung/cal-if/pmucal_rae.h
+@@ -16,6 +16,7 @@
+ /* APIs to be supported to PMUCAL common logics */
+ extern int pmucal_rae_init(void);
+ extern int pmucal_rae_handle_seq(struct pmucal_seq *seq, unsigned int seq_size);
++extern int pmucal_rae_read_status(const struct pmucal_seq *seq, unsigned int seq_size);
+ extern int pmucal_rae_handle_cp_seq(struct pmucal_seq *seq, unsigned int seq_size);
+ extern int pmucal_rae_handle_gnss_seq(struct pmucal_seq *seq, unsigned int seq_size);
+ extern int pmucal_rae_handle_shub_seq(struct pmucal_seq *seq, unsigned int seq_size);
