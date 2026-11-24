@@ -23,7 +23,7 @@ cd "$KT"
   echo "kernel SHA differs from pinned base; patch generation refused"; exit 2; }
 old=$(grep '^diff --git' "$REPO/src/kernel/r800-wearos.patch" | awk '{print $3}' | sed 's|^a/||')
 old=$(printf '%s
-' $old $EXTRA | sort -u)
+' $old ${EXTRA:-} | sort -u)
 new=$(git ls-files -o --exclude-standard $NEW_DIRS)
 [ -n "$new" ] && git add -N $new
 git -c core.autocrlf=false diff $BASE -- $old $new > "$OUT"
