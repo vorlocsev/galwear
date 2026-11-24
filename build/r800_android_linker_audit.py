@@ -102,7 +102,7 @@ def directories(abi):
             f"/apex/com.android.runtime/{lib}/bionic"]
 
 
-def audit(root: Path, targets=TARGETS) -> dict:
+def audit(root: Path, targets=TARGETS, extra_arm_dirs=()) -> dict:
     queue = list(targets)
     seen, errors, unresolved, ambiguous = {}, [], [], []
     while queue:
@@ -121,7 +121,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
         seen[name] = info
         for dep in info["needed"]:
             candidates = {}
-            for directory in directories(info["abi"]):
+            for directory in directories(info["abi"]) + (list(extra_arm_dirs) if info["abi"] == "arm" else []):
                 path = directory + "/" + dep
                 try:
                     resolved = guest_path(root, path)
