@@ -16,15 +16,29 @@
 # p15 csc.img, p17 user.img, p18 rootfs.img, plus the combination's own
 # sboot, param, ramdisks, system-data (p16) and NAD. The factory CSA (p1:
 # Bluetooth/Wi-Fi addresses) and CM (p10) are never written.
-set -e
+set -eu
+[ "$#" -eq 2 ] || { echo "usage: $0 <release tree> <work dir>"; exit 2; }
 REL=$1; W=$2
+# Later loop/mount commands in this legacy script are not fully quoted.
+# Refuse unsupported whitespace in paths instead of silently writing elsewhere.
+case "$REL:$W" in
+    *" "*|*"	"*) echo "release/work paths must not contain whitespace"; exit 2;;
+esac
 I=$REL/images
-[ -f $I/payload.tar ] && [ -f $I/vendor.img ] && [ -f $I/boot/r800-boot.img ] || {
+[ -f "$I/payload.tar" ] && [ -f "$I/vendor.img" ] && [ -f "$I/boot/r800-boot.img" ] || {
     echo "usage: $0 <release tree> <work dir> (images/ incomplete)"; exit 2; }
 COMBO=$I/samsung/COMBINATION-FT40_R800XXU1ARI2_noCM.tar.md5
 SIG=272      # Samsung signature block appended to each image
-mkdir -p $W/combo $W/out $W/mnt
-[ -f $W/combo/user.img ] || tar -C $W/combo -xf $COMBO
+mkdir -p "$W/combo" "$W/out" "$W/mnt"
+
+# Fail before extracting archives or mounting loop devices. The manifest is a
+# SHA-256 snapshot for later comparison, NOT proof of Samsung/Google provenance.
+AUDIT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/../installer/r800_build_provenance.py
+python3 "$AUDIT" preflight --release-tree "$REL" \
+    --report "$W/r800-build-inputs.json"
+
+# Never reuse an unpacked combination cache from an older firmware build.
+tar -C "$W/combo" -xf "$COMBO"
 O=$W/out; M=$W/mnt
 
 # ext4 image of the combination, without its signature, grown to $2 bytes
@@ -78,5 +92,11 @@ PKG=$I/R800-WearOS.tar.md5
     rootfs.img system-data.img user.img csc.img nad_refer.bin nad_fw.bin )
 cp $W/R800-WearOS.tar $PKG
 echo "$(md5sum $W/R800-WearOS.tar | cut -d' ' -f1)  R800-WearOS.tar" >> $PKG
+
+# Hash all inputs again and verify the actual output/recovery against the
+# reference before marking the local build structurally complete.
+python3 "$AUDIT" finalize --release-tree "$REL" \
+    --input-manifest "$W/r800-build-inputs.json" \
+    --report "$I/R800-WearOS.build-evidence.json"
 ls -l $O
 echo "package: $(du -h $PKG | cut -f1) -> $PKG"
