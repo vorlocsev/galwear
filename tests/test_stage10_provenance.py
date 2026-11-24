@@ -201,6 +201,37 @@ class Stage10Tests(unittest.TestCase):
         for marker in ("SLEEP", "CPUIDLE_DEEP", "DEV", "STAY", "OVERLAY"):
             self.assertIn(marker, script)
 
+    def test_inventory_includes_additional_vendor_source_file(self):
+        extra = self.dir / "src" / "vendor" / "experimental.c"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text("int dummy = 1;\n")
+        result = provenance.prebuild(self.dir)
+        self.assertIn("src/vendor/experimental.c", result["sources"])
+        self.assertEqual(result["sources"]["src/vendor/experimental.c"]["size_bytes"], extra.stat().st_size)
+
+    def test_inventory_detects_new_source_added_mid_build(self):
+        before = provenance.prebuild(self.dir)
+        extra = self.dir / "src" / "hal" / "new_driver.c"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text("int new_driver = 1;\n")
+        with self.assertRaisesRegex(SafetyError, "changed since preflight"):
+            provenance.finalize(self.dir, before)
+
+    def test_missing_closed_vendor_image_refused(self):
+        (self.images / "vendor.img").unlink()
+        with self.assertRaises(SafetyError):
+            provenance.prebuild(self.dir)
+
+    def test_source_symlink_is_refused(self):
+        original = self.dir / "src" / "kernel" / "link.c"
+        original.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            original.symlink_to("/etc/passwd")
+        except (NotImplementedError, OSError):
+            self.skipTest("Fixture platform does not support symlinks")
+        with self.assertRaisesRegex(SafetyError, "Symlink in source inventory"):
+            provenance.prebuild(self.dir)
+
 
 if __name__ == "__main__":
     unittest.main()
