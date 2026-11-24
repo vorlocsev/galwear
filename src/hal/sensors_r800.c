@@ -1122,7 +1122,7 @@ static int poll_events(sensors_event_t *data, int count)
 		/* until the helper has made the FIFO, look for it every 5 s */
 		int tmo = ctx_fd >= 0 ? -1 : 5000;
 		pthread_mutex_lock(&lock);
-		int ht = hr_timeout_ms(now_ns());
+		int ht = input_restore_pending ? -1 : hr_timeout_ms(now_ns());
 		pthread_mutex_unlock(&lock);
 		if (recover_tmo >= 0 && (tmo < 0 || recover_tmo < tmo))
 			tmo = recover_tmo;
@@ -1135,7 +1135,8 @@ static int poll_events(sensors_event_t *data, int count)
 			pthread_mutex_unlock(&lock);
 			return -ENODEV;
 		}
-		hr_tick(now_ns());
+		if (!input_restore_pending)
+			hr_tick(now_ns());
 		pthread_mutex_unlock(&lock);
 		if (pr < 0) {
 			if (poll_errno == EINTR)
@@ -1195,10 +1196,10 @@ static int poll_events(sensors_event_t *data, int count)
 					} else if (ie[j].type == EV_SYN && ie[j].code == SYN_REPORT) {
 						int on;
 						pthread_mutex_lock(&lock);
-						on = s->enabled;
+						on = s->enabled && !input_restore_pending;
 						/* burst mode: only the first settled reading (v = bpm + 1),
 						   which also ends the burst */
-						if (s->handle == H_HR && hr_bg) {
+						if (s->handle == H_HR && hr_bg && !input_restore_pending) {
 							int64_t t = now_ns();
 							on = hr_burst_start && !hr_stop_retry && s->v[0] > 1 &&
 							     t - hr_burst_start >= HR_SETTLE_NS;
