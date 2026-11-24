@@ -1,0 +1,24 @@
+name: SM-R800 display power policy (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-display-power-policy-20261125
+    paths:
+      - .github/workflows/r800-display-power-policy.yml
+      - payload/android-helper.sh
+      - build/mkpayload-release.sh
+      - tests/test_display_power_policy.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-power-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Display, ABOX and existing power regression tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_display_power_policy.py' -v
+          python3 -m unittest discover -s tests -p 'test_power_policy.py' -v
+          python3 -m unittest discover -s tests -p 'test_display_watchdog.py' -v
