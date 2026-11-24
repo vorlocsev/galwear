@@ -131,6 +131,7 @@ struct r800_audio_device {
     volatile int hfp_volume;      /* 0..15 from the HFP client */
     volatile int64_t hfp_dl_loud_ns; /* last time the phone's audio was loud */
     pthread_t hfp_dl, hfp_ul;
+    struct pcm *hfp_pcm[4];
 };
 
 struct r800_stream_out {
@@ -578,13 +579,13 @@ static const struct {
     { 4, PCM_OUT },   /* RDMA4 -> SIFS0 -> UAIF0: speaker */
 };
 #define HFP_N_STREAMS (sizeof(hfp_streams) / sizeof(hfp_streams[0]))
-static struct pcm *hfp_pcm[HFP_N_STREAMS];
+static void hfp_stop(struct r800_audio_device *adev);
 
 /* call with adev->lock held */
-static void hfp_start(struct r800_audio_device *adev)
+static int hfp_start(struct r800_audio_device *adev)
 {
     if (adev->hfp_active)
-        return;
+        return 0;
     bool wb = adev->hfp_rate == 16000;
     int rate = wb ? 16000 : 8000;
     int dac = prop_int("vendor.audio.r800.call_dac", 164, 0, 234);
@@ -646,7 +647,17 @@ static void hfp_start(struct r800_audio_device *adev)
     };
     struct pcm_config cfg;
 
-    adev->hfp_active = true;   /* streams now leave the speaker/mic alone */
+    /* Device lock is held: take stream locks in a fixed order. The media
+     * paths never acquire the device lock while holding a stream lock. */
+    if (adev->out)
+        pthread_mutex_lock(&adev->out->lock);
+    if (adev->in)
+        pthread_mutex_lock(&adev->in->lock);
+    if (adev->out)
+        do_standby(adev->out);
+    if (adev->in)
+        in_do_standby(adev->in);
+    adev->hfp_active = true;   /* reserve routing until start or rollback */
     apply_mixer(route, sizeof(route) / sizeof(route[0]));
 
     /* Tizen's pcm_config_bt_companion_call_*: 48 kHz stereo, 960 x 4,
@@ -661,17 +672,36 @@ static void hfp_start(struct r800_audio_device *adev)
     cfg.stop_threshold = 0xffffffff;
     for (size_t i = 0; i < HFP_N_STREAMS; i++) {
         struct pcm *p = pcm_open(CARD, hfp_streams[i].dev, hfp_streams[i].flags, &cfg);
-        if (!pcm_is_ready(p)) {
-            LOGE("hfp: pcm_open(%d): %s", hfp_streams[i].dev, pcm_get_error(p));
-            pcm_close(p);
-            p = NULL;
-        } else if (pcm_prepare(p) < 0 || pcm_start(p) < 0) {  /* tinyalsa 2.0 start doesn't prepare */
-            LOGE("hfp: pcm_start(%d): %s", hfp_streams[i].dev, pcm_get_error(p));
+        if (!p || !pcm_is_ready(p)) {
+            LOGE("hfp: pcm_open(%d): %s", hfp_streams[i].dev,
+                 p ? pcm_get_error(p) : "no handle");
+            if (p)
+                pcm_close(p);
+            goto fail;
         }
-        hfp_pcm[i] = p;
+        if (pcm_prepare(p) < 0 || pcm_start(p) < 0) {
+            LOGE("hfp: pcm_start(%d): %s", hfp_streams[i].dev, pcm_get_error(p));
+            pcm_close(p);
+            goto fail;
+        }
+        adev->hfp_pcm[i] = p;
     }
+    if (adev->in)
+        pthread_mutex_unlock(&adev->in->lock);
+    if (adev->out)
+        pthread_mutex_unlock(&adev->out->lock);
     LOGI("hfp: call audio on (DSP call mode), SCO %d Hz, volume %d, DAC %d", rate,
          adev->hfp_volume, dac);
+    return 0;
+
+fail:
+    /* No partial HFP session may retain the route or PCM handles. */
+    if (adev->in)
+        pthread_mutex_unlock(&adev->in->lock);
+    if (adev->out)
+        pthread_mutex_unlock(&adev->out->lock);
+    hfp_stop(adev);
+    return -EIO;
 }
 
 /* call with adev->lock held */
@@ -679,11 +709,15 @@ static void hfp_stop(struct r800_audio_device *adev)
 {
     if (!adev->hfp_active)
         return;
+    if (adev->out)
+        pthread_mutex_lock(&adev->out->lock);
+    if (adev->in)
+        pthread_mutex_lock(&adev->in->lock);
     for (int i = HFP_N_STREAMS - 1; i >= 0; i--) {
-        if (hfp_pcm[i]) {
-            pcm_stop(hfp_pcm[i]);
-            pcm_close(hfp_pcm[i]);
-            hfp_pcm[i] = NULL;
+        if (adev->hfp_pcm[i]) {
+            pcm_stop(adev->hfp_pcm[i]);
+            pcm_close(adev->hfp_pcm[i]);
+            adev->hfp_pcm[i] = NULL;
         }
     }
     const struct mix_setting route_off[] = {
@@ -707,6 +741,10 @@ static void hfp_stop(struct r800_audio_device *adev)
         apply_mixer(spk_off, sizeof(spk_off) / sizeof(spk_off[0]));
     if (!adev->in || adev->in->standby)
         apply_mixer(mic_off, sizeof(mic_off) / sizeof(mic_off[0]));
+    if (adev->in)
+        pthread_mutex_unlock(&adev->in->lock);
+    if (adev->out)
+        pthread_mutex_unlock(&adev->out->lock);
     LOGI("hfp: call audio off");
 }
 
@@ -889,16 +927,23 @@ static int adev_set_parameters(struct audio_hw_device *dev, const char *kv)
 {
     struct r800_audio_device *adev = (struct r800_audio_device *)dev;
     char v[16];
+    int ret = 0;
 
     LOGI("set_parameters '%s'", kv);
     pthread_mutex_lock(&adev->lock);
     if (kv_get(kv, "hfp_set_sampling_rate", v, sizeof(v))) {
-        int rate = atoi(v);
+        int rate = !strcmp(v, "8000") ? 8000 : !strcmp(v, "16000") ? 16000 : 0;
+        if (!rate) {
+            ret = -EINVAL;
+            goto done;
+        }
         if (rate != adev->hfp_rate) {
             adev->hfp_rate = rate;
             if (adev->hfp_active) {   /* codec renegotiated mid-call */
                 hfp_stop(adev);
-                hfp_start(adev);
+                ret = hfp_start(adev);
+                if (ret)
+                    goto done;
             }
         }
     }
@@ -906,12 +951,15 @@ static int adev_set_parameters(struct audio_hw_device *dev, const char *kv)
         adev->hfp_volume = atoi(v);
     if (kv_get(kv, "hfp_enable", v, sizeof(v))) {
         if (!strcmp(v, "true"))
-            hfp_start(adev);
-        else
+            ret = hfp_start(adev);
+        else if (!strcmp(v, "false"))
             hfp_stop(adev);
+        else
+            ret = -EINVAL;
     }
+done:
     pthread_mutex_unlock(&adev->lock);
-    return 0;
+    return ret;
 }
 
 static char *adev_get_parameters(const struct audio_hw_device *dev, const char *keys)
