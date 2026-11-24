@@ -1,0 +1,23 @@
+name: SM-R800 offline boot and recovery comparison
+
+on:
+  push:
+    branches:
+      - "hardening/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recovery-audit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Python syntax
+        run: python3 -m py_compile installer/r800_safety.py installer/r800_recovery_audit.py
+      - name: Test synthetic bootloader, recovery and archive validation
+        run: python3 -m unittest discover -s tests -p 'test_recovery_audit.py' -v
+      - name: Recheck installer tests
+        run: python3 -m unittest discover -s tests -p 'test_installer_guard.py' -v
