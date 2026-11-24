@@ -10,6 +10,8 @@ on:
       - "build/r800_kernel_preflight.py"
       - "build/r800_kernel_compile_smoke.sh"
       - "build/r800_embedded_initramfs_config.py"
+      - "build/r800_cpio_audit.py"
+      - "tests/test_cpio_audit.py"
       - "build/r800_initramfs_spec.py"
       - "build/r800_initramfs_compile_smoke.sh"
       - "tests/test_embedded_initramfs.py"
@@ -34,6 +36,8 @@ jobs:
           sh -n build/r800_kernel_compile_smoke.sh
           sh -n build/r800_initramfs_compile_smoke.sh
           python3 -m py_compile build/r800_embedded_initramfs_config.py
+          python3 -m py_compile build/r800_cpio_audit.py
+          python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
           python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
 
@@ -91,6 +95,11 @@ jobs:
             else
               echo "embedded_spec_gate_report_present=false"
             fi
+            if [ -f "$RUNNER_TEMP/r800-embedded-kernel/embedded-cpio-audit.json" ]; then
+              echo "cpio_byte_comparison_report_present=true"
+            else
+              echo "cpio_byte_comparison_report_present=false"
+            fi
           } > "$RUNNER_TEMP/r800-embedded-build-evidence.txt"
 
       - name: Upload text/JSON build evidence only (never device binaries)
@@ -103,5 +112,6 @@ jobs:
             ${{ runner.temp }}/r800-embedded-source-preflight.json
             ${{ runner.temp }}/r800-embedded-initramfs/initramfs-evidence.json
             ${{ runner.temp }}/r800-embedded-kernel/embedded-initramfs-gate.json
+            ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
           if-no-files-found: warn
           retention-days: 7
