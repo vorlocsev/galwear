@@ -1,0 +1,23 @@
+name: SM-R800 health context recovery (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-health-context-20261125
+    paths:
+      - .github/workflows/r800-health-context.yml
+      - src/hal/sensors_r800.c
+      - tests/test_health_context.py
+      - tests/test_sensor_event_recovery.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-health-context:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Health context and SSP regression tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_health_context.py' -v
+          python3 -m unittest discover -s tests -p 'test_sensor_event_recovery.py' -v
