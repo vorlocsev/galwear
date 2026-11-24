@@ -1,0 +1,50 @@
+name: SM-R800 minimal initramfs compile (non-release)
+
+on:
+  push:
+    branches:
+      - "development/r800-kernel-source-ci-20261124"
+    paths:
+      - ".github/workflows/r800-initramfs-smoke.yml"
+      - "build/r800_initramfs_spec.py"
+      - "build/r800_initramfs_compile_smoke.sh"
+      - "tests/test_initramfs_recipe.py"
+      - "src/initramfs/init.c"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  aarch64-initramfs-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify synthetic ELF checks and deterministic list
+        run: |
+          python3 -m py_compile build/r800_initramfs_spec.py
+          sh -n build/r800_initramfs_compile_smoke.sh
+          python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
+
+      - name: Compile freestanding AArch64 init (no kernel, no firmware)
+        run: |
+          docker run --rm --pull=always \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache clang19=19.1.4-r0 lld=19.1.4-r0 \
+                python3 llvm19=19.1.4-r1
+              sh /repo/build/r800_initramfs_compile_smoke.sh \
+                /repo /scratch/r800-initramfs
+            '
+
+      - name: Archive evidence only (never init executable)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-initramfs-evidence
+          path: ${{ runner.temp }}/r800-initramfs/initramfs-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
