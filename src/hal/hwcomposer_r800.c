@@ -71,48 +71,7 @@ static void hlog(int prio, const char *fmt, ...)
  * encodes sizeof(struct r800_win_config_data), so a layout mismatch fails
  * with ENOTTY and we fall back to the CPU copy.
  */
-#define R800_MAX_DECON_WIN	3
-#define R800_WIN_STATE_DISABLED	0
-#define R800_WIN_STATE_BUFFER	2
-#define R800_FMT_RGBA_8888	2
-#define R800_BLENDING_NONE	0
-
-struct r800_win_rect { int x, y; uint32_t w, h; };
-struct r800_frame { int x, y; uint32_t w, h, f_w, f_h; };
-struct r800_dpp_params {
-	uint64_t addr[3];
-	int rot, eq_mode, comp_src, hdr_std;
-	uint32_t min_luminance, max_luminance;
-};
-struct r800_win_config {
-	int state;
-	union {
-		uint32_t color;
-		struct {
-			int fd_idma[3];
-			int acq_fence;
-			int rel_fence;
-			int plane_alpha;
-			int blending;
-			uint32_t channel;
-			int format;
-			struct r800_dpp_params dpp_parm;
-			struct r800_win_rect block_area;
-			struct r800_win_rect transparent_area;
-			struct r800_win_rect opaque_area;
-			struct r800_frame src;
-		};
-	};
-	struct r800_frame dst;
-	_Bool protection;
-	_Bool compression;
-};
-struct r800_win_config_data {
-	int retire_fence;
-	int fd_odma;
-	struct r800_win_config config[R800_MAX_DECON_WIN + 1];
-};
-#define R800_S3CFB_WIN_CONFIG _IOW('F', 209, struct r800_win_config_data)
+#include "r800_decon_abi.h"
 
 struct r800_hwc {
 	hwc_composer_device_1_t base;      /* must be first */
