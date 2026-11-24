@@ -1,0 +1,20 @@
+name: SM-R800 sensor event recovery (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-sensor-event-recovery-20261125
+    paths:
+      - .github/workflows/r800-sensor-event-recovery.yml
+      - src/hal/sensors_r800.c
+      - tests/test_sensor_event_recovery.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-sensor-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile SSP mask and evdev recovery fixtures
+        run: python3 -m unittest discover -s tests -p 'test_sensor_event_recovery.py' -v
