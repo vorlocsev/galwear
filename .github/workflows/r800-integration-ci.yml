@@ -119,3 +119,62 @@ jobs:
     uses: ./.github/workflows/r800-kernel-repeatability.yml
     with:
       single_build: ${{ github.event_name != 'workflow_dispatch' || !inputs.kernel_repeatability }}
+  full-integration:
+    needs: [integration-evidence, kernel]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: r800-integration-evidence
+          path: ${{ runner.temp }}/hal-proof
+      - uses: actions/download-artifact@v4
+        with:
+          name: r800-image-evidence-a
+          path: ${{ runner.temp }}/kernel-proof
+      - name: Verify the compiled kernel and HAL evidence belong to this attempt
+        run: |
+          PYTHONPATH=build python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          from r800_reproducibility_audit import validate_manifest
+          scratch = Path(os.environ["RUNNER_TEMP"])
+          hal_path = scratch / "hal-proof/integration-evidence.json"
+          kernel_path = scratch / "kernel-proof/r800-image-repeatability.json"
+          hal = json.loads(hal_path.read_text())
+          kernel = json.loads(kernel_path.read_text())
+          validate_manifest(kernel)
+          sha = os.environ["GITHUB_SHA"]
+          run = os.environ["GITHUB_RUN_ID"]
+          attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+          assert hal["schema"] == "galwear-r800-integration-evidence-v1"
+          assert hal["status"] == "HOST_REGRESSION_AND_HAL_LINK_EVIDENCE_MATCH"
+          assert hal["commit"] == kernel["galwear_commit"] == sha
+          assert hal["run_id"] == run and kernel["run_id"] == int(run)
+          assert hal["run_attempt"] == attempt and kernel["run_attempt"] == int(attempt)
+          assert hal["safe_to_flash"] is kernel["safe_to_flash"] is False
+          assert kernel["runner_replica"] == "a"
+          assert kernel["kernel_patch_sha256"] == hashlib.sha256(Path("src/kernel/r800-wearos.patch").read_bytes()).hexdigest()
+          report = {
+              "schema": "galwear-r800-full-integration-v1",
+              "status": "EXACT_HEAD_KERNEL_AND_HAL_BUILD_EVIDENCE_MATCH",
+              "commit": sha, "run_id": run, "run_attempt": attempt,
+              "kernel_compiled": True, "hal_linked": True,
+              "tests_executed": hal["tests_executed"],
+              "kernel_image_sha256": kernel["image_sha256"],
+              "hal_evidence_sha256": hashlib.sha256(hal_path.read_bytes()).hexdigest(),
+              "kernel_evidence_sha256": hashlib.sha256(kernel_path.read_bytes()).hexdigest(),
+              "kernel_boot_tested": False, "android_boot_tested": False,
+              "hardware_tested": False, "safe_to_flash": False,
+          }
+          (scratch / "full-integration.json").write_text(json.dumps(report, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write("Exact-head kernel + four HAL build evidence matched; NON-RELEASE.\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r800-full-integration-evidence
+          path: ${{ runner.temp }}/full-integration.json
+          if-no-files-found: error
+          retention-days: 7
