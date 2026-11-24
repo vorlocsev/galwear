@@ -1,0 +1,21 @@
+name: SM-R800 GNSS recovery (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-gnss-recovery-20261125
+    paths:
+      - .github/workflows/r800-gnss-recovery.yml
+      - src/hal/gps_r800.c
+      - src/tools/gps/gpsbridge.c
+      - tests/test_gnss_recovery.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-gnss-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: GNSS parsing and socket ownership regression tests
+        run: python3 -m unittest discover -s tests -p 'test_gnss_recovery.py' -v
