@@ -712,25 +712,48 @@ H
     # If still no frame since the previous restart, the DECON itself is hung:
     # reboot. Never sync first (a sync blocked forever in hang 3), and stop
     # feeding the hardware dead-man so it resets us if sysrq does not.
-    HWCERR=/dev/r800_hwcerr
-    ( /system/bin/logcat -T 1 -v epoch HWComposer:E '*:S' 2>/dev/null |
-        while read -r ts _; do echo "${ts%%.*}" > $HWCERR; done ) &
-    ( irq() { $B awk '/decon_f/ { print $2; exit }' /proc/interrupts; }
-      d0=$(irq); tframe=$($B date +%s); last=0
+    # If the helper is absent (old payload), skip display recovery rather
+    # than fall back to the unreliable historical IRQ and PID parsing.
+    ( . /oem/r800dev/r800-display-watchdog.sh || exit 0
+      HWCERR=/dev/r800_hwcerr
+      started=$($B date +%s)
+      r800_uint "$started" || exit 0
+      ticks=$(r800_clock_ticks) || { k "display watchdog: CLK_TCK unavailable"; exit 0; }
+      printf '0\n' > "$HWCERR" || exit 0
+      ( /system/bin/logcat -T 1 -v epoch HWComposer:E '*:S' 2>/dev/null |
+        while read -r ts _; do
+            stamp=${ts%%.*}
+            wall=$($B date +%s)
+            r800_uint "$stamp" && r800_uint "$wall" || continue
+            # Ignore historical logcat backlog and future timestamps.
+            [ "$stamp" -ge "$started" ] && [ "$stamp" -le "$wall" ] &&
+                [ "$((wall - stamp))" -le 10 ] || continue
+            observed=$(r800_uptime_seconds /proc/uptime) || continue
+            printf '%s\n' "$observed" > "$HWCERR"
+        done ) &
+      d0=; previous=; previous_birth=; last=0; tframe=0
       while :; do
         $B sleep 3
-        d=$(irq); now=$($B date +%s); e=$($B cat $HWCERR 2>/dev/null || echo 0)
-        [ "$d" != "$d0" ] && tframe=$now
-        d0=$d
-        # grace: a freshly (re)started composer/SF logs errors while it comes up
+        now=$(r800_uptime_seconds /proc/uptime) || { d0=; continue; }
+        d=$(r800_irq_total /proc/interrupts) || { d0=; continue; }
         cp=$($B pidof android.hardware.graphics.composer@2.1-service)
-        cage=$(( $($B cut -d. -f1 /proc/uptime) - $($B cut -d" " -f22 /proc/$cp/stat 2>/dev/null || echo 0) / 100 ))
-        if [ "$e" -ge "$tframe" ] && [ $((now - e)) -ge 5 ] && [ $((now - last)) -ge 60 ] && [ "$cage" -ge 60 ]; then
-            # Zero-copy (the default): a composer restart deadlocks the GPU side
-            # (an app's RenderThread blocks in mmap, no frame ever arrives), so
-            # skip straight to the reboot. debug.r800.zerocopy=0 keeps restarts.
-            zc=$(/system/bin/getprop debug.r800.zerocopy)
-            if { [ $last -gt 0 ] && [ $tframe -le $last ]; } || [ "$zc" != 0 ]; then
+        r800_uint "$cp" && [ "$cp" -gt 0 ] || { d0=; continue; }
+        birth=$(r800_process_start_ticks "/proc/$cp/stat" "$cp") || { d0=; continue; }
+        r800_uint "$birth" || { d0=; continue; }
+        age=$((now - birth / ticks))
+        [ "$age" -ge 0 ] || { d0=; continue; }
+        if [ -z "$d0" ] || [ "$cp" != "$previous" ] ||
+            [ "$birth" != "$previous_birth" ] || [ "$d" != "$d0" ]; then
+            tframe=$now
+        fi
+        d0=$d; previous=$cp; previous_birth=$birth
+        e=$($B cat "$HWCERR" 2>/dev/null) || continue
+        zc=$(/system/bin/getprop debug.r800.zerocopy) || continue
+        action=$(r800_hwc_action "$now" "$e" "$tframe" "$last" "$age" "$zc") || continue
+        # Revalidate the same process immediately before any recovery.
+        current=$(r800_process_start_ticks "/proc/$cp/stat" "$cp") || continue
+        [ "$current" = "$birth" ] || continue
+        if [ "$action" = reboot ]; then
                 k "decon hung (no frame since restart, irq $d): rebooting"
                 echo "$($B date) REBOOT (irq $d)" >> /oem/r800dev/wedge.log
                 kill $PETTER 2>/dev/null
@@ -742,13 +765,16 @@ H
                 echo s > /proc/sysrq-trigger; $B sleep 3
                 echo b > /proc/sysrq-trigger
                 $B sleep 120                     # dead-man fires if we are still here
-            fi
+        else
             k "composer wedged (hwc errors, decon irq stuck at $d): restarting"
             /system/bin/logcat -d -v threadtime -t 400 > /oem/r800dev/wedge-logcat.txt 2>/dev/null
             echo "$($B date) restart (irq $d)" >> /oem/r800dev/wedge.log
-            kill $($B pidof android.hardware.graphics.composer@2.1-service) 2>/dev/null
-            last=$now
+            current=$(r800_process_start_ticks "/proc/$cp/stat" "$cp") || continue
+            [ "$current" = "$birth" ] || continue
+            kill "$cp" 2>/dev/null
         fi
+        last=$now
+        tframe=$now
       done ) &
     # Developer mode: post-boot logcat snapshot on p17 every 30 s; timeout so a
     # stuck logd cannot wedge us.
