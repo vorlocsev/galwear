@@ -22,6 +22,7 @@ class SystemSuspendGuardTests(unittest.TestCase):
         cls.pm = postimage_hunks(section(patch, "drivers/soc/samsung/exynos-pm.c"))
         cls.mode = postimage_hunks(section(patch, "drivers/soc/samsung/exynos-powermode.c"))
         cls.header = postimage_hunks(section(patch, "include/soc/samsung/exynos-powermode.h"))
+        cls.cal = postimage_hunks(section(patch, "drivers/soc/samsung/cal-if/pmucal_system.c"))
 
     def test_both_prepare_paths_propagate_error(self):
         for field in ("usbl2_suspend_mode_idx", "suspend_mode_idx"):
@@ -57,6 +58,13 @@ class SystemSuspendGuardTests(unittest.TestCase):
     def test_psci_error_not_converted_to_positive_bool(self):
         self.assertIn("pm_info->is_early_wakeup = ret != 0;", self.pm)
         self.assertIn("return ret < 0 ? ret : -EBUSY;", self.pm)
+
+    def test_all_three_cal_paths_reject_negative_modes(self):
+        self.assertEqual(self.cal.count("if (mode < 0 || mode >= NUM_SYS_POWERDOWN)"), 3)
+
+    def test_cal_hint_cleared_on_error_paths(self):
+        self.assertEqual(self.cal.count("pmucal_powermode_hint_clear();\n\t\treturn ret;"), 5)
+        self.assertIn("pmucal_powermode_hint_clear();\n\tif (mode != SYS_SICD)", self.cal)
 
     def test_normal_and_early_cal_return_and_header_match(self):
         self.assertIn("ret = cal_pm_earlywakeup(mode);", self.mode)
