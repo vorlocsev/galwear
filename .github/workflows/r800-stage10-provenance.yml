@@ -1,0 +1,31 @@
+name: SM-R800 release provenance checks (offline)
+
+on:
+  push:
+    branches:
+      - "development/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-provenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate builder shell syntax
+        run: |
+          sh -n build/mkrelease.sh
+          sh -n build/mkpayload-release.sh
+          sh -n build/mkboot.sh
+      - name: Validate provenance Python source
+        run: python3 -m py_compile installer/r800_build_provenance.py tests/test_stage10_provenance.py
+      - name: Exercise 23 synthetic provenance/release tests
+        run: python3 -m unittest discover -s tests -p 'test_stage10_provenance.py' -v
+      - name: Confirm no closed-source firmware is bundled
+        run: |
+          test ! -e images/R800-WearOS.tar.md5
+          test ! -e images/samsung/COMBINATION-FT40_R800XXU1ARI2_noCM.tar.md5
+          test ! -e images/vendor.img
