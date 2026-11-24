@@ -26287,18 +26287,21 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  #define CPU_INFORM4			0x0870
 +/* SM-R800 debug: suspend progress marker in PMU INFORM5 (survives reset,
 + * printed by S-Boot): 1 = entering firmware sleep, 2 = back from firmware,
-+ * 3 = syscore resume done. */
++ * 3 = syscore resume done, 4 = CAL prepared (before PSCI). */
 +#define R800_INFORM5			0x0814
 +#define R800_MARK(n)			exynos_pmu_write(R800_INFORM5, 0xAA000000 | (n))
  
  extern u32 exynos_eint_to_pin_num(int eint);
  #define EXYNOS_EINT_PEND(b, x)      ((b) + 0xA00 + (((x) >> 3) * 4))
-@@ -261,8 +266,17 @@
+@@ -261,8 +266,20 @@
  #define SLEEP_AUD_ON   10
  #endif
  
 +/* A failed CAL transition leaves restoration unverified until reboot. */
 +static int r800_pm_fault;
++static bool r800_pm_prepared;
++static unsigned int r800_pm_mode;
++static bool r800_psci_attempted;
 +
  static int exynos_pm_syscore_suspend(void)
  {
@@ -26311,41 +26314,61 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  #if 0 
  	if (!exynos_check_cp_status()) {
  		pr_info("%s %s: sleep canceled by CP reset \n",
-@@ -277,27 +291,42 @@
+@@ -270,6 +287,10 @@
+ 		return -EINVAL;
+ 	}
+ #endif
++	/* syscore_resume can run even if suspend_ops->enter was skipped. */
++	r800_pm_prepared = false;
++	r800_psci_attempted = false;
++	pm_info->is_early_wakeup = true;
+ 	pm_info->is_usbl2_suspend = false;
+ 	if (pm_info->usbl2_suspend_available) {
+ 		if (!IS_ERR_OR_NULL(pm_info->usb_is_connect))
+@@ -277,27 +298,49 @@
  	}
  
  	if (pm_info->is_usbl2_suspend || pm_dbg->test_usbl2_suspend) {
 -		exynos_prepare_sys_powerdown(pm_info->usbl2_suspend_mode_idx);
-+		ret = exynos_prepare_sys_powerdown(pm_info->usbl2_suspend_mode_idx);
++		r800_pm_mode = pm_info->usbl2_suspend_mode_idx;
  		pr_info("%s %s: Enter Suspend scenario. usbl2_mode_idx = %d)\n",
  				EXYNOS_PM_PREFIX,__func__, pm_info->usbl2_suspend_mode_idx);
  	} else {
 -		exynos_prepare_sys_powerdown(pm_info->suspend_mode_idx);
-+		ret = exynos_prepare_sys_powerdown(pm_info->suspend_mode_idx);
++		r800_pm_mode = pm_info->suspend_mode_idx;
  		pr_info("%s %s: Enter Suspend scenario. suspend_mode_idx = %d)\n",
  				EXYNOS_PM_PREFIX,__func__, pm_info->suspend_mode_idx);
  	}
  
++	ret = exynos_prepare_sys_powerdown(r800_pm_mode);
 +	if (ret) {
 +		/* Do not enter PSCI or claim a partially prepared state is safe. */
 +		r800_pm_fault = ret < 0 ? ret : -EIO;
 +		pr_err("r800-pm: CAL prepare failed (%d), suspend blocked\n", ret);
 +		return r800_pm_fault;
 +	}
++	r800_pm_prepared = true;
++	R800_MARK(4); /* CAL prepared; PSCI not yet attempted */
  	return 0;
  }
  
  static void exynos_pm_syscore_resume(void)
  {
-+	int ret;
-+
- 	if (pm_info->is_usbl2_suspend || pm_dbg->test_usbl2_suspend)
+-	if (pm_info->is_usbl2_suspend || pm_dbg->test_usbl2_suspend)
 -		exynos_wakeup_sys_powerdown(pm_info->usbl2_suspend_mode_idx, pm_info->is_early_wakeup);
-+		ret = exynos_wakeup_sys_powerdown(pm_info->usbl2_suspend_mode_idx, pm_info->is_early_wakeup);
- 	else
+-	else
 -		exynos_wakeup_sys_powerdown(pm_info->suspend_mode_idx, pm_info->is_early_wakeup);
-+		ret = exynos_wakeup_sys_powerdown(pm_info->suspend_mode_idx, pm_info->is_early_wakeup);
++	int ret;
  
++	if (!r800_pm_prepared)
++		return;
++	r800_pm_prepared = false;
++	if (!r800_psci_attempted) {
++		pm_info->is_early_wakeup = true;
++		pr_info("r800-pm: aborted before PSCI; using early wakeup\n");
++	}
++	ret = exynos_wakeup_sys_powerdown(r800_pm_mode, pm_info->is_early_wakeup);
++
 +	if (ret) {
 +		r800_pm_fault = ret < 0 ? ret : -EIO;
 +		pr_err("r800-pm: CAL restore failed (%d), next suspend blocked\n", ret);
@@ -26358,16 +26381,49 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	if (!pm_info->is_early_wakeup)
  		pr_debug("%s %s: post sleep, preparing to return\n",
  						EXYNOS_PM_PREFIX, __func__);
-@@ -328,7 +357,9 @@
+@@ -313,7 +356,10 @@
+ 	unsigned int psci_index;
+ 	unsigned int prev_mif = 0, post_mif = 0;
+ 	unsigned int prev_req, off_count;
++	int ret;
+ 
++	if (!r800_pm_prepared)
++		return -EINVAL;
+ 	psci_index = pm_info->suspend_psci_idx;
+ 
+ 	/* Send an IPI if test_early_wakeup flag is set */
+@@ -328,7 +374,11 @@
  	/* This will also act as our return point when
  	 * we resume as it saves its own register state and restores it
  	 * during the resume. */
+-	pm_info->is_early_wakeup = (bool)arm_cpuidle_suspend(psci_index);
++	r800_psci_attempted = true;
 +	R800_MARK(1);
- 	pm_info->is_early_wakeup = (bool)arm_cpuidle_suspend(psci_index);
++	ret = arm_cpuidle_suspend(psci_index);
++	pm_info->is_early_wakeup = ret != 0;
 +	R800_MARK(2 | (pm_info->is_early_wakeup ? 0x100 : 0));
  
  	pr_info("%s: is_early_wakeup : %d\n", EXYNOS_PM_PREFIX, pm_info->is_early_wakeup);
  	if (pm_info->is_early_wakeup)
+@@ -339,6 +389,9 @@
+ 	exynos_pmu_read(CPU_INFORM4, &off_count);
+ 	pr_info("%s: post mif_count %d	%d\n",EXYNOS_PM_PREFIX, post_mif,off_count);
+ 
++	if (ret)
++		return ret < 0 ? ret : -EBUSY;
++
+ 	if (post_mif == prev_mif) {
+ 		pr_info("%s: MIF blocked. MIF request Mster was  0x%x\n", EXYNOS_PM_PREFIX, prev_req);
+ 		return -EBUSY;
+@@ -347,7 +400,7 @@
+ 		pr_info("%s: MIF down. cur_count: %d, acc_count: %d\n",
+ 				EXYNOS_PM_PREFIX, post_mif - prev_mif, post_mif);
+ 
+-	return pm_info->is_early_wakeup;
++	return 0;
+ }
+ 
+ static const struct platform_suspend_ops exynos_pm_ops = {
 diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos-powermode.c
 --- a/drivers/soc/samsung/exynos-powermode.c
 +++ b/drivers/soc/samsung/exynos-powermode.c
@@ -28707,3 +28763,77 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.h b/drivers/soc/samsung/cal-i
  extern int pmucal_rae_handle_cp_seq(struct pmucal_seq *seq, unsigned int seq_size);
  extern int pmucal_rae_handle_gnss_seq(struct pmucal_seq *seq, unsigned int seq_size);
  extern int pmucal_rae_handle_shub_seq(struct pmucal_seq *seq, unsigned int seq_size);
+diff --git a/drivers/soc/samsung/cal-if/pmucal_system.c b/drivers/soc/samsung/cal-if/pmucal_system.c
+--- a/drivers/soc/samsung/cal-if/pmucal_system.c
++++ b/drivers/soc/samsung/cal-if/pmucal_system.c
+@@ -19,7 +19,7 @@
+ 	if (mode != SYS_SICD)
+ 		dbg_snapshot_pmu(mode, __func__, DSS_FLAG_IN);
+ 
+-	if (mode >= NUM_SYS_POWERDOWN) {
++	if (mode < 0 || mode >= NUM_SYS_POWERDOWN) {
+ 		pr_err("%s %s: mode index(%d) is out of supported range (0~%d).\n",
+ 				PMUCAL_PREFIX, __func__, mode, NUM_SYS_POWERDOWN);
+ 		return -EINVAL;
+@@ -40,6 +40,7 @@
+ 	if (ret) {
+ 		pr_err("%s %s: error on handling enter sequence. (mode : %d)\n",
+ 				PMUCAL_PREFIX, __func__, mode);
++		pmucal_powermode_hint_clear();
+ 		return ret;
+ 	}
+ 
+@@ -64,7 +65,7 @@
+ 	if (mode != SYS_SICD)
+ 		dbg_snapshot_pmu(mode, __func__, DSS_FLAG_IN);
+ 
+-	if (mode >= NUM_SYS_POWERDOWN) {
++	if (mode < 0 || mode >= NUM_SYS_POWERDOWN) {
+ 		pr_err("%s %s: mode index(%d) is out of supported range (0~%d).\n",
+ 				PMUCAL_PREFIX, __func__, mode, NUM_SYS_POWERDOWN);
+ 		return -EINVAL;
+@@ -81,6 +82,7 @@
+ 	if (ret) {
+ 		pr_err("%s %s: error on handling exit sequence. (mode : %d)\n",
+ 				PMUCAL_PREFIX, __func__, mode);
++		pmucal_powermode_hint_clear();
+ 		return ret;
+ 	}
+ 
+@@ -89,9 +91,11 @@
+ 	if (ret) {
+ 		pr_err("%s %s: error on handling restore sequence. (mode : %d)\n",
+ 				PMUCAL_PREFIX, __func__, mode);
++		pmucal_powermode_hint_clear();
+ 		return ret;
+ 	}
+ 
++	pmucal_powermode_hint_clear();
+ 	if (mode != SYS_SICD)
+ 		dbg_snapshot_pmu(mode, __func__, DSS_FLAG_OUT);
+ 
+@@ -113,7 +117,7 @@
+ 	if (mode != SYS_SICD)
+ 		dbg_snapshot_pmu(mode, __func__, DSS_FLAG_IN);
+ 
+-	if (mode >= NUM_SYS_POWERDOWN) {
++	if (mode < 0 || mode >= NUM_SYS_POWERDOWN) {
+ 		pr_err("%s %s: mode index(%d) is out of supported range (0~%d).\n",
+ 				PMUCAL_PREFIX, __func__, mode, NUM_SYS_POWERDOWN);
+ 		return -EINVAL;
+@@ -130,6 +134,7 @@
+ 	if (ret) {
+ 		pr_err("%s %s: error on handling elry_wkup sequence. (mode : %d)\n",
+ 				PMUCAL_PREFIX, __func__, mode);
++		pmucal_powermode_hint_clear();
+ 		return ret;
+ 	}
+ 
+@@ -138,6 +143,7 @@
+ 	if (ret) {
+ 		pr_err("%s %s: error on handling restore sequence. (mode : %d)\n",
+ 				PMUCAL_PREFIX, __func__, mode);
++		pmucal_powermode_hint_clear();
+ 		return ret;
+ 	}
+ 	pmucal_powermode_hint_clear();
