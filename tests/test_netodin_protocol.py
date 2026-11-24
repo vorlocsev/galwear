@@ -15,7 +15,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import netodin
 import r800_safety
-from test_installer_guard import fake_pit, synthetic_archive
+from test_installer_guard import fake_pit
+from test_recovery_audit import build_archives
 
 
 class SimulatedWatch:
@@ -151,14 +152,14 @@ class PrewriteProtocolTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.package = Path(self.tmp.name) / "R800-WearOS.tar.md5"
-        synthetic_archive(self.package)
+        self.package, self.combination = build_archives(Path(self.tmp.name))
 
     def simulate(self, watch):
         server = SimulatedServer(watch)
         with mock.patch.object(netodin.socket, "socket", return_value=server):
             with mock.patch.object(netodin, "format_progress"):
-                netodin.flash_ap_package(str(self.package), auto_reboot=False)
+                netodin.flash_ap_package(str(self.package), auto_reboot=False,
+                                         combination_path=str(self.combination))
         return watch
 
     def test_good_synthetic_pit_can_reach_data_phase(self):
