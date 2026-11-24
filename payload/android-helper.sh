@@ -720,8 +720,12 @@ H
       r800_uint "$started" || exit 0
       ticks=$(r800_clock_ticks) || { k "display watchdog: CLK_TCK unavailable"; exit 0; }
       printf '0\n' > "$HWCERR" || exit 0
-      ( /system/bin/logcat -T 1 -v epoch HWComposer:E '*:S' 2>/dev/null |
-        while read -r ts _; do
+      ( /system/bin/logcat -T 1 -v threadtime -v epoch HWComposer:E '*:S' 2>/dev/null |
+        while read -r ts logpid tid rest; do
+            r800_uint "$logpid" || continue
+            logcp=$($B pidof android.hardware.graphics.composer@2.1-service)
+            [ "$logpid" = "$logcp" ] || continue
+            logbirth=$(r800_process_start_ticks "/proc/$logpid/stat" "$logpid") || continue
             stamp=${ts%%.*}
             wall=$($B date +%s)
             r800_uint "$stamp" && r800_uint "$wall" || continue
@@ -729,7 +733,7 @@ H
             [ "$stamp" -ge "$started" ] && [ "$stamp" -le "$wall" ] &&
                 [ "$((wall - stamp))" -le 10 ] || continue
             observed=$(r800_uptime_seconds /proc/uptime) || continue
-            printf '%s\n' "$observed" > "$HWCERR"
+            printf '%s %s %s\n' "$observed" "$logpid" "$logbirth" > "$HWCERR"
         done ) &
       d0=; previous=; previous_birth=; last=0; tframe=0
       while :; do
@@ -747,12 +751,15 @@ H
             tframe=$now
         fi
         d0=$d; previous=$cp; previous_birth=$birth
-        e=$($B cat "$HWCERR" 2>/dev/null) || continue
+        read -r e event_pid event_birth < "$HWCERR" || continue
+        [ "$event_pid" = "$cp" ] && [ "$event_birth" = "$birth" ] || continue
         zc=$(/system/bin/getprop debug.r800.zerocopy) || continue
         action=$(r800_hwc_action "$now" "$e" "$tframe" "$last" "$age" "$zc") || continue
         # Revalidate the same process immediately before any recovery.
         current=$(r800_process_start_ticks "/proc/$cp/stat" "$cp") || continue
         [ "$current" = "$birth" ] || continue
+        current_irq=$(r800_irq_total /proc/interrupts) || continue
+        [ "$current_irq" = "$d" ] || continue
         if [ "$action" = reboot ]; then
                 k "decon hung (no frame since restart, irq $d): rebooting"
                 echo "$($B date) REBOOT (irq $d)" >> /oem/r800dev/wedge.log
