@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compile only the experimental AArch64 /init; never build a flashable image.
+# Compile only the read-only AArch64 /init; never build a flashable image.
 # Requires LLVM/LLD 19.1.4 and a disposable workspace.
 set -eu
 [ "$#" -eq 2 ] || {
@@ -8,7 +8,7 @@ set -eu
 }
 REPO=$1
 OUT=$2
-[ -f "$REPO/src/initramfs/init.c" ] || { echo "init.c missing" >&2; exit 2; }
+[ -f "$REPO/src/initramfs/init-readonly.c" ] || { echo "init-readonly.c missing" >&2; exit 2; }
 [ ! -e "$OUT" ] || { echo "output directory already exists" >&2; exit 2; }
 case "$OUT" in *" "*|*"	"*) echo "output path contains whitespace" >&2; exit 2;; esac
 
@@ -21,11 +21,11 @@ clang-19 --target=aarch64-linux-gnu \
     -ffreestanding -nostdlib -static -fno-stack-protector \
     -fno-builtin -O2 -fuse-ld=lld -fno-pie -no-pie \
     -Wl,-e,_start -Wl,--build-id=none \
-    -o "$OUT/init" "$REPO/src/initramfs/init.c"
+    -o "$OUT/init" "$REPO/src/initramfs/init-readonly.c"
 
 python3 "$REPO/build/r800_initramfs_spec.py" \
     --init "$OUT/init" \
     --list "$OUT/initramfs.list" \
     --report "$OUT/initramfs-evidence.json"
 
-echo "PASS: local experimental /init compiled and inspected, no kernel or watch modified"
+echo "PASS: read-only experimental /init compiled and inspected, no kernel or watch modified"
