@@ -15,6 +15,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
+#include <limits.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <linux/fb.h>
 #include <poll.h>
@@ -97,7 +99,7 @@ struct r800_hwc {
 	int power_uncertain;               /* failed transition: block presents until recovery */
 	int64_t power_retry_ns;            /* failed automatic resume backoff */
 	size_t layer_stride;                /* selected once at open */
-	int logged_handle;
+	int allow_unknown_size;            /* explicit experimental ION compatibility */
 	unsigned long frames;
 	uint64_t no_buffer;                /* layers prepare() saw as BACKGROUND/SIDEBAND */
 	int swap_rb;                       /* RGBA buffers -> BGRA panel: swap R and B */
@@ -145,72 +147,101 @@ static const gralloc_module_t *load_gralloc(struct r800_hwc *h)
 	return (const gralloc_module_t *)mod;
 }
 
-/*
- * Row stride (pixels) of a gralloc buffer. Exynos private handles carry
- * "... width, height, stride, vstride ..." as consecutive ints; find
- * width,height and take the next int if it looks like a stride.
- */
-static int handle_stride(struct r800_hwc *h, buffer_handle_t hnd, int w, int ht, int *matched)
+/* Probe mapped pages, not allocation ownership or access permissions.
+ * The native HWC caller must still provide valid, live handles. */
+static int mapped_span(uintptr_t p, size_t len)
 {
-	const native_handle_t *nh = (const native_handle_t *)hnd;
-	const int *ints = &nh->data[nh->numFds];
-	int i, stride = w;
-
-	*matched = 0;
-	for (i = 0; i + 2 < nh->numInts; i++) {
-		if (ints[i] == w && ints[i + 1] == ht && ints[i + 2] >= w && ints[i + 2] <= w + 128) {
-			stride = ints[i + 2];
-			*matched = 1;
-			break;
-		}
+	long page = sysconf(_SC_PAGESIZE);
+	if (page <= 0 || ((unsigned long)page & ((unsigned long)page - 1)) ||
+	    !len || p < (uintptr_t)page || len - 1 > UINTPTR_MAX - p)
+		return 0;
+	uintptr_t mask = (uintptr_t)page - 1;
+	uintptr_t first = p & ~mask, last = (p + len - 1) & ~mask;
+	for (uintptr_t q = first;; q += (uintptr_t)page) {
+		if (msync((void *)q, (size_t)page, MS_ASYNC))
+			return 0;
+		if (q == last)
+			return 1;
 	}
-	if (!h->logged_handle) {
-		char buf[512];
-		int n = 0, k;
-		for (k = 0; k < nh->numInts && k < 40 && n < (int)sizeof(buf) - 16; k++)
-			n += snprintf(buf + n, sizeof(buf) - n, "%d ", ints[k]);
-		LOGI("client target handle: numFds=%d numInts=%d ints=[%s] -> stride %d (match at %d)",
-		     nh->numFds, nh->numInts, buf, stride, i + 2 < nh->numInts ? i + 2 : -1);
-		h->logged_handle = 1;
-	}
-	return stride;
 }
 
-/*
- * Is this a readable native_handle_t? hwc_layer_1.handle shares a union with
- * backgroundColor, so a solid-color layer hands us a color as a "pointer"
- * (run 102: SIGBUS BUS_ADRALN at 0x7 = handle 0x3 + offsetof(numFds)).
- * msync() fails with ENOMEM on unmapped pages, so it probes without faulting.
- */
 static int handle_ok(buffer_handle_t hnd)
 {
 	const native_handle_t *nh = (const native_handle_t *)hnd;
 	uintptr_t p = (uintptr_t)hnd;
-	const uintptr_t pg = 4096;
-
-	if (p < pg || (p & 3))
+	if ((p & (sizeof(int) - 1)) || !mapped_span(p, sizeof(*nh)))
 		return 0;
-	if (msync((void *)(p & ~(pg - 1)), pg, MS_ASYNC))
-		return 0;
-	if ((p & (pg - 1)) > pg - sizeof(native_handle_t) &&
-	    msync((void *)((p & ~(pg - 1)) + pg), pg, MS_ASYNC))
-		return 0;
-	if (nh->version != (int)sizeof(native_handle_t) || nh->numFds < 0 || nh->numFds > 8 ||
+	if (nh->version != (int)sizeof(*nh) || nh->numFds < 1 || nh->numFds > 8 ||
 	    nh->numInts < 0 || nh->numInts > 128)
 		return 0;
-	return 1;
+	size_t size = sizeof(*nh) + (size_t)(nh->numFds + nh->numInts) * sizeof(int);
+	return mapped_span(p, size);
 }
 
-/* Size of the buffer behind a gralloc handle (its first fd is a dma-buf), 0 if unknown. */
-static size_t handle_size(buffer_handle_t hnd)
+/* Compute the full padded 32bpp plane, without ARM32 overflow. */
+static int plane_bytes(int w, int ht, int stride, uint64_t *need)
 {
-	const native_handle_t *nh = (const native_handle_t *)hnd;
-	off_t sz;
+	if (w <= 0 || ht <= 0 || w > INT_MAX - 128 || stride < w || stride > w + 128)
+		return -EINVAL;
+	uint64_t row = (uint64_t)stride * 4;
+	if (row > SIZE_MAX || (uint64_t)ht > SIZE_MAX / row)
+		return -EOVERFLOW;
+	*need = row * (uint64_t)ht;
+	return 0;
+}
 
-	if (nh->numFds < 1 || nh->data[0] < 0)
-		return 0;
-	sz = lseek(nh->data[0], 0, SEEK_END);
-	return sz > 0 ? (size_t)sz : 0;
+/* A known positive size must cover the full padded plane. A zero or
+ * unsupported size query is not proof of capacity; allow only by opt-in. */
+static int check_plane_size(uint64_t need, int64_t have, int allow_unknown)
+{
+	if (!need)
+		return -EINVAL;
+	if (have <= 0)
+		return allow_unknown ? 0 : -ENODATA;
+	return (uint64_t)have < need ? -ENOSPC : 0;
+}
+
+/* Legacy Exynos handle metadata is a heuristic, not a gralloc ABI.
+ * Require one unambiguous geometry tuple with a supported format. */
+static int handle_geom(buffer_handle_t hnd, int w, int ht, int *stride, int *fmt)
+{
+	if (!handle_ok(hnd) || w <= 0 || ht <= 0 || w > INT_MAX - 128)
+		return -EINVAL;
+	const native_handle_t *nh = (const native_handle_t *)hnd;
+	const int *ints = &nh->data[nh->numFds];
+	int found = 0;
+	for (int i = 1; i + 2 < nh->numInts; i++) {
+		if (ints[i] != w || ints[i + 1] != ht ||
+		    ints[i + 2] < w || ints[i + 2] > w + 128)
+			continue;
+		if (found++)
+			return -EINVAL;
+		*stride = ints[i + 2];
+		*fmt = ints[i - 1];
+	}
+	if (!found || (*fmt != HAL_PIXEL_FORMAT_RGBA_8888 &&
+	    *fmt != HAL_PIXEL_FORMAT_RGBX_8888 && *fmt != HAL_PIXEL_FORMAT_BGRA_8888))
+		return -EINVAL;
+	return 0;
+}
+
+static int checked_buffer(struct r800_hwc *h, buffer_handle_t hnd,
+			  int w, int ht, int *stride, int *fmt)
+{
+	uint64_t need;
+	int r = handle_geom(hnd, w, ht, stride, fmt);
+	if (r)
+		return r;
+	r = plane_bytes(w, ht, *stride, &need);
+	if (r)
+		return r;
+	const native_handle_t *nh = (const native_handle_t *)hnd;
+	if (nh->data[0] < 0 || fcntl(nh->data[0], F_GETFD) < 0)
+		return -EBADF;
+	off64_t have = lseek64(nh->data[0], 0, SEEK_END);
+	if (have < 0 && errno != EINVAL && errno != ESPIPE && errno != ENOSYS)
+		return -errno;
+	return check_plane_size(need, have, h->allow_unknown_size);
 }
 
 /* debug.r800.fencescan: histogram of this process's open sync_file fds by
@@ -308,6 +339,7 @@ static int fb_open(struct r800_hwc *h)
 	}
 	/* CPU copy supports only the existing 32bpp framebuffer geometry. */
 	if (!h->var.xres || !h->var.yres || h->var.bits_per_pixel != 32 ||
+	    h->var.xres > INT_MAX - 128 || h->var.yres > INT_MAX || (h->fix.line_length & 3) ||
 	    h->var.xres_virtual < h->var.xres || h->var.yres_virtual < h->var.yres ||
 	    (uint64_t)h->var.xres * 4 > h->fix.line_length ||
 	    (uint64_t)h->var.yres * h->fix.line_length > h->fix.smem_len) {
@@ -336,6 +368,11 @@ static int fb_open(struct r800_hwc *h)
 		v[0] = 0;
 		__system_property_get("debug.r800.zerocopy", v);
 		h->zerocopy = (v[0] == '0') ? 0 : 1;
+		v[0] = 0;
+		__system_property_get("debug.r800.allow_unknown_size", v);
+		h->allow_unknown_size = !strcmp(v, "1");
+		if (h->allow_unknown_size)
+			LOGW("experimental: accepting ION buffers with unverified size");
 		LOGI("fb0 rgba offsets r%u g%u b%u a%u, swap_rb=%d zerocopy=%d (win_config_data %zu bytes)",
 		     h->var.red.offset, h->var.green.offset, h->var.blue.offset, h->var.transp.offset,
 		     h->swap_rb, h->zerocopy, sizeof(struct r800_win_config_data));
@@ -363,7 +400,7 @@ static int fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 	const unsigned int back = halves == 2 ? !h->front : 0;
 	void *src = NULL;
 	unsigned int y;
-	int stride, err, matched;
+	int stride, err, fmt;
 
 	if (!h->fb_mem)
 		return -EIO;
@@ -377,23 +414,8 @@ static int fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 			LOGW("skip %s: bad handle %p (%lu)", is_target ? "target" : "fallback", (void *)buf, bad);
 		return -EIO;
 	}
-	stride = handle_stride(h, buf, (int)w, (int)ht, &matched);
-	{
-		/* A full-screen copy out of a smaller buffer reads past its mapping:
-		 * SIGBUS killed the composer and, with it, the panel (run 101).
-		 * Skip such frames; the previous one stays on screen. */
-		static unsigned long skipped;
-		size_t need = (size_t)(ht - 1) * stride * bpp + (size_t)w * bpp;
-		size_t have = handle_size(buf);
-		/* ION fds here report size 0; then trust a handle that itself says
-		 * "w x ht, stride s" (Exynos private handle), else only the FB target. */
-		if ((have && have < need) || (!have && !is_target && !matched)) {
-			if (skipped++ < 5 || (skipped % 600) == 0)
-				LOGW("skip %s buffer: %zu bytes < %zu needed (stride %d), skipped %lu",
-				     is_target ? "target" : "fallback", have, need, stride, skipped);
-			return -EIO;
-		}
-	}
+	if (checked_buffer(h, buf, (int)w, (int)ht, &stride, &fmt))
+		return -EINVAL;
 	err = h->gralloc->lock(h->gralloc, buf, GRALLOC_USAGE_SW_READ_OFTEN, 0, 0, w, ht, &src);
 	if (err || !src) {
 		if (!err)
@@ -404,7 +426,8 @@ static int fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 		return -EIO;
 	}
 	uint8_t *dst = h->fb_mem + (size_t)back * ht * h->fix.line_length;
-	if (h->swap_rb && bpp == 4) {
+	/* swap_rb describes the RGBA source; BGRA needs the opposite swap. */
+	if ((h->swap_rb != (fmt == HAL_PIXEL_FORMAT_BGRA_8888)) && bpp == 4) {
 		/* NEON: vld4 de-interleaves 16 pixels per load (whole-line reads, which
 		 * matters on the uncached GPU buffer) and R/B swap is just a register
 		 * swap before vst4. The old per-pixel loop cost ~35% CPU at 60 fps. */
@@ -452,22 +475,19 @@ static int wc_present(struct r800_hwc *h, hwc_layer_1_t *l, int *retire)
 	const unsigned int w = h->var.xres, ht = h->var.yres;
 	struct r800_win_config_data d;
 	struct r800_win_config *c = &d.config[0];
-	int i, stride, matched;
+	int i, stride, fmt;
 	if (!l->handle || !handle_ok(l->handle) || nh->numFds < 1 || nh->data[0] < 0) {
 		static unsigned long bad;
 		if (l->handle && bad++ < 5)
 			LOGE("zero-copy: unusable handle %p", (void *)l->handle);
 		return -1;
 	}
-	stride = handle_stride(h, l->handle, (int)w, (int)ht, &matched);
-	if (!h->fmt_verified && l->compositionType == HWC_FRAMEBUFFER_TARGET) {
-		/* the client target is RGBA_8888: proves where the format int sits */
-		int s2, fmt = -1;
-		h->fmt_verified = handle_geom(l->handle, (int)w, (int)ht, &s2, &fmt) == 0 &&
-				  fmt == HAL_PIXEL_FORMAT_RGBA_8888 ? 1 : -1;
-		LOGE("overlay: handle format check on FB target: format int %d -> overlays %s", fmt,
-		     h->fmt_verified == 1 ? "available" : "OFF");
+	if (checked_buffer(h, l->handle, (int)w, (int)ht, &stride, &fmt) ||
+	    fmt != HAL_PIXEL_FORMAT_RGBA_8888) {
+		h->fmt_verified = -1;
+		return -EINVAL;
 	}
+	h->fmt_verified = 1;
 
 	memset(&d, 0, sizeof(d));
 	d.retire_fence = -1;
@@ -599,21 +619,6 @@ static int validate_displays(struct r800_hwc *h, size_t n, hwc_display_contents_
  * target, which is always RGBA_8888; if it does not read 1 there, overlays
  * stay off (fmt_verified = -1).
  */
-static int handle_geom(buffer_handle_t hnd, int w, int ht, int *stride, int *fmt)
-{
-	const native_handle_t *nh = (const native_handle_t *)hnd;
-	const int *ints = &nh->data[nh->numFds];
-	int i;
-
-	for (i = 1; i + 2 < nh->numInts; i++)
-		if (ints[i] == w && ints[i + 1] == ht && ints[i + 2] >= w && ints[i + 2] <= w + 128) {
-			*stride = ints[i + 2];
-			*fmt = ints[i - 1];
-			return 0;
-		}
-	return -1;
-}
-
 static int ovl_enabled(struct r800_hwc *h)
 {
 	char v[PROP_VALUE_MAX] = "";
@@ -629,9 +634,7 @@ static int ovl_layer(struct r800_hwc *h, hwc_layer_1_t *l, struct r800_win_confi
 {
 	const native_handle_t *nh = (const native_handle_t *)l->handle;
 	const hwc_rect_t *df = &l->displayFrame;
-	int sl = (int)l->sourceCropf.left, st = (int)l->sourceCropf.top;
-	int sw = (int)l->sourceCropf.right - sl, sh = (int)l->sourceCropf.bottom - st;
-	int dw = df->right - df->left, dh = df->bottom - df->top;
+	int sw, sh, dw, dh;
 	int stride, fmt, dfmt, blend;
 
 	if (l->compositionType != HWC_FRAMEBUFFER && l->compositionType != HWC_OVERLAY)
@@ -639,12 +642,21 @@ static int ovl_layer(struct r800_hwc *h, hwc_layer_1_t *l, struct r800_win_confi
 	if ((l->flags & HWC_SKIP_LAYER) || l->transform || !l->handle || !handle_ok(l->handle) ||
 	    nh->numFds < 1 || nh->data[0] < 0)
 		return -1;
-	/* whole buffer, 1:1, fully on screen */
-	if (sl || st || sw != dw || sh != dh || sw < 16 || sh < 1 ||
-	    (float)sw != l->sourceCropf.right || (float)sh != l->sourceCropf.bottom ||
-	    df->left < 0 || df->top < 0 || df->right > (int)h->var.xres || df->bottom > (int)h->var.yres)
+	/* Validate float and rectangle bounds before integer conversion. */
+	if (df->left < 0 || df->top < 0 || df->right <= df->left || df->bottom <= df->top ||
+	    df->right > (int)h->var.xres || df->bottom > (int)h->var.yres)
 		return -1;
-	if (handle_geom(l->handle, sw, sh, &stride, &fmt))
+	dw = df->right - df->left;
+	dh = df->bottom - df->top;
+	if (!isfinite(l->sourceCropf.left) || !isfinite(l->sourceCropf.top) ||
+	    !isfinite(l->sourceCropf.right) || !isfinite(l->sourceCropf.bottom) ||
+	    l->sourceCropf.left != 0 || l->sourceCropf.top != 0 ||
+	    l->sourceCropf.right != (float)dw || l->sourceCropf.bottom != (float)dh ||
+	    dw < 16)
+		return -1;
+	sw = dw;
+	sh = dh;
+	if (checked_buffer(h, l->handle, sw, sh, &stride, &fmt))
 		return -1;
 	switch (fmt) {
 	case HAL_PIXEL_FORMAT_RGBA_8888: dfmt = 2; break;   /* DECON_PIXEL_FORMAT_RGBA_8888 */
