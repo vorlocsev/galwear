@@ -1,0 +1,32 @@
+name: SM-R800 display watchdog host regression (NON-RELEASE)
+
+on:
+  push:
+    branches:
+      - development/r800-display-watchdog-20261125
+    paths:
+      - .github/workflows/r800-display-watchdog.yml
+      - payload/android-helper.sh
+      - payload/r800-display-watchdog.sh
+      - build/mkpayload-release.sh
+      - tests/test_display_watchdog.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog-fixtures:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test pure shell functions and syntax without executing Android helper
+        run: python3 -m unittest discover -s tests -p 'test_display_watchdog.py' -v
+      - name: BusyBox shell syntax
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y busybox
+          busybox sh -n payload/android-helper.sh
+          busybox sh -n payload/r800-display-watchdog.sh
+          busybox sh -n build/mkpayload-release.sh
