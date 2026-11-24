@@ -1,0 +1,29 @@
+name: SM-R800 Android ELF dependency audit (NON-RELEASE)
+
+on:
+  push:
+    branches:
+      - development/r800-android-linker-audit-20261125
+    paths:
+      - .github/workflows/r800-android-linker-audit.yml
+      - build/r800_android_linker_audit.py
+      - build/r800_android_userspace_preflight.py
+      - tests/test_android_linker_audit.py
+      - tests/test_android_userspace_preflight.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-elf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline Android structural regression tests
+        run: python3 -m unittest discover -s tests -p 'test_android_userspace_preflight.py' -v
+      - name: Offline ARM and AArch64 dependency regression tests
+        run: python3 -m unittest discover -s tests -p 'test_android_linker_audit.py' -v
+      - name: Syntax checks
+        run: python3 -m py_compile build/r800_android_linker_audit.py build/r800_android_userspace_preflight.py
