@@ -24,13 +24,21 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Run all offline regression suites
         run: |
-          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 build/r800_integrated_regression.py --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/r800-integrated-regression.json"
       - name: Check shell syntax and kernel patch format
         run: |
           for f in payload/android-helper.sh payload/start.sh payload/r800-display-watchdog.sh build/mkpayload-release.sh build/r800_hal_compile_smoke.sh; do
             sh -n "$f"
           done
           git apply --numstat src/kernel/r800-wearos.patch >/dev/null
+      - name: Upload regression JSON even on test failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-integrated-regression-evidence
+          path: ${{ runner.temp }}/r800-integrated-regression.json
+          if-no-files-found: warn
+          retention-days: 7
   hal-compile:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
