@@ -231,6 +231,7 @@ struct hub_sensor {
 	int64_t period_ns;
 	int32_t v[6];            /* REL values of the frame being collected */
 	uint16_t ts[4];
+	int dropped;            /* discard until next SYN_REPORT after overrun */
 };
 
 static struct hub_sensor hub[H_COUNT] = {
@@ -899,6 +900,23 @@ static void ctx_read(sensors_event_t *data, int count, int *n_out)
 	}
 }
 
+/* Each SSP frame contains relative values; missing codes mean zero.
+ * After SYN_DROPPED the incomplete frame is not recoverable. */
+static int discard_overrun(struct hub_sensor *s, const struct input_event *ev)
+{
+	if (ev->type == EV_SYN && ev->code == SYN_DROPPED) {
+		memset(s->v, 0, sizeof(s->v));
+		memset(s->ts, 0, sizeof(s->ts));
+		s->dropped = 1;
+		return 1;
+	}
+	if (!s->dropped)
+		return 0;
+	if (ev->type == EV_SYN && ev->code == SYN_REPORT)
+		s->dropped = 0;
+	return 1;
+}
+
 static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, int count)
 {
 	(void)dev;
@@ -988,6 +1006,8 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 				if (r != sizeof(ie))
 					return n_out ? n_out : -EIO;
 				for (int j = 0; j < 1; j++) {
+					if (discard_overrun(s, &ie[j]))
+						continue;
 					if (ie[j].type == EV_REL) {
 						int c = ie[j].code;
 						if (c >= s->ts_code && c < s->ts_code + 4)
@@ -1023,6 +1043,9 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 					}
 				}
 			}
+			if (n_out < count && (r == 0 ||
+			    (r < 0 && errno != EAGAIN && errno != EINTR)))
+				return n_out ? n_out : -EIO;
 		}
 		if (n_out)
 			return n_out;
