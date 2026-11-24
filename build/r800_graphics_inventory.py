@@ -84,7 +84,7 @@ def audit(root, config):
             ("mali_egl", "mali_gles1", "mali_gles2")):
         missing.append("mali_driver_family")
     # Bound discovery to known candidate paths. No loading or executing ELF.
-    deps = linker_audit(root, tuple(targets)) if targets else None
+    deps = linker_audit(root, tuple(targets), extra_arm_dirs=("/vendor/lib/egl",)) if targets else None
     ok = not missing and not errors and not kernel["missing_or_wrong"] and deps is not None and deps["status"] == "CANDIDATES_FOUND_ONLY"
     return {
         "schema": "galwear-r800-graphics-inventory-v1",
