@@ -1,0 +1,20 @@
+name: SM-R800 audio recovery (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-audio-recovery-20261125
+    paths:
+      - .github/workflows/r800-audio-recovery.yml
+      - src/hal/audio_r800.c
+      - tests/test_audio_recovery.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-audio-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile HFP functions with synthetic PCM and mixer failures
+        run: python3 -m unittest discover -s tests -p 'test_audio_recovery.py' -v
