@@ -5,6 +5,7 @@ on:
     branches:
       - "development/r800-embedded-initramfs-20261125"
       - "development/r800-reproducibility-audit-20261125"
+      - "development/r800-readonly-init-20261125"
     paths:
       - ".github/workflows/r800-embedded-initramfs-build.yml"
       - "build/r800_aosp_source_probe.sh"
@@ -19,6 +20,8 @@ on:
       - "tests/test_embedded_initramfs.py"
       - "tests/test_initramfs_recipe.py"
       - "src/initramfs/init.c"
+      - "src/initramfs/init-readonly.c"
+      - "tests/test_readonly_init.py"
       - "src/kernel/r800.config"
       - "src/kernel/r800-wearos.patch"
   workflow_dispatch:
@@ -46,6 +49,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
           python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
+          python3 -m unittest discover -s tests -p 'test_readonly_init.py' -v
 
       - name: Fetch pinned combined Exynos base and read-only patch check
         run: |
