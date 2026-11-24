@@ -26269,7 +26269,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	unsigned int suspend_mode_idx;		/* power mode to be used in suspend scenario */
  	unsigned int suspend_psci_idx;		/* psci index to be used in suspend scenario */
  	u8 num_extra_stat;			/* Total number of extra wakeup_stat */
-@@ -83,122 +88,138 @@
+@@ -83,122 +89,138 @@
  static void exynos_show_wakeup_reason_eint(void)
  {
  	int bit;
