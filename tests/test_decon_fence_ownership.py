@@ -17,8 +17,8 @@ class FenceOwnershipTests(unittest.TestCase):
         section = section.split("diff --git ", 1)[0]
         new = "\n".join(line[1:] for line in section.splitlines()
                         if line.startswith(("+", " ")) and not line.startswith("+++"))
-        start = new.index("int decon_create_release_fences(")
-        stop = new.index("\n}", start) + 2
+        start = new.index("void decon_cancel_release_fences(")
+        stop = new.index("\n}", new.index("void decon_install_release_fences(", start)) + 2
         actual = new[start:stop]
         harness = r'''
 #include <assert.h>
@@ -66,7 +66,15 @@ int main(int argc,char **argv) {
         data.config[i].rel_fence=42;
         active+=data.config[i].state==2;
     }
-    int result=decon_create_release_fences(&dev,&data,&sync);
+    int result=decon_reserve_release_fences(&dev,&data);
+    assert(installed==0 && file.refs==1);
+    if(result==0 && failure==-2) {
+        decon_cancel_release_fences(&dev,&data);
+        assert(installed==0 && released==active && file.refs==1);
+        for(int i=0;i<3;i++) assert(data.config[i].rel_fence==-1);
+        return 0;
+    }
+    if(result==0) decon_install_release_fences(&dev,&data,&sync);
     if(failure>=0 && failure<active) {
         assert(result==-EMFILE && installed==0 && released==failure && file.refs==1);
         for(int i=0;i<3;i++) assert(data.config[i].rel_fence==-1);
@@ -104,6 +112,23 @@ int main(int argc,char **argv) {
 
     def test_sparse_windows_rollback(self):
         self.run_fixture(1, 5)
+
+    def test_copyout_failure_cancels_reservations(self):
+        for mask in (0, 1, 5, 7):
+            with self.subTest(mask=mask):
+                self.run_fixture(-2, mask)
+
+    def test_core_copyout_precedes_install_and_queue(self):
+        patch = PATCH.read_text()
+        section = patch.split("diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c ", 1)[1].split("diff --git ", 1)[0]
+        new = "\n".join(line[1:] for line in section.splitlines()
+                        if line.startswith(("+", " ")) and not line.startswith("+++"))
+        fn = new[new.index("static int decon_set_win_config("):]
+        normal = fn[fn.index("decon_reserve_release_fences("):]
+        self.assertLess(normal.index("copy_to_user("), normal.index("decon_install_release_fences("))
+        self.assertLess(normal.index("decon_install_release_fences("), normal.index("kthread_queue_work("))
+        self.assertIn("decon_cancel_release_fences(decon, win_data);", normal)
+        self.assertIn("decon_set_win_config(decon, &win_data, argp);", fn)
 
     def test_release_fd_transferred(self):
         source = HWC.read_text()
