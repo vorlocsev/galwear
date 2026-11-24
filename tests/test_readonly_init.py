@@ -79,6 +79,25 @@ class ReadonlyInitTests(unittest.TestCase):
         self.assertIn("/dev/mmcblk0p17", previous)
         self.assertNotEqual(SRC, ROOT / "src/initramfs/init.c")
 
+    def test_qemu_smoke_has_bounded_execution_and_guest_syscall_checks(self):
+        script = ROOT / "build/r800_readonly_init_qemu_smoke.sh"
+        check = subprocess.run(["sh", "-n", str(script)],
+                               capture_output=True, text=True, timeout=5)
+        self.assertEqual(check.returncode, 0, check.stderr)
+        contents = script.read_text(encoding="utf-8")
+        self.assertIn("timeout --signal=TERM 3s qemu-aarch64 -strace", contents)
+        self.assertIn("Missing read-only PID1 diagnostic message", contents)
+        self.assertIn("Unexpected guest device/network/mount syscall", contents)
+        self.assertIn("nanosleep", contents)
+        self.assertNotIn("gh release", contents)
+
+    def test_qemu_recipe_requires_explicit_elf_and_output_directory(self):
+        script = ROOT / "build/r800_readonly_init_qemu_smoke.sh"
+        check = subprocess.run(["sh", str(script)],
+                               capture_output=True, text=True, timeout=5)
+        self.assertEqual(check.returncode, 2)
+        self.assertIn("usage:", check.stderr)
+
     def test_no_device_transport_in_new_init(self):
         for t in ("socket(", "connect(", "sendto(", "adb", "odin", "JTAG"):
             with self.subTest(token=t):
