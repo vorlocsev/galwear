@@ -1,0 +1,27 @@
+name: SM-R800 graphics trace regression (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-graphics-trace-20261125
+    paths:
+      - .github/workflows/r800-graphics-trace.yml
+      - build/r800_graphics_trace.py
+      - tests/test_graphics_trace.py
+      - tests/test_display_watchdog.py
+      - payload/r800-display-watchdog.sh
+      - payload/android-helper.sh
+      - build/r800_android_userspace_preflight.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-graphics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Graphics trace and display watchdog tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_graphics_trace.py' -v
+          python3 -m unittest discover -s tests -p 'test_display_watchdog.py' -v
+          python3 -m py_compile build/r800_graphics_trace.py
