@@ -22,6 +22,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify checkout is exact triggering commit
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install host test dependencies
+        run: sudo apt-get update && sudo apt-get install -y busybox
       - name: Run all offline regression suites
         run: |
           python3 build/r800_integrated_regression.py --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/r800-integrated-regression.json"
@@ -61,21 +63,57 @@ jobs:
           test "$(git -C "$RUNNER_TEMP/decon-source" rev-parse FETCH_HEAD)" = 50db73fc799f20a7120a8b5f653b16cc123d856f
           git -C "$RUNNER_TEMP/decon-source" show FETCH_HEAD:drivers/video/fbdev/exynos/dpu30/decon.h > "$RUNNER_TEMP/decon.h"
           python3 build/r800_decon_abi_check.py --kernel-header "$RUNNER_TEMP/decon.h" --mirror src/hal/r800_decon_abi.h --ndk "$ANDROID_HOME/ndk/27.2.12479018" --scratch "$RUNNER_TEMP/decon-abi"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          report = {"schema": "galwear-r800-decon-abi-v1", "status": "LAYOUT_COMPILED_BOTH_ABIS",
+                    "commit": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"],
+                    "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "source_commit": "50db73fc799f20a7120a8b5f653b16cc123d856f",
+                    "targets": ["armv7a", "aarch64"], "mirror_sha256": hashlib.sha256(Path("src/hal/r800_decon_abi.h").read_bytes()).hexdigest(),
+                    "safe_to_flash": False}
+          (Path(os.environ["RUNNER_TEMP"]) / "decon-abi.json").write_text(json.dumps(report) + "\n")
+          PY
       - name: Check full kernel patch against pinned source
         run: |
           sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/r800-patch-source" "$RUNNER_TEMP/r800-patch-check.json"
       - name: Compile and link all four HALs
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$ANDROID_HOME/ndk/27.2.12479018" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+          sh build/r800_hal_link_smoke.sh "$GITHUB_WORKSPACE" "$ANDROID_HOME/ndk/27.2.12479018" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+      - name: Collect mandatory JSON reports
+        run: |
+          mkdir "$RUNNER_TEMP/hal-evidence"
+          cp "$RUNNER_TEMP/r800-hal/objects/hal-compile.json" "$RUNNER_TEMP/r800-hal/hal-link.json" "$RUNNER_TEMP/decon-abi.json" "$RUNNER_TEMP/r800-patch-check.json" "$RUNNER_TEMP/hal-evidence/"
       - name: Upload JSON evidence only
         uses: actions/upload-artifact@v4
         with:
           name: r800-hal-link-evidence
-          path: |
-            ${{ runner.temp }}/r800-hal/objects/hal-compile.json
-            ${{ runner.temp }}/r800-hal/hal-link.json
+          path: ${{ runner.temp }}/hal-evidence/*.json
           if-no-files-found: error
+          retention-days: 7
+  integration-evidence:
+    needs: [regression, hal-link]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: r800-integrated-regression-evidence
+          path: ${{ runner.temp }}/integration
+      - uses: actions/download-artifact@v4
+        with:
+          name: r800-hal-link-evidence
+          path: ${{ runner.temp }}/integration
+      - name: Validate same-head and same-attempt evidence
+        run: |
+          python3 build/r800_integration_evidence.py --repo "$GITHUB_WORKSPACE" --directory "$RUNNER_TEMP/integration" --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --output "$RUNNER_TEMP/integration-evidence.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r800-integration-evidence
+          path: ${{ runner.temp }}/integration-evidence.json
+          if-no-files-found: warn
           retention-days: 7
   kernel:
     if: github.event_name == 'workflow_dispatch' && inputs.kernel_repeatability
