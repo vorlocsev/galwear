@@ -142,6 +142,8 @@ def audit(root: Path, config: Path) -> dict:
                  "/vendor/bin/vndservicemanager", "/system/bin/app_process32"):
         try:
             info = elf_check(root, name)
+            if name.endswith("/app_process32") and info["architecture"] != "arm":
+                raise ValueError("Expected 32-bit ARM app_process32")
             if info["interpreter"]:
                 linker = elf_check(root, info["interpreter"])
                 if linker["architecture"] != info["architecture"] or linker["interpreter"]:
