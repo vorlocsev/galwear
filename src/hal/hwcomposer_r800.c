@@ -570,7 +570,7 @@ static int ovl_enabled(struct r800_hwc *h)
 	    h->power_mode != HWC_POWER_MODE_NORMAL)
 		return 0;
 	__system_property_get("vendor.hwc.r800.overlay", v);
-	return v[0] != '0';
+	return !strcmp(v, "1");
 }
 
 /* DECON window parameters for a layer, or -1 if it cannot be an overlay. */
@@ -654,11 +654,20 @@ static int ovl_present(struct r800_hwc *h, hwc_display_contents_1_t *c, int *ret
 		if (l->acquireFenceFd >= 0)
 			close(l->acquireFenceFd);
 		l->acquireFenceFd = -1;
-		if (d.config[w].rel_fence >= 0)
-			close(d.config[w].rel_fence);
-		/* DECON signals the retire fence when this frame has gone out to the
-		 * (command-mode) panel; the buffers are not read after that. */
-		l->releaseFenceFd = d.retire_fence >= 0 ? dup(d.retire_fence) : -1;
+		/* Transfer the kernel-created release FD directly. In the pinned
+		 * command-mode driver it refers to the same sync_file as retire,
+		 * but is a separately owned descriptor. Do not close and re-dup. */
+		l->releaseFenceFd = d.config[w].rel_fence;
+		d.config[w].rel_fence = -1;
+		if (l->releaseFenceFd < 0 && d.retire_fence >= 0) {
+			/* Compatibility with older driver/off-state responses.
+			 * Missing release on an accepted update is exceptional. */
+			l->releaseFenceFd = fcntl(d.retire_fence, F_DUPFD_CLOEXEC, 0);
+			if (l->releaseFenceFd < 0) {
+				LOGE("missing release fence and retire dup failed; disable overlays");
+				h->ovl_off = 1;
+			}
+		}
 	}
 	*retire = d.retire_fence;
 	if (h->ovl_frames++ < 3 || (h->ovl_frames % 1800) == 0)
