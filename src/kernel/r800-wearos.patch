@@ -25926,7 +25926,7 @@ index 7cf98b1a2..53760321f 100644
  		if (pd->parent)
  			exynos_pd_sync_state(pd->parent);
  	} else {
-@@ -575,6 +590,215 @@ static int exynos_pd_init(void)
+@@ -575,6 +590,282 @@ static int exynos_pd_init(void)
  }
  subsys_initcall(exynos_pd_init);
  
@@ -25959,11 +25959,15 @@ index 7cf98b1a2..53760321f 100644
 +static u32 r800_ctrl_opt_saved;
 +#define R800_CTRL_OPT	0x800
 +
-+static void r800_ctrl_opt_restore(void)
++static int r800_ctrl_opt_restore(void)
 +{
-+	if (r800_ctrl_opt_saved && cal_pd_status(r800_dispaud->cal_pdid))
-+		writel(r800_ctrl_opt_saved, r800_cmu_dispaud + R800_CTRL_OPT);
++	if (!r800_ctrl_opt_saved)
++		return 0;
++	if (cal_pd_status(r800_dispaud->cal_pdid) != 1)
++		return -EIO;
++	writel(r800_ctrl_opt_saved, r800_cmu_dispaud + R800_CTRL_OPT);
 +	r800_ctrl_opt_saved = 0;
++	return 0;
 +}
 +
 +/*
@@ -25983,41 +25987,76 @@ index 7cf98b1a2..53760321f 100644
 +static struct exynos_pm_domain *r800_sleep_pd[ARRAY_SIZE(r800_sleep_pd_name)];
 +static bool r800_sleep_pd_was_on[ARRAY_SIZE(r800_sleep_pd_name)];
 +
-+static void r800_sleep_pds_off(void)
++static int r800_pd_restore(struct exynos_pm_domain *pd, bool *was_on)
 +{
-+	int i;
++	int ret, status;
 +
-+	for (i = 0; i < ARRAY_SIZE(r800_sleep_pd); i++) {
-+		struct exynos_pm_domain *pd = r800_sleep_pd[i];
-+
-+		r800_sleep_pd_was_on[i] = false;
-+		if (!(r800_sleep_pd_off & BIT(i)) || !pd || !cal_pd_status(pd->cal_pdid))
-+			continue;
-+		cal_pd_control(pd->cal_pdid, 0);
-+		if (cal_pd_status(pd->cal_pdid)) {
-+			cal_pd_control(pd->cal_pdid, 1);
-+			pr_info("r800-pd: %s did not go off, restored (%d)\n",
-+				pd->name, cal_pd_status(pd->cal_pdid));
-+			continue;
-+		}
-+		r800_sleep_pd_was_on[i] = true;
-+		pr_info("r800-pd: %s off for sleep\n", pd->name);
++	if (!*was_on)
++		return 0;
++	ret = cal_pd_control(pd->cal_pdid, 1);
++	status = cal_pd_status(pd->cal_pdid);
++	if (ret || status != 1) {
++		pr_err("r800-pd: %s restore failed: ret=%d status=%d\n",
++			pd->name, ret, status);
++		return ret < 0 ? ret : -EIO;
 +	}
++	*was_on = false;
++	return 0;
 +}
 +
-+static void r800_sleep_pds_on(void)
++/* Mark ownership before attempting power-off: a failed sequence may
++ * already have modified registers, so the caller must unwind it. */
++static int r800_pd_off_for_sleep(struct exynos_pm_domain *pd, bool *was_on)
 +{
-+	int i;
++	int ret, status;
++
++	if (!pd)
++		return -ENODEV;
++	if (*was_on)
++		return -EBUSY;
++	status = cal_pd_status(pd->cal_pdid);
++	if (status == 0)
++		return 0;
++	if (status != 1)
++		return status < 0 ? status : -EIO;
++	*was_on = true;
++	ret = cal_pd_control(pd->cal_pdid, 0);
++	status = cal_pd_status(pd->cal_pdid);
++	if (ret || status != 0) {
++		pr_err("r800-pd: %s off failed: ret=%d status=%d\n",
++			pd->name, ret, status);
++		return ret < 0 ? ret : -EIO;
++	}
++	pr_info("r800-pd: %s off for sleep\n", pd->name);
++	return 0;
++}
++
++static int r800_sleep_pds_off(void)
++{
++	int i, ret;
++
++	for (i = 0; i < ARRAY_SIZE(r800_sleep_pd); i++) {
++		if (!(r800_sleep_pd_off & BIT(i)))
++			continue;
++		ret = r800_pd_off_for_sleep(r800_sleep_pd[i],
++					    &r800_sleep_pd_was_on[i]);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static int r800_sleep_pds_on(void)
++{
++	int i, ret = 0, err;
 +
 +	for (i = ARRAY_SIZE(r800_sleep_pd) - 1; i >= 0; i--) {
-+		struct exynos_pm_domain *pd = r800_sleep_pd[i];
-+
-+		if (!r800_sleep_pd_was_on[i])
-+			continue;
-+		cal_pd_control(pd->cal_pdid, 1);
-+		pr_info("r800-pd: %s back on (status %d)\n", pd->name,
-+			cal_pd_status(pd->cal_pdid));
++		err = r800_pd_restore(r800_sleep_pd[i],
++				      &r800_sleep_pd_was_on[i]);
++		if (err && !ret)
++			ret = err;
 +	}
++	return ret;
 +}
 +
 +/*
@@ -26067,21 +26106,60 @@ index 7cf98b1a2..53760321f 100644
 +module_param_cb(r800_pd_off, &r800_pd_off_ops, NULL, 0200);
 +module_param_cb(r800_pd_on, &r800_pd_on_ops, NULL, 0200);
 +
++/* syscore_suspend() does not resume the callback which failed; unwind
++ * locally before returning an error. Restore all attempted domains even
++ * if one of them fails, and retain flags for diagnosis/retry. */
++static int r800_pd_unwind(void)
++{
++	int ret, err;
++
++	ret = r800_pd_restore(r800_dispaud, &r800_dispaud_was_on);
++	if (!ret)
++		ret = r800_ctrl_opt_restore();
++	err = r800_sleep_pds_on();
++	return ret ? ret : err;
++}
++
 +static int r800_pd_syscore_suspend(void)
 +{
-+	r800_sleep_pds_off();
-+	r800_dispaud_was_on = false;
-+	if (!r800_dispaud_sleep_off || !r800_dispaud)
-+		return 0;
-+	if (!cal_pd_status(r800_dispaud->cal_pdid))
-+		return 0;
-+	/* the power-off handshake times out while the ABOX DSP still runs
-+	 * (exynos_pd_power_off_pre calls abox_poweroff, which can sleep) */
-+	if (abox_is_on()) {
-+		pr_info("r800-pd: ABOX on, pd-dispaud stays on\n");
-+		return 0;
++	int i, ret, status;
++
++	/* A previous unsuccessful resume must not permit another trial. */
++	if (r800_dispaud_was_on || r800_ctrl_opt_saved)
++		return -EBUSY;
++	for (i = 0; i < ARRAY_SIZE(r800_sleep_pd); i++) {
++		if (r800_sleep_pd_was_on[i])
++			return -EBUSY;
++		if (!(r800_sleep_pd_off & BIT(i)))
++			continue;
++		if (!r800_sleep_pd[i])
++			return -ENODEV;
++		status = cal_pd_status(r800_sleep_pd[i]->cal_pdid);
++		if (status != 0 && status != 1)
++			return status < 0 ? status : -EIO;
 +	}
-+	r800_ctrl_opt_saved = 0;
++	if (r800_dispaud_sleep_off) {
++		if (!r800_dispaud)
++			return -ENODEV;
++		status = cal_pd_status(r800_dispaud->cal_pdid);
++		if (status != 0 && status != 1)
++			return status < 0 ? status : -EIO;
++		if (status == 1 && abox_is_on())
++			return -EBUSY;
++	}
++
++	ret = r800_sleep_pds_off();
++	if (ret)
++		goto rollback;
++	if (!r800_dispaud_sleep_off)
++		return 0;
++	status = cal_pd_status(r800_dispaud->cal_pdid);
++	if (status == 0)
++		return 0;
++	if (status != 1 || abox_is_on()) {
++		ret = status < 0 ? status : -EBUSY;
++		goto rollback;
++	}
 +	if (r800_dispaud_clr_b31 && r800_cmu_dispaud) {
 +		u32 v = readl(r800_cmu_dispaud + R800_CTRL_OPT);
 +
@@ -26089,32 +26167,21 @@ index 7cf98b1a2..53760321f 100644
 +			r800_ctrl_opt_saved = v;
 +			writel(v & ~BIT(31), r800_cmu_dispaud + R800_CTRL_OPT);
 +		}
-+		pr_info("r800-pd: CTRL_OPTION 0x%08x -> 0x%08x\n", v,
-+			readl(r800_cmu_dispaud + R800_CTRL_OPT));
 +	}
-+	cal_pd_control(r800_dispaud->cal_pdid, 0);
-+	if (cal_pd_status(r800_dispaud->cal_pdid)) {
-+		/* half-off: the resume sequence SErrors on it; back on */
-+		cal_pd_control(r800_dispaud->cal_pdid, 1);
-+		r800_ctrl_opt_restore();
-+		pr_info("r800-pd: pd-dispaud did not go off, restored (%d)\n",
-+			cal_pd_status(r800_dispaud->cal_pdid));
++	ret = r800_pd_off_for_sleep(r800_dispaud, &r800_dispaud_was_on);
++	if (!ret)
 +		return 0;
-+	}
-+	r800_dispaud_was_on = true;
-+	pr_info("r800-pd: pd-dispaud off for sleep\n");
-+	return 0;
++
++rollback:
++	if (r800_pd_unwind())
++		pr_err("r800-pd: incomplete rollback; further sleep blocked\n");
++	return ret;
 +}
 +
 +static void r800_pd_syscore_resume(void)
 +{
-+	if (r800_dispaud_was_on) {
-+		cal_pd_control(r800_dispaud->cal_pdid, 1);
-+		r800_ctrl_opt_restore();
-+		pr_info("r800-pd: pd-dispaud back on (status %d)\n",
-+			cal_pd_status(r800_dispaud->cal_pdid));
-+	}
-+	r800_sleep_pds_on();
++	if (r800_pd_unwind())
++		pr_err("r800-pd: incomplete resume; further sleep blocked\n");
 +}
 +
 +static struct syscore_ops r800_pd_syscore_ops = {
