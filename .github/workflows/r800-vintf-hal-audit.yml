@@ -1,0 +1,30 @@
+name: SM-R800 VINTF HAL declaration audit (NON-RELEASE)
+
+on:
+  push:
+    branches:
+      - development/r800-vintf-hal-audit-20261125
+    paths:
+      - .github/workflows/r800-vintf-hal-audit.yml
+      - build/r800_vintf_hal_audit.py
+      - build/r800_android_userspace_preflight.py
+      - tests/test_vintf_hal_audit.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-vintf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline declaration tests
+        run: python3 -m unittest discover -s tests -p 'test_vintf_hal_audit.py' -v
+      - name: Previous Android structural and ELF tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_android_userspace_preflight.py' -v
+          python3 -m unittest discover -s tests -p 'test_android_linker_audit.py' -v
+      - name: Syntax checks
+        run: python3 -m py_compile build/r800_vintf_hal_audit.py
