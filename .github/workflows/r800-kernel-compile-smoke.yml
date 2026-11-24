@@ -9,6 +9,8 @@ on:
       - "build/r800_kernel_compile_smoke.sh"
       - "build/r800_aosp_source_probe.sh"
       - "tests/test_kernel_compile_recipe.py"
+      - "src/kernel/r800-wearos.patch"
+      - "src/kernel/r800.config"
   workflow_dispatch:
 
 permissions:
