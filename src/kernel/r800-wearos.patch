@@ -25908,7 +25908,7 @@ diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
  		if (pd->parent)
  			exynos_pd_sync_state(pd->parent);
  	} else {
-@@ -575,6 +590,279 @@ static int exynos_pd_init(void)
+@@ -575,6 +590,282 @@ static int exynos_pd_init(void)
  }
  subsys_initcall(exynos_pd_init);
  
@@ -26085,12 +26085,16 @@ diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
 +	/* DISPAUD was switched last: restore it before the earlier domains. */
 +	if (r800_dispaud_was_on) {
 +		ret = r800_pd_control_checked(r800_dispaud, true);
-+		if (!ret)
-+			ret = r800_ctrl_opt_restore();
 +		if (ret)
 +			first = ret;
 +		else
 +			r800_dispaud_was_on = false;
++	}
++	/* A failed clock write may precede any attempted power-off. */
++	if (!first) {
++		ret = r800_ctrl_opt_restore();
++		if (ret)
++			first = ret;
 +	}
 +	ret = r800_sleep_pds_on();
 +	return first ? first : ret;
@@ -26128,7 +26132,6 @@ diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
 +		ret = -ENODEV;
 +		goto abort;
 +	}
-+	r800_dispaud_was_on = true;
 +	if (r800_dispaud_clr_b31) {
 +		u32 v = readl(r800_cmu_dispaud + R800_CTRL_OPT);
 +
@@ -26141,6 +26144,7 @@ diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
 +			}
 +		}
 +	}
++	r800_dispaud_was_on = true;
 +	ret = r800_pd_control_checked(r800_dispaud, false);
 +	if (!ret)
 +		return 0;
@@ -26175,11 +26179,10 @@ diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
 +	for (i = 0; i < ARRAY_SIZE(r800_sleep_pd_name); i++)
 +		r800_sleep_pd[i] = exynos_pd_lookup_name(r800_sleep_pd_name[i]);
 +	r800_dispaud = exynos_pd_lookup_name("pd-dispaud");
-+	if (!r800_dispaud) {
++	if (!r800_dispaud)
 +		pr_err("r800-pd: pd-dispaud not found\n");
-+		return 0;
-+	}
-+	r800_cmu_dispaud = ioremap(0x14980000, SZ_4K);
++	else
++		r800_cmu_dispaud = ioremap(0x14980000, SZ_4K);
 +	register_syscore_ops(&r800_pd_syscore_ops);
 +	return 0;
 +}
