@@ -1,8 +1,8 @@
-name: SM-R800 integrated regression and HAL compile (NON-RELEASE)
+name: SM-R800 integrated regression and HAL link (NON-RELEASE)
 on:
   push:
     branches:
-      - development/r800-integration-ci-20261125
+      - development/r800-hal-link-20261125
   workflow_dispatch:
     inputs:
       kernel_repeatability:
@@ -27,7 +27,7 @@ jobs:
           python3 build/r800_integrated_regression.py --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/r800-integrated-regression.json"
       - name: Check shell syntax and kernel patch format
         run: |
-          for f in payload/android-helper.sh payload/start.sh payload/r800-display-watchdog.sh build/mkpayload-release.sh build/r800_hal_compile_smoke.sh; do
+          for f in payload/android-helper.sh payload/start.sh payload/r800-display-watchdog.sh build/mkpayload-release.sh build/r800_hal_link_smoke.sh; do
             sh -n "$f"
           done
           git apply --numstat src/kernel/r800-wearos.patch >/dev/null
@@ -39,7 +39,7 @@ jobs:
           path: ${{ runner.temp }}/r800-integrated-regression.json
           if-no-files-found: warn
           retention-days: 7
-  hal-compile:
+  hal-link:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -53,15 +53,17 @@ jobs:
           git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
           git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
           git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
-      - name: Compile all four HALs
+      - name: Compile and link all four HALs
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$ANDROID_HOME/ndk/27.2.12479018" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
       - name: Upload JSON evidence only
         uses: actions/upload-artifact@v4
         with:
-          name: r800-hal-compile-evidence
-          path: ${{ runner.temp }}/r800-hal/hal-compile.json
+          name: r800-hal-link-evidence
+          path: |
+            ${{ runner.temp }}/r800-hal/objects/hal-compile.json
+            ${{ runner.temp }}/r800-hal/hal-link.json
           if-no-files-found: error
           retention-days: 7
   kernel:
