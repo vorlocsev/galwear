@@ -87,6 +87,39 @@ class RepeatabilityTests(unittest.TestCase):
         result = audit.compare(first, second)
         self.assertTrue(result["two_run_byte_identity_observed"])
 
+    def test_matrix_replicas_same_run_are_independent(self):
+        first = self.emit_mock(33)
+        second = self.emit_mock(33)
+        first["runner_replica"] = "a"
+        second["runner_replica"] = "b"
+        comparison = audit.compare(first, second)
+        self.assertEqual(comparison["status"], "TWO_RUN_HASH_MATCH")
+        self.assertEqual(comparison["first_runner_replica"], "a")
+        self.assertEqual(comparison["second_runner_replica"], "b")
+
+    def test_same_replica_same_run_rejected(self):
+        first = self.emit_mock(33)
+        second = self.emit_mock(33)
+        first["runner_replica"] = second["runner_replica"] = "a"
+        with self.assertRaisesRegex(audit.EvidenceError, "independent"):
+            audit.compare(first, second)
+
+    def test_invalid_replica_manifest_rejected(self):
+        first = self.emit_mock(33)
+        first["runner_replica"] = "third"
+        with self.assertRaisesRegex(audit.EvidenceError, "runner replica"):
+            audit.validate_manifest(first)
+
+    def test_mismatched_kernel_with_matrix_replicas_reports_failure(self):
+        first = self.emit_mock(33)
+        self.image.write_bytes(b"MISMATCHED-IMAGE" * 100)
+        second = self.emit_mock(33)
+        first["runner_replica"] = "a"
+        second["runner_replica"] = "b"
+        result = audit.compare(first, second)
+        self.assertEqual(result["status"], "REJECT_MISMATCH")
+        self.assertIn("image_sha256", result["differences"])
+
     def test_different_kernel_image_rejected(self):
         first = self.emit_mock(33)
         self.image.write_bytes(b"DIFFERENT NON-RELEASE IMAGE")
