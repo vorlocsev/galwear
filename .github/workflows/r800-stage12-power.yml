@@ -1,0 +1,29 @@
+name: SM-R800 kernel suspend/read-only telemetry checks
+
+on:
+  push:
+    branches:
+      - "development/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  power-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect kernel patch syntax without applying it
+        run: git apply --numstat src/kernel/r800-wearos.patch > /dev/null
+      - name: Compile offline power collector and tests
+        run: python3 -m py_compile installer/r800_power_audit.py tests/test_stage12_power.py
+      - name: Verify power snapshot logic and BBD callback guard
+        run: python3 -m unittest discover -s tests -p 'test_stage12_power.py' -v
+      - name: Validate Android helper script
+        run: sh -n payload/android-helper.sh
+      - name: Verify no firmware artifacts
+        run: |
+          test ! -e images/R800-WearOS.tar.md5
+          test ! -e images/vendor.img
