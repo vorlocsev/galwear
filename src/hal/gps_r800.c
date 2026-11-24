@@ -15,6 +15,8 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <math.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -127,13 +129,24 @@ static int want_on;          /* framework asked for a session */
 static volatile int running; /* reader thread alive */
 
 /* call with lock held */
-static void send_line(const char *s)
+static int send_line(const char *s)
 {
-	if (sock >= 0 && write(sock, s, strlen(s)) < 0) {
-		LOGE("send '%s': %s", s, strerror(errno));
-		close(sock);
-		sock = -1;
+	if (sock < 0)
+		return -ENOTCONN;
+	size_t len = strlen(s), done = 0;
+	while (done < len) {
+		ssize_t n = send(sock, s + done, len - done, MSG_NOSIGNAL | MSG_DONTWAIT);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0) {
+			LOGE("bridge send failed");
+			/* Reader owns close(); shutdown wakes it without recycling fd. */
+			shutdown(sock, SHUT_RDWR);
+			return -EIO;
+		}
+		done += (size_t)n;
 	}
+	return 0;
 }
 
 static void report_status(uint16_t st)
@@ -149,7 +162,7 @@ static void report_status(uint16_t st)
  * One report per epoch, sent when the epoch's RMC arrives.
  */
 static GnssSvStatus sv_cur;		/* being filled for this epoch */
-static int used[8][100];		/* [constellation][svid] used in fix */
+static int used[8][264];		/* [constellation][svid] used in fix */
 
 static int talker_constellation(const char *t)
 {
@@ -183,6 +196,7 @@ static void map_prn(int c, int prn, int *oc, int *svid)
 static int field(const char **p, char *out, int n)
 {
 	int i = 0;
+	out[0] = 0;
 	if (!**p)
 		return 0;
 	while (**p && **p != ',' && **p != '*') {
@@ -248,7 +262,7 @@ static void parse_gsa(const char *s, int c)
 		if (!f[0])
 			continue;
 		map_prn(c ? c : 1, atoi(f), &oc, &svid);
-		if (oc > 0 && oc < 8 && svid > 0 && svid < 100)
+		if (oc > 0 && oc < 8 && svid > 0 && svid < 264)
 			used[oc][svid] = 1;
 	}
 }
@@ -258,10 +272,8 @@ static void report_sv(void)
 	int i;
 	for (i = 0; i < sv_cur.num_svs; i++) {
 		GnssSvInfo *v = &sv_cur.gnss_sv_list[i];
-		if (v->constellation < 8 && v->svid > 0 && v->svid < 100 && used[v->constellation][v->svid])
+		if (v->constellation < 8 && v->svid > 0 && v->svid < 264 && used[v->constellation][v->svid])
 			v->flags |= 4;
-		if (v->elevation > 0 || v->azimuth > 0)
-			v->flags |= 2;	/* position known: from almanac/LTO at least */
 	}
 	sv_cur.size = sizeof(sv_cur);
 	if (cb && cb->size >= sizeof(GpsCallbacks) && cb->gnss_sv_status_cb) {
@@ -301,32 +313,108 @@ static void handle_nmea_sv(const char *s)
 		report_sv();
 }
 
+/* Reject malformed/overflowing numbers before narrowing to HAL fields. */
+static int number(const char **p, double *out)
+{
+	char *end;
+	if (**p != ' ')
+		return 0;
+	const char *s = *p + 1;
+	if (!*s || *s == ' ' || *s == '\t')
+		return 0;
+	errno = 0;
+	double v = strtod(s, &end);
+	if (end == s || errno == ERANGE || !isfinite(v) || (*end && *end != ' '))
+		return 0;
+	*out = v;
+	*p = end;
+	return 1;
+}
+
+static int utc_ms(const char *p, const char **endp, int64_t *out)
+{
+	char *end;
+	if (*p < '0' || *p > '9')
+		return 0;
+	errno = 0;
+	long long v = strtoll(p, &end, 10);
+	if (errno == ERANGE || v <= 0 || (*end && *end != ' '))
+		return 0;
+	*endp = end;
+	*out = v;
+	return 1;
+}
+
+static int parse_fix(const char *p, GpsLocation *loc)
+{
+	double v[7];
+	for (int i = 0; i < 7; i++)
+		if (!number(&p, &v[i]))
+			return 0;
+	int64_t ts;
+	const char *end;
+	if (*p != ' ' || !utc_ms(p + 1, &end, &ts) || *end)
+		return 0;
+	if (v[0] < 1 || v[0] > 31 || (unsigned)v[0] != v[0] ||
+	    !((unsigned)v[0] & 1) || v[1] < -90 || v[1] > 90 ||
+	    v[2] < -180 || v[2] > 180 || v[3] < -20000 || v[3] > 100000 ||
+	    v[4] < 0 || v[4] > 10000 || v[5] < 0 || v[5] >= 360 ||
+	    v[6] < 0 || v[6] > 10000000)
+		return 0;
+	memset(loc, 0, sizeof(*loc));
+	loc->size = sizeof(*loc);
+	loc->flags = (uint16_t)v[0];
+	loc->latitude = v[1]; loc->longitude = v[2]; loc->altitude = v[3];
+	loc->speed = (float)v[4]; loc->bearing = (float)v[5]; loc->accuracy = (float)v[6];
+	loc->timestamp = ts;
+	return 1;
+}
+
+static int hex_digit(char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	return -1;
+}
+
+static int valid_nmea(const char *s)
+{
+	if (*s++ != '$')
+		return 0;
+	unsigned sum = 0;
+	while (*s && *s != '*') {
+		if ((unsigned char)*s < 32 || (unsigned char)*s > 126)
+			return 0;
+		sum ^= (unsigned char)*s++;
+	}
+	if (*s != '*' || !s[1] || !s[2] || s[3])
+		return 0;
+	int a = hex_digit(s[1]), b = hex_digit(s[2]);
+	return a >= 0 && b >= 0 && sum == (unsigned)(a * 16 + b);
+}
+
 static void handle_line(char *l)
 {
+	pthread_mutex_lock(&lock);
+	int active = want_on;
+	pthread_mutex_unlock(&lock);
+	if (!active)
+		return;
 	if (!strncmp(l, "FIX ", 4)) {
 		GpsLocation loc;
-		unsigned flags;
-		long long ts;
-		memset(&loc, 0, sizeof(loc));
-		loc.size = sizeof(loc);
-		if (sscanf(l + 4, "%u %lf %lf %lf %f %f %f %lld", &flags, &loc.latitude,
-			   &loc.longitude, &loc.altitude, &loc.speed, &loc.bearing, &loc.accuracy,
-			   &ts) == 8) {
-			loc.flags = (uint16_t)flags;
-			loc.timestamp = ts;
-			if (cb && cb->location_cb)
-				cb->location_cb(&loc);
-		}
+		if (parse_fix(l + 3, &loc) && cb && cb->location_cb)
+			cb->location_cb(&loc);
 	} else if (!strncmp(l, "NMEA ", 5)) {
-		char *p = l + 5, *s;
-		long long ts = strtoll(p, &s, 10);
-		if (*s == ' ')
-			s++;
+		const char *s;
+		int64_t ts;
+		if (!utc_ms(l + 5, &s, &ts) || *s != ' ' || !valid_nmea(++s))
+			return;
 		if (cb && cb->nmea_cb)
 			cb->nmea_cb(ts, s, strlen(s));
 		handle_nmea_sv(s);
-	} else if (!strncmp(l, "STATUS ", 7)) {
-		report_status((uint16_t)atoi(l + 7));
+	} else if (!strncmp(l, "STATUS ", 7) && l[7] >= '1' && l[7] <= '4' && !l[8]) {
+		report_status((uint16_t)(l[7] - '0'));
 	}
 }
 
@@ -335,6 +423,7 @@ static void reader(void *arg)
 {
 	char buf[4096];
 	size_t have = 0;
+	int discard = 0;
 	(void)arg;
 
 	while (running) {
@@ -362,8 +451,14 @@ static void reader(void *arg)
 				send_line("START\n");
 			pthread_mutex_unlock(&lock);
 			have = 0;
+			discard = 0;
+			memset(&sv_cur, 0, sizeof(sv_cur));
+			memset(used, 0, sizeof(used));
 		}
-		ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
+		char chunk[512];
+		ssize_t n = read(fd, chunk, sizeof(chunk));
+		if (n < 0 && errno == EINTR)
+			continue;
 		if (n <= 0) {
 			LOGE("bridge connection lost");
 			pthread_mutex_lock(&lock);
@@ -375,18 +470,22 @@ static void reader(void *arg)
 			sleep(1);
 			continue;
 		}
-		have += n;
-		buf[have] = 0;
-		char *start = buf, *nl;
-		while ((nl = strchr(start, '\n'))) {
-			*nl = 0;
-			handle_line(start);
-			start = nl + 1;
+		for (ssize_t i = 0; i < n; i++) {
+			char ch = chunk[i];
+			if (ch == '\n') {
+				if (!discard) {
+					buf[have] = 0;
+					handle_line(buf);
+				}
+				have = 0;
+				discard = 0;
+			} else if (!discard) {
+				if (!ch || have == sizeof(buf) - 1)
+					discard = 1;
+				else
+					buf[have++] = ch;
+			}
 		}
-		have = strlen(start);
-		memmove(buf, start, have);
-		if (have >= sizeof(buf) - 1)
-			have = 0;   /* overlong line: drop */
 	}
 }
 
@@ -434,22 +533,27 @@ static void gps_cleanup(void)
 static int gps_inject_time(GpsUtcTime t, int64_t ref, int unc)
 {
 	char l[96];
+	if (t <= 0 || ref < 0 || unc < 0)
+		return -EINVAL;
 	/* ref = elapsedRealtime when t was valid; gpsbridge turns it into its clock */
 	snprintf(l, sizeof(l), "TIME %lld %lld %d\n", (long long)t, (long long)ref, unc);
 	pthread_mutex_lock(&lock);
-	send_line(l);
+	int r = send_line(l);
 	pthread_mutex_unlock(&lock);
-	return 0;
+	return r;
 }
 
 static int gps_inject_location(double lat, double lon, float acc)
 {
 	char l[96];
+	if (!isfinite(lat) || !isfinite(lon) || !isfinite(acc) ||
+	    lat < -90 || lat > 90 || lon < -180 || lon > 180 || acc < 0 || acc > 10000000)
+		return -EINVAL;
 	snprintf(l, sizeof(l), "LOC %.6f %.6f %.0f\n", lat, lon, (double)acc);
 	pthread_mutex_lock(&lock);
-	send_line(l);
+	int r = send_line(l);
 	pthread_mutex_unlock(&lock);
-	return 0;
+	return r;
 }
 
 static void gps_delete_aiding_data(uint16_t f) { (void)f; }
