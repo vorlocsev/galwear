@@ -28570,7 +28570,7 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-i
  static inline void pmucal_rae_write(struct pmucal_seq *seq)
  {
  	if (seq->mask == U32_MAX)
-@@ -190,9 +221,15 @@
+@@ -190,92 +221,90 @@
  
  void pmucal_rae_save_seq(struct pmucal_seq *seq, unsigned int seq_size)
  {
@@ -28587,7 +28587,10 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-i
  		switch (seq[i].access_type) {
  		case PMUCAL_COND_SAVE_RESTORE:
  			if (!pmucal_rae_check_condition(&seq[i]))
-@@ -203,16 +240,11 @@
+ 				break;
+ 		case PMUCAL_SAVE_RESTORE:
+ 			pmucal_rae_read(&seq[i]);
+ 			seq[i].need_restore = true;
  			break;
  		case PMUCAL_READ:
  			pmucal_rae_read(&seq[i]);
@@ -28604,7 +28607,8 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-i
  		default:
  			break;
  		}
-@@ -221,51 +253,40 @@
+ 	}
+ }
  
  int pmucal_rae_restore_seq(struct pmucal_seq *seq, unsigned int seq_size)
  {
@@ -28672,7 +28676,10 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-i
  			break;
  		case PMUCAL_WRITE:
  			pmucal_rae_write(&seq[i]);
-@@ -276,6 +297,14 @@
+ 			break;
+ 		default:
+ 			break;
+ 		}
  	}
  
  	return 0;
