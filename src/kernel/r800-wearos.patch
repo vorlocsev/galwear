@@ -26381,22 +26381,29 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	if (!pm_info->is_early_wakeup)
  		pr_debug("%s %s: post sleep, preparing to return\n",
  						EXYNOS_PM_PREFIX, __func__);
-@@ -312,8 +355,11 @@
+@@ -312,42 +355,70 @@
  {
  	unsigned int psci_index;
  	unsigned int prev_mif = 0, post_mif = 0;
 -	unsigned int prev_req, off_count;
-+	unsigned int prev_req, off_count = 0;
-+	int ret, diag_ret;
++	unsigned int prev_req, post_req, off_count = 0;
++	int ret, diag_ret, mif_ret;
  
 +	if (!r800_pm_prepared)
 +		return -EINVAL;
  	psci_index = pm_info->suspend_psci_idx;
  
  	/* Send an IPI if test_early_wakeup flag is set */
-@@ -323,12 +369,19 @@
- 	prev_mif = acpm_get_mifdn_count();
- 	prev_req = acpm_get_mif_request();
+ 	if (pm_dbg->test_early_wakeup)
+ 		arch_send_call_function_single_ipi(0);
+ 
+-	prev_mif = acpm_get_mifdn_count();
+-	prev_req = acpm_get_mif_request();
++	mif_ret = acpm_read_mif_state(&prev_mif, &prev_req);
++	if (mif_ret) {
++		pr_err("r800-pm: pre-suspend ACPM state unavailable (%d)\n", mif_ret);
++		return mif_ret;
++	}
  
 -	exynos_pmu_read(CPU_INFORM4, &off_count);
 -	pr_info("%s: prev mif_count %d %d\n",EXYNOS_PM_PREFIX, prev_mif, off_count);
@@ -26417,12 +26424,17 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  
  	pr_info("%s: is_early_wakeup : %d\n", EXYNOS_PM_PREFIX, pm_info->is_early_wakeup);
  	if (pm_info->is_early_wakeup)
-@@ -336,18 +389,24 @@
+ 		pr_info("%s %s: return to originator\n",
  				EXYNOS_PM_PREFIX, __func__);
  
- 	post_mif = acpm_get_mifdn_count();
+-	post_mif = acpm_get_mifdn_count();
 -	exynos_pmu_read(CPU_INFORM4, &off_count);
 -	pr_info("%s: post mif_count %d	%d\n",EXYNOS_PM_PREFIX, post_mif,off_count);
++	mif_ret = acpm_read_mif_state(&post_mif, &post_req);
++	if (mif_ret) {
++		pr_err("r800-pm: post-suspend ACPM state unavailable (%d)\n", mif_ret);
++		return ret ? (ret < 0 ? ret : -EBUSY) : mif_ret;
++	}
 +	diag_ret = exynos_pmu_read(CPU_INFORM4, &off_count);
 +	if (diag_ret)
 +		pr_warn("r800-pm: post-suspend INFORM4 unavailable (%d)\n", diag_ret);
@@ -26432,6 +26444,11 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
 +	if (ret)
 +		return ret < 0 ? ret : -EBUSY;
 +
++	/* Unsigned subtraction permits a single 32-bit wrap, not a large reset. */
++	if (post_mif - prev_mif > 1) {
++		pr_warn("r800-pm: ambiguous MIF counter delta %u\n", post_mif - prev_mif);
++		return -EIO;
++	}
  	if (post_mif == prev_mif) {
  		pr_info("%s: MIF blocked. MIF request Mster was  0x%x\n", EXYNOS_PM_PREFIX, prev_req);
  		return -EBUSY;
@@ -29041,3 +29058,180 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_system.c b/drivers/soc/samsung/ca
  		return ret;
  	}
  	pmucal_powermode_hint_clear();
+diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exynos-flexpmu-dbg.c
+--- a/drivers/soc/samsung/exynos-flexpmu-dbg.c
++++ b/drivers/soc/samsung/exynos-flexpmu-dbg.c
+@@ -19,6 +19,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/device.h>
+ #include <linux/slab.h>
++#include <linux/spinlock.h>
+ 
+ #define EXYNOS_FLEXPMU_DBG_PREFIX	"EXYNOS-FLEXPMU-DBG: "
+ 
+@@ -154,20 +155,60 @@
+ static struct dentry *flexpmu_dbg_root;
+ 
+ 
++/* Checked readers also run with IRQs disabled during system suspend. */
++static DEFINE_SPINLOCK(r800_mif_lock);
++static void __iomem *r800_mif_base;
++static unsigned int r800_mif_size;
++
++#define MIF_REQ_MASK		(0x00FF0000)
++#define MIF_REQ_SHIFT		(16)
++#define R800_MIF_COUNT_OFF	(DATA_LINE * DID_MIF_COUNT_SLEEP + DATA_IDX + 4)
++#define R800_MIF_REQ_OFF	(DATA_LINE * DID_SW_FLAG + DATA_IDX + 4)
++
++int acpm_read_mif_state(u32 *count, u32 *request)
++{
++	unsigned long flags;
++	u32 c, r;
++	int ret = 0;
++
++	if (!count || !request || count == request)
++		return -EINVAL;
++	spin_lock_irqsave(&r800_mif_lock, flags);
++	if (!r800_mif_base) {
++		ret = -ENODEV;
++		goto out;
++	}
++	if (r800_mif_size < R800_MIF_COUNT_OFF + sizeof(u32) ||
++	    r800_mif_size < R800_MIF_REQ_OFF + sizeof(u32)) {
++		ret = -ERANGE;
++		goto out;
++	}
++	c = __raw_readl(r800_mif_base + R800_MIF_COUNT_OFF);
++	r = __raw_readl(r800_mif_base + R800_MIF_REQ_OFF);
++	*count = c;
++	*request = (r & MIF_REQ_MASK) >> MIF_REQ_SHIFT;
++out:
++	spin_unlock_irqrestore(&r800_mif_lock, flags);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(acpm_read_mif_state);
++
++/* Legacy ABI cannot distinguish unavailable data from a genuine zero. */
+ u32 acpm_get_mifdn_count(void)
+ {
+-	return __raw_readl(flexpmu_dbg_base + (DATA_LINE * DID_MIF_COUNT_SLEEP) + DATA_IDX + 4);
++	u32 count = 0, request;
++
++	acpm_read_mif_state(&count, &request);
++	return count;
+ }
+ EXPORT_SYMBOL_GPL(acpm_get_mifdn_count);
+ 
+-#define MIF_REQ_MASK		(0x00FF0000)
+-#define MIF_REQ_SHIFT		(16)
+ u32 acpm_get_mif_request(void)
+ {
+-	u32 reg = __raw_readl(flexpmu_dbg_base + (DATA_LINE * DID_SW_FLAG) + DATA_IDX + 4);
+-
+-	return ((reg & MIF_REQ_MASK) >> MIF_REQ_SHIFT);
++	u32 count, request = 0;
+ 
++	acpm_read_mif_state(&count, &request);
++	return request;
+ }
+ EXPORT_SYMBOL_GPL(acpm_get_mif_request);
+ 
+@@ -490,6 +531,7 @@
+ 	unsigned int len = 0;
+ 	unsigned int data_base = 0;
+ 	unsigned int data_size = 0;
++	unsigned long flags;
+ 	int i;
+ 
+ 	flexpmu_dbg_info = kzalloc(sizeof(struct dbgfs_info) * FID_MAX, GFP_KERNEL);
+@@ -501,7 +543,7 @@
+ 	}
+ 
+ 	prop = of_get_property(pdev->dev.of_node, "data-base", &len);
+-	if (!prop) {
++	if (!prop || len != sizeof(*prop)) {
+ 		pr_err("%s %s: can not read data-base in DT\n",
+ 				EXYNOS_FLEXPMU_DBG_PREFIX, __func__);
+ 		ret = -EINVAL;
+@@ -510,7 +552,7 @@
+ 	data_base = be32_to_cpup(prop);
+ 
+ 	prop = of_get_property(pdev->dev.of_node, "data-size", &len);
+-	if (!prop) {
++	if (!prop || len != sizeof(*prop)) {
+ 		pr_err("%s %s: can not read data-base in DT\n",
+ 				EXYNOS_FLEXPMU_DBG_PREFIX, __func__);
+ 		ret = -EINVAL;
+@@ -518,15 +560,22 @@
+ 	}
+ 	data_size = be32_to_cpup(prop);
+ 
+-	if (data_base && data_size)
+-		flexpmu_dbg_base = ioremap(data_base, data_size);
++	if (!data_base || (data_base & 3) || data_size < DATA_LINE * DID_MAX) {
++		ret = -EINVAL;
++		goto err_dbgfs_probe;
++	}
++	flexpmu_dbg_base = ioremap(data_base, data_size);
++	if (!flexpmu_dbg_base) {
++		ret = -ENOMEM;
++		goto err_dbgfs_probe;
++	}
+ 
+ 	flexpmu_dbg_root = debugfs_create_dir("flexpmu-dbg", NULL);
+-	if (!flexpmu_dbg_root) {
++	if (IS_ERR_OR_NULL(flexpmu_dbg_root)) {
+ 		pr_err("%s %s: could not create debugfs root dir\n",
+ 				EXYNOS_FLEXPMU_DBG_PREFIX, __func__);
+ 		ret = -ENOMEM;
+-		goto err_dbgfs_probe;
++		goto err_unmap;
+ 	}
+ 
+ 	for (i = 0; i < FID_MAX; i++) {
+@@ -548,9 +597,16 @@
+ 	}
+ 
+ 	platform_set_drvdata(pdev, flexpmu_dbg_info);
++	spin_lock_irqsave(&r800_mif_lock, flags);
++	r800_mif_base = flexpmu_dbg_base;
++	r800_mif_size = data_size;
++	spin_unlock_irqrestore(&r800_mif_lock, flags);
+ 
+ 	return 0;
+ 
++err_unmap:
++	iounmap(flexpmu_dbg_base);
++	flexpmu_dbg_base = NULL;
+ err_dbgfs_probe:
+ 	kfree(flexpmu_dbg_info);
+ err_flexpmu_info:
+@@ -560,7 +616,12 @@
+ static int exynos_flexpmu_dbg_remove(struct platform_device *pdev)
+ {
+ 	struct dbgfs_info *flexpmu_dbg_info = platform_get_drvdata(pdev);
++	unsigned long flags;
+ 
++	spin_lock_irqsave(&r800_mif_lock, flags);
++	r800_mif_base = NULL;
++	r800_mif_size = 0;
++	spin_unlock_irqrestore(&r800_mif_lock, flags);
+ 	debugfs_remove_recursive(flexpmu_dbg_root);
+ 	kfree(flexpmu_dbg_info);
+ 	platform_set_drvdata(pdev, NULL);
+diff --git a/include/soc/samsung/exynos-pm.h b/include/soc/samsung/exynos-pm.h
+--- a/include/soc/samsung/exynos-pm.h
++++ b/include/soc/samsung/exynos-pm.h
+@@ -66,7 +66,12 @@
+ #ifdef CONFIG_EXYNOS_FLEXPMU_DBG
+ extern int acpm_get_mifdn_count(void);
+ extern int acpm_get_mif_request(void);
++extern int acpm_read_mif_state(u32 *count, u32 *request);
+ #else
++static inline int acpm_read_mif_state(u32 *count, u32 *request)
++{
++	return -EOPNOTSUPP;
++}
+ static inline int acpm_get_mif_request(void)
+ {
+ 	return 0;
