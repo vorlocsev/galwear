@@ -15,3 +15,13 @@ diff --git a/src/pcm.c b/src/pcm.c
          pcm->sync_ptr->flags = flags;
          if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_SYNC_PTR,
                              pcm->sync_ptr) < 0) {
+@@ -975,7 +982,9 @@
+         pcm->ops->munmap(pcm->data, pcm->mmap_buffer, pcm_frames_to_bytes(pcm, pcm->buffer_size));
+     }
+ 
++#ifdef TINYALSA_USES_PLUGINS
+     snd_utils_close_dev_node(pcm->snd_node);
++#endif
+     pcm->ops->close(pcm->data);
+     pcm->buffer_size = 0;
+     pcm->fd = -1;
