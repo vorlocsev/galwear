@@ -230,6 +230,23 @@ index 220f7848c..70443e2c5 100644
  			gpu_set_target_clk_vol(platform->min_lock, false);
  
  		GPU_LOG(DVFS_DEBUG, LSI_GPU_MIN_LOCK, lock_type, clock,
+diff --git a/drivers/gpu/arm/t72x/r28p0/platform/exynos/gpu_notifier.c b/drivers/gpu/arm/t72x/r28p0/platform/exynos/gpu_notifier.c
+--- a/drivers/gpu/arm/t72x/r28p0/platform/exynos/gpu_notifier.c
++++ b/drivers/gpu/arm/t72x/r28p0/platform/exynos/gpu_notifier.c
+@@ -101,7 +101,12 @@ static int gpu_power_on(struct kbase_device *kbdev)
+ #ifdef CONFIG_MALI_RT_PM
+ 	if (!kbdev->is_power_on) {
+ 		ret = pm_runtime_get_sync(kbdev->dev);
+-		kbdev->is_power_on = true;
++		if (ret < 0) {
++			/* get_sync increments usage_count even on error. */
++			pm_runtime_put_noidle(kbdev->dev);
++		} else {
++			kbdev->is_power_on = true;
++		}
+ 	}
+ #else
+ 	ret = 0;
 diff --git a/drivers/gpu/drm/Kconfig b/drivers/gpu/drm/Kconfig
 index a050a9aa9..c3e283fca 100644
 --- a/drivers/gpu/drm/Kconfig
