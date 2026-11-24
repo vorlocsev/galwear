@@ -26629,10 +26629,11 @@ diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos
  	if (!(sleep_mask & WAKEUP_MASK_RTC_ALARM) ||
  			!(sleep_mask & WAKEUP_MASK_RTC_TICK))
  		return 0;
-@@ -140,7 +241,13 @@
+@@ -140,58 +241,79 @@
  	unsigned int mode, mask_index = 0;
  
- 	root = of_find_node_by_name(np, "wakeup-masks");
+-	root = of_find_node_by_name(np, "wakeup-masks");
++	root = of_get_child_by_name(np, "wakeup-masks");
 +	if (!root)
 +		return -ENODEV;
  	pm_info->num_wakeup_mask = of_get_child_count(root);
@@ -26642,8 +26643,50 @@ diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos
 +	}
  
  	ret = alloc_wakeup_mask(pm_info->num_wakeup_mask);
- 	if (ret)
-@@ -177,22 +284,31 @@
+-	if (ret)
+-		return ret;
++	if (ret)
++		goto put_root;
+ 
+ 	for_each_child_of_node(root, child) {
+ 		for_each_syspwr_mode(mode) {
+ 			ret = of_property_read_u32_index(child, "mask",
+ 				mode, &pm_info->wakeup_mask[mode][mask_index]);
+-			if (ret)
+-				return ret;
++			if (ret)
++				goto put_child;
+ 		}
+ 
+ 		ret = of_property_read_u32(child, "reg-offset",
+ 				&pm_info->wakeup_mask_offset[mask_index]);
+-		if (ret)
+-			return ret;
++		if (ret)
++			goto put_child;
+ 
+ 		mask_index++;
+ 	}
+ 
+-	return 0;
++	ret = 0;
++	goto put_root;
++put_child:
++	of_node_put(child);
++put_root:
++	of_node_put(root);
++	return ret;
+ }
+ 
+ static int __init exynos_powermode_init(void)
+ {
+ 	struct device_node *np;
+ 	int ret;
+ 
+ 	pm_info = kzalloc(sizeof(struct exynos_powermode_info), GFP_KERNEL);
+ 	if (pm_info == NULL) {
+ 		pr_err("%s: failed to allocate exynos_powermode_info\n", __func__);
+ 		return -ENOMEM;
  	}
  
  	np = of_find_node_by_name(NULL, "exynos-powermode");
@@ -26685,7 +26728,6 @@ diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos
 +	return ret;
  }
  arch_initcall(exynos_powermode_init);
- 
 diff --git a/drivers/tty/serial/samsung.c b/drivers/tty/serial/samsung.c
 index c8a220d15..49ce04e8d 100644
 --- a/drivers/tty/serial/samsung.c
