@@ -49,17 +49,16 @@ class CompileRecipeTests(unittest.TestCase):
         self.assertIn('git -C "$SOURCE" apply "$REPO/src/kernel/r800-wearos.patch"', s)
         self.assertIn('[ ! -e "$OUT" ]', s)
 
-    def test_dt_bindings_header_changes_symlink_to_regular_file(self):
+    def test_no_duplicate_kernel_input_event_codes_header(self):
         patch = (ROOT / "src/kernel/r800-wearos.patch").read_text()
+        # The baseline's dt-bindings file is already a symlink to
+        # include/uapi/linux/input-event-codes.h. Expanding the symlink to
+        # an identical regular file is unnecessary and broke git apply.
         header = (
             "diff --git a/include/dt-bindings/input/linux-event-codes.h "
             "b/include/dt-bindings/input/linux-event-codes.h"
         )
-        section = patch.split(header, 1)[1].split("diff --git ", 1)[0]
-        self.assertIn("old mode 120000", section)
-        self.assertIn("new mode 100644", section)
-        self.assertNotIn("index 693bbcd26..5bef201e9 120000", section)
-        self.assertIn("+/* SPDX-License-Identifier", section)
+        self.assertNotIn(header, patch)
 
     def test_no_arguments_does_not_create_files(self):
         result = subprocess.run(["sh", str(SCRIPT)],
