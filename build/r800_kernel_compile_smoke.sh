@@ -94,8 +94,15 @@ if [ -n "${R800_SMOKE_INITRAMFS_LIST:-}" ]; then
     # Linux 4.19 creates a gen_init_cpio archive when embedding user input.
     # The exact archive filename is compression-dependent; require evidence
     # of generated initramfs data, not merely a Kconfig path.
-    find "$OUT/usr" -maxdepth 1 -type f -name 'initramfs_data.cpio*' |
-        grep -q . || { echo "Embedded cpio build artifact not generated"; exit 2; }
+    CPIO="$OUT/usr/initramfs_data.cpio.gz"
+    if [ ! -s "$CPIO" ]; then
+        CPIO="$OUT/usr/initramfs_data.cpio"
+    fi
+    [ -s "$CPIO" ] || { echo "Embedded cpio build artifact not generated"; exit 2; }
+    python3 "$REPO/build/r800_cpio_audit.py" \
+        --archive "$CPIO" \
+        --init "$(dirname "$R800_SMOKE_INITRAMFS_LIST")/init" \
+        --report "$OUT/embedded-cpio-audit.json"
 else
     echo "NOTE: initramfs disabled in temporary config; image is NOT a flashable release"
 fi
