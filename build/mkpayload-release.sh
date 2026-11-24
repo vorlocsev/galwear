@@ -41,7 +41,7 @@ rm -f $P/charger/*.log
 for f in keepwifi.dex gpsbridge splash.raw; do cp -a $SRC/$f $P/; done
 
 # Scripts from this release tree (user mode by default, android/DEV for development)
-for f in start.sh android-helper.sh dockrot.sh udhcpc.sh repair.sh; do
+for f in start.sh android-helper.sh r800-display-watchdog.sh dockrot.sh udhcpc.sh repair.sh; do
     install -m 755 $REL/payload/$f $P/$f
 done
 install -m 755 $REL/src/tools/sensors/tzchroot.sh $P/tzchroot.sh
