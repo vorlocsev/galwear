@@ -49,6 +49,18 @@ class CompileRecipeTests(unittest.TestCase):
         self.assertIn('git -C "$SOURCE" apply "$REPO/src/kernel/r800-wearos.patch"', s)
         self.assertIn('[ ! -e "$OUT" ]', s)
 
+    def test_dt_bindings_header_changes_symlink_to_regular_file(self):
+        patch = (ROOT / "src/kernel/r800-wearos.patch").read_text()
+        header = (
+            "diff --git a/include/dt-bindings/input/linux-event-codes.h "
+            "b/include/dt-bindings/input/linux-event-codes.h"
+        )
+        section = patch.split(header, 1)[1].split("diff --git ", 1)[0]
+        self.assertIn("old mode 120000", section)
+        self.assertIn("new mode 100644", section)
+        self.assertNotIn("index 693bbcd26..5bef201e9 120000", section)
+        self.assertIn("+/* SPDX-License-Identifier", section)
+
     def test_no_arguments_does_not_create_files(self):
         result = subprocess.run(["sh", str(SCRIPT)],
                                 capture_output=True, text=True, timeout=5)
