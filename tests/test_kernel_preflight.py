@@ -158,9 +158,11 @@ class SyntheticKernelTreeTests(unittest.TestCase):
         self.assertEqual(self.file.read_text(), "dirty!\n")
 
     def test_bad_patch_context_refused(self):
+        # This diff only adds a line, so alter its actual context line.
+        original_patch = self.patch.read_text()
+        self.assertIn(" start\n", original_patch)
         self.patch.write_text(
-            self.patch.read_text().replace("+changed", "+changed")
-            .replace("-start", "-different-start"))
+            original_patch.replace(" start\n", " missing-original\n", 1))
         with self.assertRaisesRegex(gate.PreflightError, "Git apply returned"):
             gate.inspect_tree(
                 self.kernel, self.patch, expected_base=self.head)
