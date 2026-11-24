@@ -130,6 +130,8 @@ struct r800_hwc {
 	pthread_cond_t cond;
 	int vsync_enabled;
 	int blanked;
+	int power_unknown;                 /* failed transition: do not present until recovered */
+	int real_blanked;
 	int power_mode;                    /* HWC_POWER_MODE_*: last mode set */
 	int logged_handle;
 	unsigned long frames;
@@ -351,7 +353,7 @@ static void fb_fill(struct r800_hwc *h, uint32_t col)
 	ioctl(h->fb_fd, FBIOPAN_DISPLAY, &h->var);
 }
 
-static void fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
+static int fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 {
 	const unsigned int w = h->var.xres, ht = h->var.yres, bpp = h->var.bits_per_pixel / 8;
 	const unsigned int halves = (h->var.yres_virtual >= 2 * ht &&
@@ -362,16 +364,16 @@ static void fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 	int stride, err, matched;
 
 	if (!h->fb_mem)
-		return;
+		return -EIO;
 	/* On any failure keep the previous frame on screen (the old debug colour
 	 * fills showed up as a white screen whenever gralloc ran out of memory). */
 	if (!h->gralloc || !buf)
-		return;
+		return -EIO;
 	if (!handle_ok(buf)) {        /* not a buffer (e.g. a color): keep the last frame */
 		static unsigned long bad;
 		if (bad++ < 5 || (bad % 600) == 0)
 			LOGW("skip %s: bad handle %p (%lu)", is_target ? "target" : "fallback", (void *)buf, bad);
-		return;
+		return -EIO;
 	}
 	stride = handle_stride(h, buf, (int)w, (int)ht, &matched);
 	{
@@ -387,7 +389,7 @@ static void fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 			if (skipped++ < 5 || (skipped % 600) == 0)
 				LOGW("skip %s buffer: %zu bytes < %zu needed (stride %d), skipped %lu",
 				     is_target ? "target" : "fallback", have, need, stride, skipped);
-			return;
+			return -EIO;
 		}
 	}
 	err = h->gralloc->lock(h->gralloc, buf, GRALLOC_USAGE_SW_READ_OFTEN, 0, 0, w, ht, &src);
@@ -395,7 +397,7 @@ static void fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 		static unsigned long lockfail;
 		if (lockfail++ < 5 || (lockfail % 600) == 0)
 			LOGW("gralloc lock failed (%d), keeping last frame (%lu)", err, lockfail);
-		return;
+		return -EIO;
 	}
 	uint8_t *dst = h->fb_mem + (size_t)back * ht * h->fix.line_length;
 	if (h->swap_rb && bpp == 4) {
@@ -425,11 +427,14 @@ static void fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 	h->gralloc->unlock(h->gralloc, buf);
 
 	h->var.yoffset = back * ht;
-	if (ioctl(h->fb_fd, FBIOPAN_DISPLAY, &h->var))
+	if (ioctl(h->fb_fd, FBIOPAN_DISPLAY, &h->var)) {
 		LOGW("FBIOPAN_DISPLAY: %s", strerror(errno));
+		return -EIO;
+	}
 	h->front = back;
 	if (h->frames++ < 3 || (h->frames % 600) == 0)
 		LOGI("presented frame %lu (half %u)", h->frames, back);
+	return 0;
 }
 
 /* Returns 0 when DECON took the buffer; fills the layer's release fence and
@@ -690,7 +695,9 @@ static int r800_prepare(hwc_composer_device_1_t *dev, size_t n, hwc_display_cont
 	if (n < 1 || !displays[0])
 		return 0;
 	h->no_buffer = 0;
-	ok = ovl_enabled(h);
+	pthread_mutex_lock(&h->doze_lock);
+	ok = !h->power_unknown && ovl_enabled(h);
+	pthread_mutex_unlock(&h->doze_lock);
 	for (i = 0; i < displays[0]->numHwLayers; i++) {
 		hwc_layer_1_t *l = LAYER(displays[0], i);
 		if ((l->compositionType == HWC_BACKGROUND || l->compositionType == HWC_SIDEBAND) && i < 64)
@@ -713,15 +720,19 @@ static int r800_prepare(hwc_composer_device_1_t *dev, size_t n, hwc_display_cont
 	return 0;
 }
 
-static void doze_resume(struct r800_hwc *h);
-static void doze_presented(struct r800_hwc *h);
+static int doze_resume_locked(struct r800_hwc *h);
+static int64_t mono_ns(void);
 
 static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents_1_t **displays)
 {
 	struct r800_hwc *h = (struct r800_hwc *)dev;
 	size_t d, i;
 
-	doze_resume(h);
+	int power_ret;
+	int present_ok;
+	pthread_mutex_lock(&h->doze_lock);
+	power_ret = doze_resume_locked(h);
+	present_ok = !power_ret && !h->blanked && !h->power_unknown;
 
 	static int calls;
 	/* setprop debug.r800.dumplayers N: log the next N frames' layer lists */
@@ -775,7 +786,9 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 		if (d == 0 && h->ovl_n > 0) {
 			/* prepare() marked these layers HWC_OVERLAY: nothing was composed
 			 * into the FB target. On failure the previous frame stays up. */
-			int w, ok = !h->blanked && ovl_present(h, c, &retire) == 0;
+			int w, ok = present_ok && h->power_mode == HWC_POWER_MODE_NORMAL && ovl_present(h, c, &retire) == 0;
+			if (ok)
+				presented = 1;
 			for (w = 0; w < h->ovl_n; w++) {
 				hwc_layer_1_t *l = LAYER(c, h->ovl_idx[w]);
 				if (!ok) {
@@ -805,15 +818,14 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 				fallback = l->handle;
 			l->releaseFenceFd = -1;
 			if (d == 0 && l->compositionType == HWC_FRAMEBUFFER_TARGET) {
-				if (!h->blanked && h->zerocopy && wc_present(h, l, &retire) == 0) {
+				if (present_ok && h->zerocopy && wc_present(h, l, &retire) == 0) {
 					presented = 1;
 					continue;
 				}
 				wait_fence(l->acquireFenceFd);
 				l->acquireFenceFd = -1;
-				if (!h->blanked) {
-					fb_present(h, l->handle, 1);
-					presented = 1;
+				if (present_ok) {
+					presented = fb_present(h, l->handle, 1) == 0;
 				}
 			} else if (l->acquireFenceFd >= 0) {
 				close(l->acquireFenceFd);
@@ -821,20 +833,25 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 			}
 		}
 		/* No explicit FB target: present the last layer that has a buffer. */
-		if (d == 0 && !presented && !h->blanked && fallback) {
+		if (d == 0 && !presented && present_ok && fallback) {
 			hwc_layer_1_t *fl = NULL;
 			for (i = 0; i < c->numHwLayers; i++)
 				if (LAYER(c, i)->handle == fallback)
 					fl = LAYER(c, i);
-			if (!(h->zerocopy && fl && wc_present(h, fl, &retire) == 0))
-				fb_present(h, fallback, 0);
-			presented = 1;
+			if (h->zerocopy && fl && wc_present(h, fl, &retire) == 0)
+				presented = 1;
+			else
+				presented = fb_present(h, fallback, 0) == 0;
 		}
 		/* no usable layer: keep the last frame (was an orange debug fill) */
 		c->retireFenceFd = retire;
 	}
-	doze_presented(h);
-	return 0;
+	if (presented) {
+		h->last_present_ns = mono_ns();
+		pthread_cond_signal(&h->doze_cond);
+	}
+	pthread_mutex_unlock(&h->doze_lock);
+	return power_ret;
 }
 
 /*
@@ -973,140 +990,100 @@ static int r800_event_control(hwc_composer_device_1_t *dev, int disp, int event,
 	return 0;
 }
 
+/* All display power transitions and frame submissions hold doze_lock. */
 static int r800_blank(hwc_composer_device_1_t *dev, int disp, int blank)
 {
 	struct r800_hwc *h = (struct r800_hwc *)dev;
-	/*
-	 * Screen off = DCS "display off" (0x28) through the DSIM cmd_rw node, with
-	 * DECON, DSIM and the panel logic left running: emission stops, and
-	 * "display on" (0x29) brings it straight back. A real power-down (or the
-	 * panel's sleep mode) cannot be undone without the Samsung init sequence:
-	 * the panel stops sending TE and later DCS writes stall. android-helper.sh
-	 * makes the node writable for us (we run as system).
-	 */
 	static const char *node = "/sys/devices/platform/148e0000.dsim/cmd_rw";
-	int fd;
 	char v[PROP_VALUE_MAX] = "";
+	int fd, ret;
+	ssize_t written;
+
 	if (disp != 0)
 		return -EINVAL;
 	blank = !!blank;
-	if (blank == h->blanked)
+	if (blank == h->blanked && !h->power_unknown)
 		return 0;
-	/*
-	 * Kernel #66+ can re-initialise the panel after a real power-down (DECON
-	 * is set up before the panel init now), so screen off powers the panel,
-	 * DSIM and DECON down like Tizen does. debug.r800.realblank=0 falls back
-	 * to the DCS display-off below.
-	 */
 	__system_property_get("debug.r800.realblank", v);
-	if (v[0] != '0') {
-		if (ioctl(h->fb_fd, FBIOBLANK, blank ? FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK) == 0) {
-			h->blanked = blank;
-			LOGI("panel %s (power)", blank ? "off" : "on");
-			return 0;
-		}
-		LOGE("FBIOBLANK %s: %s, falling back to DCS", blank ? "off" : "on", strerror(errno));
+	/* Do not accept the kernel's keep-panel-on no-op as a real blank. */
+	if (h->real_blanked || (blank && !strcmp(v, "1"))) {
+		if (ioctl(h->fb_fd, FBIOBLANK, blank ? FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK))
+			return -errno;
+		h->real_blanked = blank;
+		h->blanked = blank;
+		return 0;
 	}
 	fd = open(node, O_WRONLY | O_CLOEXEC);
-	if (fd < 0 || write(fd, blank ? "3" : "2", 1) != 1) {
-		LOGE("%s: %s: %s", blank ? "display off" : "display on", node, strerror(errno));
-		if (fd >= 0)
-			close(fd);
-		/* could not switch the panel: keep presenting so the screen stays usable */
-		if (!blank)
-			h->blanked = 0;
-		return blank ? -EIO : 0;
-	}
+	if (fd < 0)
+		return -errno;
+	do {
+		written = write(fd, blank ? "3" : "2", 1);
+	} while (written < 0 && errno == EINTR);
+	ret = written == 1 ? 0 : (written < 0 ? -errno : -EIO);
 	close(fd);
-	h->blanked = blank;      /* set() skips presenting while the panel is off */
-	LOGI("panel %s", blank ? "display off" : "display on");
+	if (ret)
+		return ret;
+	h->blanked = blank;
 	return 0;
 }
 
-/*
- * HWC 1.4 power modes. OFF/NORMAL keep the blank() behaviour. DOZE and
- * DOZE_SUSPEND (Wear OS ambient) go through DECON's S3CFB_POWER_MODE ioctl
- * (CONFIG_EXYNOS_DOZE): DSIM then switches the panel to its low-power HLPM
- * mode (panel driver doze op), and back out of it on the way to NORMAL.
- */
-/*
- * Ambient without HLPM (panel in normal mode at the lowest level): DECON and
- * DSIM only need to run while a frame goes out. After
- * vendor.hwc.r800.doze_idle_ms (default 300, 0 = off) without a frame, DECON
- * goes to DOZE_SUSPEND (DECON/DSIM off, the command-mode panel keeps showing
- * its frame from its own RAM); the next set() brings it back to DOZE first.
- */
+/* Automatic DECON power-down is experimental; normal ambient stays in DOZE. */
 static int doze_idle_ms(void)
 {
 	char v[PROP_VALUE_MAX] = "";
+	char *end;
+	long ms;
 	__system_property_get("vendor.hwc.r800.doze_idle_ms", v);
-	return v[0] ? atoi(v) : 300;
+	if (!v[0])
+		return 0;
+	ms = strtol(v, &end, 10);
+	return *end || ms < 100 || ms > 60000 ? 0 : (int)ms;
 }
 
-static void doze_resume(struct r800_hwc *h)
+static int doze_resume_locked(struct r800_hwc *h)
 {
-	pthread_mutex_lock(&h->doze_lock);
+	uint32_t pwr = R800_DISP_PWR_DOZE;
+	if (h->power_unknown)
+		return -EIO;
 	if (h->doze_susp && h->power_mode == HWC_POWER_MODE_DOZE) {
-		uint32_t pwr = R800_DISP_PWR_DOZE;
-		if (ioctl(h->fb_fd, R800_S3CFB_POWER_MODE, &pwr))
-			LOGE("doze resume: %s", strerror(errno));
+		if (ioctl(h->fb_fd, R800_S3CFB_POWER_MODE, &pwr)) {
+			int ret = -errno;
+			LOGE("doze resume failed: %s", strerror(-ret));
+			h->power_unknown = 1;
+			return ret;
+		}
 		h->doze_susp = 0;
 	}
-	pthread_mutex_unlock(&h->doze_lock);
-}
-
-static void doze_presented(struct r800_hwc *h)
-{
-	pthread_mutex_lock(&h->doze_lock);
-	h->last_present_ns = mono_ns();
-	pthread_cond_signal(&h->doze_cond);
-	pthread_mutex_unlock(&h->doze_lock);
+	return 0;
 }
 
 static void *doze_idle_loop(void *arg)
 {
 	struct r800_hwc *h = arg;
-
 	pthread_mutex_lock(&h->doze_lock);
 	for (;;) {
 		int ms;
-		int64_t due;
+		int64_t due, now;
 		struct timespec t;
-
-		while (h->power_mode != HWC_POWER_MODE_DOZE || h->doze_susp)
+		while (h->power_unknown || h->power_mode != HWC_POWER_MODE_DOZE || h->doze_susp)
 			pthread_cond_wait(&h->doze_cond, &h->doze_lock);
 		ms = doze_idle_ms();
-		if (ms <= 0) {
-			/* disabled: look again in a while */
-			clock_gettime(CLOCK_REALTIME, &t);
-			t.tv_sec += 5;
+		now = mono_ns();
+		due = ms ? h->last_present_ns + (int64_t)ms * 1000000LL : now + 5000000000LL;
+		if (!ms || now < due) {
+			t.tv_sec = due / 1000000000LL;
+			t.tv_nsec = due % 1000000000LL;
 			pthread_cond_timedwait(&h->doze_cond, &h->doze_lock, &t);
 			continue;
 		}
-		due = h->last_present_ns + (int64_t)ms * 1000000LL;
-		if (mono_ns() < due) {
-			int64_t wait = due - mono_ns();
-			clock_gettime(CLOCK_REALTIME, &t);
-			t.tv_sec += wait / 1000000000LL;
-			t.tv_nsec += wait % 1000000000LL;
-			if (t.tv_nsec >= 1000000000L) {
-				t.tv_sec++;
-				t.tv_nsec -= 1000000000L;
-			}
-			pthread_cond_timedwait(&h->doze_cond, &h->doze_lock, &t);
-			continue;   /* re-check: a frame or a mode change may have come */
+		uint32_t pwr = R800_DISP_PWR_DOZE_SUSPEND;
+		if (ioctl(h->fb_fd, R800_S3CFB_POWER_MODE, &pwr)) {
+			LOGE("doze suspend failed: %s", strerror(errno));
+			h->power_unknown = 1;
+			continue;
 		}
-		{
-			uint32_t pwr = R800_DISP_PWR_DOZE_SUSPEND;
-			if (ioctl(h->fb_fd, R800_S3CFB_POWER_MODE, &pwr)) {
-				LOGE("doze suspend: %s", strerror(errno));
-				h->last_present_ns = mono_ns() + 10000000000LL;   /* back off 10 s */
-				continue;
-			}
-			h->doze_susp = 1;
-			if (h->doze_suspends++ < 20)
-				LOGI("doze: DECON suspended after %d ms idle", ms);
-		}
+		h->doze_susp = 1;
+		h->doze_suspends++;
 	}
 	return NULL;
 }
@@ -1114,45 +1091,56 @@ static void *doze_idle_loop(void *arg)
 static int r800_set_power_mode(hwc_composer_device_1_t *dev, int disp, int mode)
 {
 	struct r800_hwc *h = (struct r800_hwc *)dev;
-	int prev = h->power_mode, r = 0;
+	int prev, r = 0, suspended = 0;
 	uint32_t pwr;
 
-	if (disp != 0)
+	if (disp != 0 || (mode != HWC_POWER_MODE_OFF && mode != HWC_POWER_MODE_NORMAL &&
+	    mode != HWC_POWER_MODE_DOZE && mode != HWC_POWER_MODE_DOZE_SUSPEND))
 		return -EINVAL;
-	LOGI("setPowerMode %d -> %d", prev, mode);
 	pthread_mutex_lock(&h->doze_lock);
+	prev = h->power_mode;
+	LOGI("setPowerMode %d -> %d", prev, mode);
+	/* A doze/unknown state requires explicit DECON resume before DCS. */
+	if (h->power_unknown || prev == HWC_POWER_MODE_DOZE || prev == HWC_POWER_MODE_DOZE_SUSPEND) {
+		if (ioctl(h->fb_fd, FBIOBLANK, FB_BLANK_UNBLANK)) {
+			r = -errno;
+			goto failed;
+		}
+		h->real_blanked = 0;
+		h->blanked = 0;
+		h->power_unknown = 1; /* until requested transition completes */
+	}
 	switch (mode) {
 	case HWC_POWER_MODE_OFF:
 		r = r800_blank(dev, disp, 1);
 		break;
 	case HWC_POWER_MODE_NORMAL:
-		if (prev == HWC_POWER_MODE_DOZE || prev == HWC_POWER_MODE_DOZE_SUSPEND) {
-			/* FBIOBLANK unblank takes DECON/DSIM from DOZE to ON (panel wake) */
-			if (ioctl(h->fb_fd, FBIOBLANK, FB_BLANK_UNBLANK))
-				LOGE("unblank from doze: %s", strerror(errno));
-			h->blanked = 0;
-		} else {
-			r = r800_blank(dev, disp, 0);
-		}
+		r = r800_blank(dev, disp, 0);
 		break;
 	case HWC_POWER_MODE_DOZE:
 	case HWC_POWER_MODE_DOZE_SUSPEND:
-		pwr = mode == HWC_POWER_MODE_DOZE ? R800_DISP_PWR_DOZE : R800_DISP_PWR_DOZE_SUSPEND;
-		if (ioctl(h->fb_fd, R800_S3CFB_POWER_MODE, &pwr)) {
-			/* no kernel doze: behave like HWC 1.1 did (panel stays on) */
-			LOGE("S3CFB_POWER_MODE %u: %s", pwr, strerror(errno));
-			r = r800_blank(dev, disp, 0);
-		} else {
-			h->blanked = 0;
-		}
+		r = r800_blank(dev, disp, 0);
+		if (r)
+			break;
+		/* Keep the panel in DOZE when automatic suspend is not opted in. */
+		suspended = mode == HWC_POWER_MODE_DOZE_SUSPEND && doze_idle_ms() > 0;
+		pwr = suspended ? R800_DISP_PWR_DOZE_SUSPEND : R800_DISP_PWR_DOZE;
+		if (ioctl(h->fb_fd, R800_S3CFB_POWER_MODE, &pwr))
+			r = -errno;
 		break;
-	default:
-		pthread_mutex_unlock(&h->doze_lock);
-		return -EINVAL;
 	}
-	h->doze_susp = mode == HWC_POWER_MODE_DOZE_SUSPEND;
+	if (r)
+		goto failed;
+	h->doze_susp = suspended;
 	h->power_mode = mode;
+	h->power_unknown = 0;
 	h->last_present_ns = mono_ns();
+	pthread_cond_signal(&h->doze_cond);
+	pthread_mutex_unlock(&h->doze_lock);
+	return 0;
+failed:
+	h->power_unknown = 1;
+	LOGE("setPowerMode %d failed: %s", mode, strerror(-r));
 	pthread_cond_signal(&h->doze_cond);
 	pthread_mutex_unlock(&h->doze_lock);
 	return r;
@@ -1248,7 +1236,11 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 	pthread_mutex_init(&h->lock, NULL);
 	pthread_cond_init(&h->cond, NULL);
 	pthread_mutex_init(&h->doze_lock, NULL);
-	pthread_cond_init(&h->doze_cond, NULL);
+	pthread_condattr_t doze_attr;
+	pthread_condattr_init(&doze_attr);
+	pthread_condattr_setclock(&doze_attr, CLOCK_MONOTONIC);
+	pthread_cond_init(&h->doze_cond, &doze_attr);
+	pthread_condattr_destroy(&doze_attr);
 
 	h->power_mode = HWC_POWER_MODE_NORMAL;   /* the panel is on at start */
 	h->base.common.tag = HARDWARE_DEVICE_TAG;
@@ -1288,13 +1280,13 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 		__system_property_get("debug.r800.hwc_woke", woke);
 		if (woke[0] != '1') {
 			h->var.activate = FB_ACTIVATE_NOW;
-			ioctl(h->fb_fd, FBIOPUT_VSCREENINFO, &h->var);
-			if (ioctl(h->fb_fd, FBIOBLANK, FB_BLANK_UNBLANK))
-				LOGE("unblank: %s", strerror(errno));
-			else
-				LOGE("unblanked panel");
-			if (__system_property_set("debug.r800.hwc_woke", "1"))
+			if (ioctl(h->fb_fd, FBIOPUT_VSCREENINFO, &h->var) ||
+			    ioctl(h->fb_fd, FBIOBLANK, FB_BLANK_UNBLANK)) {
+				h->power_unknown = 1;
+				LOGE("initial panel wake failed: %s", strerror(errno));
+			} else if (__system_property_set("debug.r800.hwc_woke", "1")) {
 				LOGE("could not set debug.r800.hwc_woke");
+			}
 		} else {
 			LOGE("composer restart: DECON left as is (no mode re-apply/unblank)");
 		}
