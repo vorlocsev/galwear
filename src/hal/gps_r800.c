@@ -15,6 +15,9 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <stddef.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <limits.h>
 #include <pthread.h>
@@ -122,11 +125,29 @@ struct gps_device_t {
 #define GPS_STATUS_ENGINE_ON 3
 #define GPS_STATUS_ENGINE_OFF 4
 
+static GpsCallbacks callbacks_owned;
 static GpsCallbacks *cb;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int sock = -1;
 static int want_on;          /* framework asked for a session */
-static volatile int running; /* reader thread alive */
+static atomic_int running;
+static pthread_t reader_thread;
+static int reader_created, joining; /* protected by lock */
+
+/* Copy complete fields only. A legacy callback table lacks the GNSS tail. */
+static int copy_callbacks(GpsCallbacks *dst, const GpsCallbacks *src)
+{
+	if (!src || src->size < offsetof(GpsCallbacks, set_system_info_cb))
+		return -EINVAL;
+	memset(dst, 0, sizeof(*dst));
+	memcpy(dst, src, offsetof(GpsCallbacks, set_system_info_cb));
+	if (src->size >= offsetof(GpsCallbacks, gnss_sv_status_cb))
+		dst->set_system_info_cb = src->set_system_info_cb;
+	if (src->size >= sizeof(*dst))
+		dst->gnss_sv_status_cb = src->gnss_sv_status_cb;
+	dst->size = sizeof(*dst);
+	return 0;
+}
 
 /* call with lock held */
 static int send_line(const char *s)
@@ -412,21 +433,22 @@ static void handle_line(char *l)
 			return;
 		if (cb && cb->nmea_cb)
 			cb->nmea_cb(ts, s, strlen(s));
-		handle_nmea_sv(s);
+		if (atomic_load(&running))
+			handle_nmea_sv(s);
 	} else if (!strncmp(l, "STATUS ", 7) && l[7] >= '1' && l[7] <= '4' && !l[8]) {
 		report_status((uint16_t)(l[7] - '0'));
 	}
 }
 
 /* connects (retrying), re-sends the wanted state, then reads lines forever */
-static void reader(void *arg)
+static void *reader(void *arg)
 {
 	char buf[4096];
 	size_t have = 0;
 	int discard = 0;
 	(void)arg;
 
-	while (running) {
+	while (atomic_load(&running)) {
 		int fd;
 		struct sockaddr_un a;
 
@@ -434,11 +456,12 @@ static void reader(void *arg)
 		fd = sock;
 		pthread_mutex_unlock(&lock);
 		if (fd < 0) {
-			fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+			fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
 			memset(&a, 0, sizeof(a));
 			a.sun_family = AF_UNIX;
 			strncpy(a.sun_path, SOCK_PATH, sizeof(a.sun_path) - 1);
-			if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+			if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0 ||
+			    fcntl(fd, F_SETFL, 0) < 0) {
 				if (fd >= 0)
 					close(fd);
 				sleep(2);
@@ -446,6 +469,11 @@ static void reader(void *arg)
 			}
 			LOGI("connected to %s", SOCK_PATH);
 			pthread_mutex_lock(&lock);
+			if (!atomic_load(&running)) {
+				close(fd);
+				pthread_mutex_unlock(&lock);
+				break;
+			}
 			sock = fd;
 			if (want_on)
 				send_line("START\n");
@@ -470,7 +498,7 @@ static void reader(void *arg)
 			sleep(1);
 			continue;
 		}
-		for (ssize_t i = 0; i < n; i++) {
+		for (ssize_t i = 0; i < n && atomic_load(&running); i++) {
 			char ch = chunk[i];
 			if (ch == '\n') {
 				if (!discard) {
@@ -487,47 +515,129 @@ static void reader(void *arg)
 			}
 		}
 	}
+	pthread_mutex_lock(&lock);
+	if (sock >= 0) {
+		close(sock);
+		sock = -1;
+	}
+	pthread_mutex_unlock(&lock);
+	return NULL;
 }
 
 static int gps_init(GpsCallbacks *callbacks)
 {
-	cb = callbacks;
-	LOGI("init (callbacks size %zu, gnss_sv_status_cb %s)", callbacks ? callbacks->size : 0,
-	     callbacks && callbacks->size >= sizeof(GpsCallbacks) ? "yes" : "no");
-	if (cb && cb->set_capabilities_cb)
-		cb->set_capabilities_cb(GPS_CAPABILITY_SCHEDULING);
-	if (!running && cb && cb->create_thread_cb) {
-		running = 1;
-		cb->create_thread_cb("gps-r800-reader", reader, NULL);
+	GpsCallbacks copy;
+	int r = copy_callbacks(&copy, callbacks);
+	if (r)
+		return r;
+	pthread_mutex_lock(&lock);
+	if (reader_created || joining) {
+		pthread_mutex_unlock(&lock);
+		return -EBUSY;
 	}
+	callbacks_owned = copy;
+	cb = &callbacks_owned;
+	want_on = 0;
+	atomic_store(&running, 1);
+	/* This HAL targets the native HIDL GNSS wrapper, not a JVM callback
+	 * thread. Own a joinable pthread and check pthread_create directly. */
+	r = pthread_create(&reader_thread, NULL, reader, NULL);
+	if (r) {
+		atomic_store(&running, 0);
+		cb = NULL;
+		memset(&callbacks_owned, 0, sizeof(callbacks_owned));
+		pthread_mutex_unlock(&lock);
+		return -r;
+	}
+	reader_created = 1;
+	pthread_mutex_unlock(&lock);
+	if (copy.set_capabilities_cb)
+		copy.set_capabilities_cb(GPS_CAPABILITY_SCHEDULING);
 	return 0;
 }
 
 static int gps_start(void)
 {
-	LOGI("start");
+	void (*status)(GpsStatus *);
 	pthread_mutex_lock(&lock);
+	if (!reader_created || !atomic_load(&running) || joining) {
+		pthread_mutex_unlock(&lock);
+		return -EINVAL;
+	}
 	want_on = 1;
 	send_line("START\n");
+	status = callbacks_owned.status_cb;
 	pthread_mutex_unlock(&lock);
-	report_status(GPS_STATUS_SESSION_BEGIN);
+	if (status) {
+		GpsStatus s = { sizeof(s), GPS_STATUS_SESSION_BEGIN };
+		status(&s);
+	}
 	return 0;
 }
 
 static int gps_stop(void)
 {
-	LOGI("stop");
+	void (*status)(GpsStatus *);
 	pthread_mutex_lock(&lock);
+	if (!reader_created || !atomic_load(&running) || joining) {
+		pthread_mutex_unlock(&lock);
+		return -EINVAL;
+	}
 	want_on = 0;
 	send_line("STOP\n");
+	status = callbacks_owned.status_cb;
 	pthread_mutex_unlock(&lock);
-	report_status(GPS_STATUS_SESSION_END);
+	if (status) {
+		GpsStatus s = { sizeof(s), GPS_STATUS_SESSION_END };
+		status(&s);
+	}
 	return 0;
+}
+
+static int shutdown_reader(void)
+{
+	pthread_t tid;
+	pthread_mutex_lock(&lock);
+	if (!reader_created) {
+		pthread_mutex_unlock(&lock);
+		return 0;
+	}
+	if (joining) {
+		pthread_mutex_unlock(&lock);
+		return -EBUSY;
+	}
+	want_on = 0;
+	if (sock >= 0) {
+		send_line("STOP\n");
+		shutdown(sock, SHUT_RDWR);
+	}
+	atomic_store(&running, 0);
+	tid = reader_thread;
+	/* A callback can request cleanup from the reader itself. Do not
+	 * self-join; retain the thread/table until a non-reader closes it. */
+	if (pthread_equal(pthread_self(), tid)) {
+		pthread_mutex_unlock(&lock);
+		return -EDEADLK;
+	}
+	joining = 1;
+	pthread_mutex_unlock(&lock);
+	int r = pthread_join(tid, NULL);
+	pthread_mutex_lock(&lock);
+	joining = 0;
+	if (!r) {
+		reader_created = 0;
+		cb = NULL;
+		memset(&callbacks_owned, 0, sizeof(callbacks_owned));
+	}
+	pthread_mutex_unlock(&lock);
+	return r ? -r : 0;
 }
 
 static void gps_cleanup(void)
 {
-	gps_stop();
+	int r = shutdown_reader();
+	if (r)
+		LOGE("cleanup deferred or failed: %d", r);
 }
 
 static int gps_inject_time(GpsUtcTime t, int64_t ref, int unc)
@@ -585,6 +695,9 @@ static const GpsInterface *get_iface(struct gps_device_t *d)
 
 static int dev_close(struct hw_device_t *d)
 {
+	int r = shutdown_reader();
+	if (r)
+		return r;
 	free(d);
 	return 0;
 }
