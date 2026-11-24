@@ -25,7 +25,8 @@ class SystemSuspendGuardTests(unittest.TestCase):
 
     def test_both_prepare_paths_propagate_error(self):
         for field in ("usbl2_suspend_mode_idx", "suspend_mode_idx"):
-            self.assertIn(f"ret = exynos_prepare_sys_powerdown(pm_info->{field});", self.pm)
+            self.assertIn(f"r800_pm_mode = pm_info->{field};", self.pm)
+        self.assertIn("ret = exynos_prepare_sys_powerdown(r800_pm_mode);", self.pm)
         self.assertIn("return r800_pm_fault;", self.pm)
         self.assertIn("CAL prepare failed", self.pm)
 
@@ -36,9 +37,26 @@ class SystemSuspendGuardTests(unittest.TestCase):
         self.assertNotIn("r800_pm_fault = 0", self.pm)
 
     def test_both_resume_paths_propagate_error(self):
-        for field in ("usbl2_suspend_mode_idx", "suspend_mode_idx"):
-            self.assertIn(f"ret = exynos_wakeup_sys_powerdown(pm_info->{field}, pm_info->is_early_wakeup);", self.pm)
+        self.assertIn("ret = exynos_wakeup_sys_powerdown(r800_pm_mode, pm_info->is_early_wakeup);", self.pm)
         self.assertLess(self.pm.index("CAL restore failed"), self.pm.index("R800_MARK(3);"))
+
+    def test_abort_before_psci_defaults_to_early_wakeup(self):
+        self.assertIn("r800_psci_attempted = false;", self.pm)
+        self.assertIn("if (!r800_psci_attempted)", self.pm)
+        self.assertIn("pm_info->is_early_wakeup = true;", self.pm)
+        self.assertLess(self.pm.index("r800_psci_attempted = true;"),
+                        self.pm.index("ret = arm_cpuidle_suspend(psci_index);"))
+
+    def test_prepared_state_consumed_before_resume(self):
+        resume = self.pm.split("static void exynos_pm_syscore_resume(void)", 1)[1]
+        self.assertLess(resume.index("if (!r800_pm_prepared)"),
+                        resume.index("r800_pm_prepared = false;"))
+        self.assertLess(resume.index("r800_pm_prepared = false;"),
+                        resume.index("ret = exynos_wakeup_sys_powerdown("))
+
+    def test_psci_error_not_converted_to_positive_bool(self):
+        self.assertIn("pm_info->is_early_wakeup = ret != 0;", self.pm)
+        self.assertIn("return ret < 0 ? ret : -EBUSY;", self.pm)
 
     def test_normal_and_early_cal_return_and_header_match(self):
         self.assertIn("ret = cal_pm_earlywakeup(mode);", self.mode)
