@@ -8,6 +8,8 @@ on:
       - ".github/workflows/r800-kernel-source-validation.yml"
       - "build/r800_aosp_source_probe.sh"
       - "build/r800_kernel_preflight.py"
+      - "build/r800_toolchain_inventory.py"
+      - "tests/test_kernel_source_ci.py"
       - "src/kernel/r800-wearos.patch"
       - "src/kernel/r800.config"
   workflow_dispatch:
