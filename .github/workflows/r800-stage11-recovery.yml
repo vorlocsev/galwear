@@ -1,0 +1,31 @@
+name: SM-R800 offline recovery-readiness safety
+
+on:
+  push:
+    branches:
+      - "development/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recovery-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile recovery auditors
+        run: |
+          python3 -m py_compile installer/r800_recovery_readiness.py
+          python3 -m py_compile installer/r800_preflight_report.py
+      - name: Simulated factory partition/PIT and recovery blockers
+        run: python3 -m unittest discover -s tests -p 'test_stage11_recovery.py' -v
+      - name: Recovery image and reference regressions
+        run: |
+          python3 -m unittest discover -s tests -p 'test_recovery_audit.py' -v
+          python3 -m unittest discover -s tests -p 'test_integrated_report.py' -v
+      - name: No real firmware bundled
+        run: |
+          test ! -e images/R800-WearOS.tar.md5
+          test ! -e images/samsung/COMBINATION-FT40_R800XXU1ARI2_noCM.tar.md5
