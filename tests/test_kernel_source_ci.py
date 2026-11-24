@@ -97,7 +97,8 @@ class ToolchainTests(unittest.TestCase):
         self.assertIn("git -C \"$SOURCE\" -c protocol.version=2 fetch", content)
         self.assertIn("--source-tree \"$SOURCE\"", content)
         self.assertNotIn("git push", content)
-        self.assertFalse(any(line.strip().startswith("git apply ")\n                             for line in content.splitlines()))
+        self.assertFalse(any(line.strip().startswith("git apply ")
+                             for line in content.splitlines()))
         self.assertNotIn("make -j", content)
 
     def test_probe_refuses_overwriting_existing_checkout(self):
