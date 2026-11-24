@@ -23,10 +23,81 @@ index fb9ffabee..dad131e8d 100644
 +# SM-R800 sensors: Samsung SSP over the BCM47758 GPS chip (BBD), from the R80X Tizen kernel
 +obj-$(CONFIG_SENSORS_SSP_BBD) += sensorhub/ gps/
 diff --git a/drivers/cpuidle/cpuidle-exynos64.c b/drivers/cpuidle/cpuidle-exynos64.c
-index 33002844a..ebf2e7f5b 100644
 --- a/drivers/cpuidle/cpuidle-exynos64.c
 +++ b/drivers/cpuidle/cpuidle-exynos64.c
-@@ -132,6 +132,8 @@ static struct notifier_block exynos_cpuidle_reboot_nb = {
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <linux/cpuidle.h>
++#include <linux/moduleparam.h>
+ #include <linux/cpu_pm.h>
+ #include <linux/slab.h>
+ #include <linux/io.h>
+@@ -38,13 +39,25 @@
+ /***************************************************************************
+  *                           Cpuidle state handler                         *
+  ***************************************************************************/
+-static unsigned int prepare_idle(unsigned int cpu, int index)
++/* WFI is always available; deep idle requires an independent explicit opt-in. */
++static bool r800_allow_deep_idle;
++module_param(r800_allow_deep_idle, bool, 0600);
++
++static int prepare_idle(unsigned int cpu, int index)
+ {
+-	unsigned int entry_state = 0;
++	int entry_state = 0;
++	int ret;
+ 
+ 	if (index > 0) {
+-		cpu_pm_enter();
++		ret = cpu_pm_enter();
++		if (ret)
++			return ret < 0 ? ret : -EIO;
+ 		entry_state = exynos_cpu_pm_enter(cpu, index);
++		if (entry_state <= 0) {
++			exynos_cpu_pm_exit(cpu, 1);
++			cpu_pm_exit();
++			return entry_state < 0 ? entry_state : -EIO;
++		}
+ 	}
+ 
+ 	cpuidle_profile_cpu_idle_enter(cpu, index);
+@@ -82,8 +95,20 @@
+ {
+ 	int entry_state, ret = 0;
+ 
++	if (index < 0 || index >= drv->state_count)
++		return -EINVAL;
++	if (index > 0 && !READ_ONCE(r800_allow_deep_idle))
++		index = 0;
++
+ 	entry_state = prepare_idle(dev->cpu, index);
++	if (entry_state < 0)
++		return entry_state;
+ 
++	/* If policy changed after prepare, unwind rather than enter firmware. */
++	if (index > 0 && !READ_ONCE(r800_allow_deep_idle)) {
++		post_idle(dev->cpu, index, 1);
++		return -EPERM;
++	}
+ 	ret = enter_idle(entry_state);
+ 
+ 	post_idle(dev->cpu, index, ret);
+@@ -93,10 +118,9 @@
+ 	 * count. Driver have to return an error value to
+ 	 * cpuidle_enter_state().
+ 	 */
+-	if (ret < 0)
+-		return ret;
+-	else
+-		return index;
++	if (ret)
++		return ret < 0 ? ret : -EBUSY;
++	return index;
+ }
+ 
+ /***************************************************************************
+@@ -132,6 +156,8 @@
  		strncpy(state.desc, "c1", CPUIDLE_DESC_LEN - 1);	\
  	} while (0)
  
@@ -35,7 +106,7 @@ index 33002844a..ebf2e7f5b 100644
  static struct cpuidle_driver exynos_idle_driver[NR_CPUS];
  
  static const struct of_device_id exynos_idle_state_match[] __initconst = {
-@@ -202,6 +204,19 @@ static int __init exynos_idle_init(void)
+@@ -202,6 +228,19 @@
  			pr_err("failed to register cpuidle for cpu%d\n", cpu);
  			goto out_unregister;
  		}
