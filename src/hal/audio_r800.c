@@ -276,8 +276,13 @@ static int start_output(struct r800_stream_out *out)
     cfg.start_threshold = OUT_PERIOD;   /* start as soon as one period is queued */
     cfg.stop_threshold = OUT_PERIOD * OUT_PERIODS;
 
-    apply_mixer(spk_on, sizeof(spk_on) / sizeof(spk_on[0]));
-    out->pcm = pcm_open(CARD, SPK_DEVICE, PCM_OUT | PCM_MONOTONIC, &cfg);
+    if (apply_mixer(spk_on, sizeof(spk_on) / sizeof(spk_on[0]))) {
+        apply_mixer(spk_off, sizeof(spk_off) / sizeof(spk_off[0]));
+        out->next_open_ns = now_ns() + RETRY_NS;
+        return -EIO;
+    }
+    /* HAL owns recovery: tinyalsa must not retry EPIPE forever under lock. */
+    out->pcm = pcm_open(CARD, SPK_DEVICE, PCM_OUT | PCM_MONOTONIC | PCM_NORESTART, &cfg);
     if (!out->pcm || !pcm_is_ready(out->pcm)) {
         LOGE("pcm_open(%d,%d): %s (DSP firmware not booted yet?)", CARD, SPK_DEVICE,
              out->pcm ? pcm_get_error(out->pcm) : "no handle");
@@ -285,7 +290,7 @@ static int start_output(struct r800_stream_out *out)
             pcm_close(out->pcm);
         out->pcm = NULL;
         apply_mixer(spk_off, sizeof(spk_off) / sizeof(spk_off[0]));
-        out->next_open_ns = t + RETRY_NS;
+        out->next_open_ns = now_ns() + RETRY_NS;
         return -EIO;
     }
     out->standby = false;
@@ -298,7 +303,7 @@ static ssize_t out_write(struct audio_stream_out *s, const void *buf, size_t byt
     struct r800_stream_out *out = (struct r800_stream_out *)s;
     size_t frames = bytes / FRAME_BYTES;
     int r = 0;
-    if (bytes % FRAME_BYTES || frames > INT_MAX)
+    if (bytes > SSIZE_MAX || (bytes && !buf) || bytes % FRAME_BYTES || frames > INT_MAX)
         return -EINVAL;
     if (!frames)
         return 0;
@@ -317,6 +322,7 @@ static ssize_t out_write(struct audio_stream_out *s, const void *buf, size_t byt
         if (count <= 0 || (size_t)count > n) {
             LOGE("pcm_writei made no valid progress: %d", count);
             do_standby(out);
+            out->next_open_ns = now_ns() + RETRY_NS;
             r = -EIO;
             break;
         }
@@ -449,9 +455,14 @@ static int start_input(struct r800_stream_in *in)
         { "ADC Right Gain", NULL, gain },
         { "DMIC1 Volume", vol, 0 },
     };
-    apply_mixer(mic_on, sizeof(mic_on) / sizeof(mic_on[0]));
+    if (apply_mixer(mic_on, sizeof(mic_on) / sizeof(mic_on[0]))) {
+        apply_mixer(mic_off, sizeof(mic_off) / sizeof(mic_off[0]));
+        in->next_open_ns = now_ns() + RETRY_NS;
+        return -EIO;
+    }
+    /* Gain tuning remains optional; the route must be available. */
     apply_mixer(mic_gain, sizeof(mic_gain) / sizeof(mic_gain[0]));
-    in->pcm = pcm_open(CARD, MIC_DEVICE, PCM_IN | PCM_MONOTONIC, &cfg);
+    in->pcm = pcm_open(CARD, MIC_DEVICE, PCM_IN | PCM_MONOTONIC | PCM_NORESTART, &cfg);
     if (!in->pcm || !pcm_is_ready(in->pcm)) {
         LOGE("pcm_open(%d,%d) in: %s", CARD, MIC_DEVICE,
              in->pcm ? pcm_get_error(in->pcm) : "no handle");
@@ -459,7 +470,7 @@ static int start_input(struct r800_stream_in *in)
             pcm_close(in->pcm);
         in->pcm = NULL;
         apply_mixer(mic_off, sizeof(mic_off) / sizeof(mic_off[0]));
-        in->next_open_ns = t + RETRY_NS;
+        in->next_open_ns = now_ns() + RETRY_NS;
         return -EIO;
     }
     in->standby = false;
@@ -478,7 +489,7 @@ static ssize_t in_read(struct audio_stream_in *s, void *buf, size_t bytes)
     size_t done = 0;
     int r = 0;
     bool mute;
-    if (bytes % (in->channels * 2) || frames > INT_MAX)
+    if (bytes > SSIZE_MAX || (bytes && !buf) || bytes % (in->channels * 2) || frames > INT_MAX)
         return -EINVAL;
     if (!frames)
         return 0;
@@ -503,6 +514,7 @@ static ssize_t in_read(struct audio_stream_in *s, void *buf, size_t bytes)
             LOGE("pcm_readi made no valid progress: %d", r);
             r = -EIO;
             in_do_standby(in);
+            in->next_open_ns = now_ns() + RETRY_NS;
             break;
         }
         done += r;
