@@ -25880,7 +25880,6 @@ index fa851b858..b47915125 100644
 +	return ret;
  }
 diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
-index 7cf98b1a2..53760321f 100644
 --- a/drivers/soc/samsung/exynos-pd.c
 +++ b/drivers/soc/samsung/exynos-pd.c
 @@ -522,8 +522,23 @@ static void exynos_pd_sync_state(struct exynos_pm_domain *pd)
@@ -25909,7 +25908,7 @@ index 7cf98b1a2..53760321f 100644
  		if (pd->parent)
  			exynos_pd_sync_state(pd->parent);
  	} else {
-@@ -575,6 +590,215 @@ static int exynos_pd_init(void)
+@@ -575,6 +590,279 @@ static int exynos_pd_init(void)
  }
  subsys_initcall(exynos_pd_init);
  
@@ -25942,11 +25941,21 @@ index 7cf98b1a2..53760321f 100644
 +static u32 r800_ctrl_opt_saved;
 +#define R800_CTRL_OPT	0x800
 +
-+static void r800_ctrl_opt_restore(void)
++/* Latch unverified recovery until reboot; never silently retry suspend. */
++static int r800_pd_fault;
++
++static int r800_ctrl_opt_restore(void)
 +{
-+	if (r800_ctrl_opt_saved && cal_pd_status(r800_dispaud->cal_pdid))
-+		writel(r800_ctrl_opt_saved, r800_cmu_dispaud + R800_CTRL_OPT);
++	if (!r800_ctrl_opt_saved)
++		return 0;
++	if (!r800_cmu_dispaud ||
++	    cal_pd_status(r800_dispaud->cal_pdid) != 1)
++		return -EIO;
++	writel(r800_ctrl_opt_saved, r800_cmu_dispaud + R800_CTRL_OPT);
++	if (readl(r800_cmu_dispaud + R800_CTRL_OPT) != r800_ctrl_opt_saved)
++		return -EIO;
 +	r800_ctrl_opt_saved = 0;
++	return 0;
 +}
 +
 +/*
@@ -25966,41 +25975,60 @@ index 7cf98b1a2..53760321f 100644
 +static struct exynos_pm_domain *r800_sleep_pd[ARRAY_SIZE(r800_sleep_pd_name)];
 +static bool r800_sleep_pd_was_on[ARRAY_SIZE(r800_sleep_pd_name)];
 +
-+static void r800_sleep_pds_off(void)
++static int r800_pd_control_checked(struct exynos_pm_domain *pd, bool on)
 +{
-+	int i;
++	int ret = cal_pd_control(pd->cal_pdid, on);
++	int status = cal_pd_status(pd->cal_pdid);
++
++	if (ret || status != (int)on) {
++		pr_err("r800-pd: %s target=%d CAL=%d status=%d\n",
++		       pd->name, on, ret, status);
++		return ret < 0 ? ret : -EIO;
++	}
++	return 0;
++}
++
++static int r800_sleep_pds_off(void)
++{
++	int i, status, ret;
 +
 +	for (i = 0; i < ARRAY_SIZE(r800_sleep_pd); i++) {
 +		struct exynos_pm_domain *pd = r800_sleep_pd[i];
 +
-+		r800_sleep_pd_was_on[i] = false;
-+		if (!(r800_sleep_pd_off & BIT(i)) || !pd || !cal_pd_status(pd->cal_pdid))
++		if (!(r800_sleep_pd_off & BIT(i)))
 +			continue;
-+		cal_pd_control(pd->cal_pdid, 0);
-+		if (cal_pd_status(pd->cal_pdid)) {
-+			cal_pd_control(pd->cal_pdid, 1);
-+			pr_info("r800-pd: %s did not go off, restored (%d)\n",
-+				pd->name, cal_pd_status(pd->cal_pdid));
++		if (!pd)
++			return -ENODEV;
++		status = cal_pd_status(pd->cal_pdid);
++		if (status == 0)
 +			continue;
-+		}
++		if (status != 1)
++			return status < 0 ? status : -EIO;
++		/* Record attempted transitions before CAL may partially change hardware. */
 +		r800_sleep_pd_was_on[i] = true;
-+		pr_info("r800-pd: %s off for sleep\n", pd->name);
++		ret = r800_pd_control_checked(pd, false);
++		if (ret)
++			return ret;
 +	}
++	return 0;
 +}
 +
-+static void r800_sleep_pds_on(void)
++static int r800_sleep_pds_on(void)
 +{
-+	int i;
++	int i, ret, first = 0;
 +
 +	for (i = ARRAY_SIZE(r800_sleep_pd) - 1; i >= 0; i--) {
-+		struct exynos_pm_domain *pd = r800_sleep_pd[i];
-+
 +		if (!r800_sleep_pd_was_on[i])
 +			continue;
-+		cal_pd_control(pd->cal_pdid, 1);
-+		pr_info("r800-pd: %s back on (status %d)\n", pd->name,
-+			cal_pd_status(pd->cal_pdid));
++		ret = r800_pd_control_checked(r800_sleep_pd[i], true);
++		if (ret) {
++			if (!first)
++				first = ret;
++		} else {
++			r800_sleep_pd_was_on[i] = false;
++		}
 +	}
++	return first;
 +}
 +
 +/*
@@ -26050,54 +26078,89 @@ index 7cf98b1a2..53760321f 100644
 +module_param_cb(r800_pd_off, &r800_pd_off_ops, NULL, 0200);
 +module_param_cb(r800_pd_on, &r800_pd_on_ops, NULL, 0200);
 +
++static int r800_pd_restore(void)
++{
++	int ret, first = 0;
++
++	/* DISPAUD was switched last: restore it before the earlier domains. */
++	if (r800_dispaud_was_on) {
++		ret = r800_pd_control_checked(r800_dispaud, true);
++		if (!ret)
++			ret = r800_ctrl_opt_restore();
++		if (ret)
++			first = ret;
++		else
++			r800_dispaud_was_on = false;
++	}
++	ret = r800_sleep_pds_on();
++	return first ? first : ret;
++}
++
 +static int r800_pd_syscore_suspend(void)
 +{
-+	r800_sleep_pds_off();
-+	r800_dispaud_was_on = false;
-+	if (!r800_dispaud_sleep_off || !r800_dispaud)
++	int ret, status, rollback;
++
++	if (r800_pd_fault)
++		return r800_pd_fault;
++	if (r800_sleep_pd_off & ~((1U << ARRAY_SIZE(r800_sleep_pd)) - 1))
++		return -EINVAL;
++	ret = r800_sleep_pds_off();
++	if (ret)
++		goto abort;
++	if (!r800_dispaud_sleep_off)
 +		return 0;
-+	if (!cal_pd_status(r800_dispaud->cal_pdid))
-+		return 0;
-+	/* the power-off handshake times out while the ABOX DSP still runs
-+	 * (exynos_pd_power_off_pre calls abox_poweroff, which can sleep) */
-+	if (abox_is_on()) {
-+		pr_info("r800-pd: ABOX on, pd-dispaud stays on\n");
-+		return 0;
++	if (!r800_dispaud) {
++		ret = -ENODEV;
++		goto abort;
 +	}
-+	r800_ctrl_opt_saved = 0;
-+	if (r800_dispaud_clr_b31 && r800_cmu_dispaud) {
++	status = cal_pd_status(r800_dispaud->cal_pdid);
++	if (status == 0)
++		return 0;
++	if (status != 1) {
++		ret = status < 0 ? status : -EIO;
++		goto abort;
++	}
++	if (abox_is_on()) {
++		ret = -EBUSY;
++		goto abort;
++	}
++	if (r800_dispaud_clr_b31 && !r800_cmu_dispaud) {
++		ret = -ENODEV;
++		goto abort;
++	}
++	r800_dispaud_was_on = true;
++	if (r800_dispaud_clr_b31) {
 +		u32 v = readl(r800_cmu_dispaud + R800_CTRL_OPT);
 +
 +		if (v & BIT(31)) {
 +			r800_ctrl_opt_saved = v;
 +			writel(v & ~BIT(31), r800_cmu_dispaud + R800_CTRL_OPT);
++			if (readl(r800_cmu_dispaud + R800_CTRL_OPT) != (v & ~BIT(31))) {
++				ret = -EIO;
++				goto abort;
++			}
 +		}
-+		pr_info("r800-pd: CTRL_OPTION 0x%08x -> 0x%08x\n", v,
-+			readl(r800_cmu_dispaud + R800_CTRL_OPT));
 +	}
-+	cal_pd_control(r800_dispaud->cal_pdid, 0);
-+	if (cal_pd_status(r800_dispaud->cal_pdid)) {
-+		/* half-off: the resume sequence SErrors on it; back on */
-+		cal_pd_control(r800_dispaud->cal_pdid, 1);
-+		r800_ctrl_opt_restore();
-+		pr_info("r800-pd: pd-dispaud did not go off, restored (%d)\n",
-+			cal_pd_status(r800_dispaud->cal_pdid));
++	ret = r800_pd_control_checked(r800_dispaud, false);
++	if (!ret)
 +		return 0;
-+	}
-+	r800_dispaud_was_on = true;
-+	pr_info("r800-pd: pd-dispaud off for sleep\n");
-+	return 0;
++abort:
++	/* syscore does not resume its own failed suspend callback. */
++	rollback = r800_pd_restore();
++	r800_pd_fault = rollback ? rollback : ret;
++	pr_err("r800-pd: suspend aborted (%d), restore result=%d; blocked until reboot\n",
++	       ret, rollback);
++	return r800_pd_fault;
 +}
 +
 +static void r800_pd_syscore_resume(void)
 +{
-+	if (r800_dispaud_was_on) {
-+		cal_pd_control(r800_dispaud->cal_pdid, 1);
-+		r800_ctrl_opt_restore();
-+		pr_info("r800-pd: pd-dispaud back on (status %d)\n",
-+			cal_pd_status(r800_dispaud->cal_pdid));
++	int ret = r800_pd_restore();
++
++	if (ret) {
++		r800_pd_fault = ret;
++		pr_err("r800-pd: resume recovery unverified (%d); blocked until reboot\n", ret);
 +	}
-+	r800_sleep_pds_on();
 +}
 +
 +static struct syscore_ops r800_pd_syscore_ops = {
