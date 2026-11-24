@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "development/r800-embedded-initramfs-20261125"
+      - "development/r800-reproducibility-audit-20261125"
     paths:
       - ".github/workflows/r800-embedded-initramfs-build.yml"
       - "build/r800_aosp_source_probe.sh"
@@ -11,6 +12,7 @@ on:
       - "build/r800_kernel_compile_smoke.sh"
       - "build/r800_embedded_initramfs_config.py"
       - "build/r800_cpio_audit.py"
+      - "build/r800_reproducibility_audit.py"
       - "tests/test_cpio_audit.py"
       - "build/r800_initramfs_spec.py"
       - "build/r800_initramfs_compile_smoke.sh"
@@ -23,6 +25,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: r800-embedded-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   embedded-image-smoke:
@@ -55,9 +61,16 @@ jobs:
             50db73fc799f20a7120a8b5f653b16cc123d856f
           test -z "$(git -C "$RUNNER_TEMP/r800-embedded-source" status --porcelain)"
 
+      - name: Record immutable container identity used by this one job
+        run: |
+          docker pull alpine:3.21
+          echo "R800_CONTAINER_IMAGE_ID=$(docker image inspect alpine:3.21 --format '{{.Id}}')" >> "$GITHUB_ENV"
+
       - name: Compile experimental /init and kernel Image in container
         run: |
-          docker run --rm --pull=always \
+          docker run --rm --pull=never \
+            -e GITHUB_SHA -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT \
+            -e R800_CONTAINER_IMAGE_ID \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             -v "$RUNNER_TEMP/r800-embedded-source:/source" \
             -v "$RUNNER_TEMP:/scratch" \
@@ -72,6 +85,19 @@ jobs:
               R800_SMOKE_INITRAMFS_LIST=/scratch/r800-embedded-initramfs/initramfs.list \
                 sh /repo/build/r800_kernel_compile_smoke.sh \
                 /source /repo /scratch/r800-embedded-kernel
+
+              python3 /repo/build/r800_reproducibility_audit.py \
+                --output /scratch/r800-image-repeatability.json emit \
+                --image /scratch/r800-embedded-kernel/arch/arm64/boot/Image \
+                --config /scratch/r800-embedded-kernel/.config \
+                --patch /repo/src/kernel/r800-wearos.patch \
+                --init-evidence /scratch/r800-embedded-initramfs/initramfs-evidence.json \
+                --cpio-evidence /scratch/r800-embedded-kernel/embedded-cpio-audit.json \
+                --source /source \
+                --run-id "$GITHUB_RUN_ID" \
+                --attempt "$GITHUB_RUN_ATTEMPT" \
+                --galwear-commit "$GITHUB_SHA" \
+                --container-image-id "$R800_CONTAINER_IMAGE_ID"
             '
 
       - name: Produce evidence only; no Image or init executable uploads
@@ -84,6 +110,12 @@ jobs:
             echo "device_contacted=false"
             echo "kernel_boot_tested=false"
             echo "firmware_published=false"
+            echo "two_run_reproducibility_proven=false"
+            if [ -f "$RUNNER_TEMP/r800-image-repeatability.json" ]; then
+              echo "machine_readable_sha256_evidence_present=true"
+            else
+              echo "machine_readable_sha256_evidence_present=false"
+            fi
             if [ -s "$RUNNER_TEMP/r800-embedded-kernel/arch/arm64/boot/Image" ]; then
               echo "kernel_Image_compiled=true"
               sha256sum "$RUNNER_TEMP/r800-embedded-kernel/arch/arm64/boot/Image"
@@ -113,5 +145,6 @@ jobs:
             ${{ runner.temp }}/r800-embedded-initramfs/initramfs-evidence.json
             ${{ runner.temp }}/r800-embedded-kernel/embedded-initramfs-gate.json
             ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
+            ${{ runner.temp }}/r800-image-repeatability.json
           if-no-files-found: warn
           retention-days: 7
