@@ -35,8 +35,7 @@ fi
 # This combined kernel is large. Limit checkout to the 131 paths actually
 # touched by the Galwear diff, instead of fetching all the source blobs.
 PATTERNS="$SOURCE-sparse-patterns.txt"
-awk '/^diff --git a\\// {sub(/^b\\//, "", $4); print "/" $4}' \
-    "$REPO/src/kernel/r800-wearos.patch" | LC_ALL=C sort -u > "$PATTERNS"
+awk '$1 == "diff" && $2 == "--git" && substr($4, 1, 2) == "b/" {print "/" substr($4, 3)}' "$REPO/src/kernel/r800-wearos.patch" | LC_ALL=C sort -u > "$PATTERNS"
 [ "$(wc -l < "$PATTERNS")" -ge 100 ] || {
     echo "Kernel diff has unexpectedly few paths; refusing sparse checkout" >&2
     exit 5
