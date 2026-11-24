@@ -29069,7 +29069,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  
  #define EXYNOS_FLEXPMU_DBG_PREFIX	"EXYNOS-FLEXPMU-DBG: "
  
-@@ -146,28 +147,70 @@
+@@ -146,28 +147,71 @@
  struct dbgfs_info {
  	int fid;
  	struct dentry *den;
@@ -29082,6 +29082,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
 +/* Lifecycle lock is never acquired by debugfs callbacks (remove drains them). */
 +static DEFINE_MUTEX(r800_flexpmu_lifecycle);
 +static DEFINE_MUTEX(r800_flexpmu_io);
++static bool r800_flexpmu_ready;
  
  
 +/* Checked readers also run with IRQs disabled during system suspend. */
@@ -29147,7 +29148,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  }
  EXPORT_SYMBOL_GPL(acpm_get_mif_request);
  
-@@ -183,7 +226,7 @@
+@@ -183,7 +227,7 @@
  			data[i] = __raw_readl(flexpmu_dbg_base +
  					(DATA_LINE * did) + DATA_IDX + i * 4);
  
@@ -29156,7 +29157,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  					print_arg[*data_count].prefix, data[i]);
  			if (line_len > 0)
  				len += line_len;
-@@ -191,7 +234,7 @@
+@@ -191,7 +235,7 @@
  			data[i] = __raw_readl(flexpmu_dbg_base +
  					(DATA_LINE * did) + DATA_IDX + i * 4);
  
@@ -29165,7 +29166,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  					print_arg[*data_count].prefix, data[i]);
  			if (line_len > 0)
  				len += line_len;
-@@ -214,7 +257,7 @@
+@@ -214,7 +258,7 @@
  			data[i] = __raw_readb(flexpmu_dbg_base +
  					(DATA_LINE * did) + DATA_IDX + i);
  
@@ -29174,7 +29175,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  					print_arg[*data_count].prefix, data[i]);
  			if (line_len > 0)
  				len += line_len;
-@@ -222,7 +265,7 @@
+@@ -222,7 +266,7 @@
  			data[i] = __raw_readb(flexpmu_dbg_base +
  					(DATA_LINE * did) + DATA_IDX + i);
  
@@ -29183,7 +29184,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  					print_arg[*data_count].prefix, data[i]);
  			if (line_len > 0)
  				len += line_len;
-@@ -380,15 +423,15 @@
+@@ -380,15 +424,15 @@
  	int i = 0;
  
  	if (!rtc_base) {
@@ -29202,7 +29203,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  			"%8s   %32s %32s %32s %32s\n", "Master", "active_since(us ago)",
  			"last_rel_time(us ago)", "total_req_time(us)", "req_count");
  
-@@ -420,7 +463,7 @@
+@@ -420,7 +464,7 @@
  			apm_req[i].total_time_us += apm_req[i].active_since_us;
  		}
  
@@ -29211,13 +29212,17 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  				"%8s : %32lld %32lld %32lld %32d\n",
  				flexpmu_master_name[i],
  				apm_req[i].active_since_us,
-@@ -449,7 +492,13 @@
+@@ -449,7 +493,17 @@
  	ssize_t ret;
  	char buf[BUF_SIZE] = {0,};
  
 +	if (!d2f || (unsigned int)d2f->fid >= FID_MAX)
 +		return -EINVAL;
 +	mutex_lock(&r800_flexpmu_io);
++	if (!r800_flexpmu_ready) {
++		mutex_unlock(&r800_flexpmu_io);
++		return -ENODEV;
++	}
  	ret = flexpmu_debugfs_read_fptr[d2f->fid](d2f->fid, buf);
 +	mutex_unlock(&r800_flexpmu_io);
 +	if (ret < 0)
@@ -29225,7 +29230,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  
  	return simple_read_from_buffer(user_buf, count, ppos, buf, ret);
  }
-@@ -458,31 +507,37 @@
+@@ -458,31 +512,41 @@
  		size_t count, loff_t *ppos)
  {
  	struct dbgfs_info *f2d = file->private_data;
@@ -29265,6 +29270,10 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  
 -	return ret;
 +	mutex_lock(&r800_flexpmu_io);
++	if (!r800_flexpmu_ready) {
++		mutex_unlock(&r800_flexpmu_io);
++		return -ENODEV;
++	}
 +	__raw_writel(buf[0] == '1', flexpmu_dbg_base +
 +			(DATA_LINE * DID_MIF_ALWAYS_ON) + 0xC);
 +	mutex_unlock(&r800_flexpmu_io);
@@ -29284,7 +29293,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  static int exynos_flexpmu_dbg_probe(struct platform_device *pdev)
  {
  	int ret = 0;
-@@ -490,18 +545,25 @@
+@@ -490,18 +554,25 @@
  	unsigned int len = 0;
  	unsigned int data_base = 0;
  	unsigned int data_size = 0;
@@ -29312,7 +29321,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  		pr_err("%s %s: can not read data-base in DT\n",
  				EXYNOS_FLEXPMU_DBG_PREFIX, __func__);
  		ret = -EINVAL;
-@@ -510,7 +572,7 @@
+@@ -510,7 +581,7 @@
  	data_base = be32_to_cpup(prop);
  
  	prop = of_get_property(pdev->dev.of_node, "data-size", &len);
@@ -29321,7 +29330,7 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
  		pr_err("%s %s: can not read data-base in DT\n",
  				EXYNOS_FLEXPMU_DBG_PREFIX, __func__);
  		ret = -EINVAL;
-@@ -518,52 +580,94 @@
+@@ -518,52 +589,100 @@
  	}
  	data_size = be32_to_cpup(prop);
  
@@ -29383,6 +29392,9 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
 +	r800_mif_base = flexpmu_dbg_base;
 +	r800_mif_size = data_size;
 +	spin_unlock_irqrestore(&r800_mif_lock, flags);
++	mutex_lock(&r800_flexpmu_io);
++	r800_flexpmu_ready = true;
++	mutex_unlock(&r800_flexpmu_io);
 +	mutex_unlock(&r800_flexpmu_lifecycle);
  
  	return 0;
@@ -29419,6 +29431,9 @@ diff --git a/drivers/soc/samsung/exynos-flexpmu-dbg.c b/drivers/soc/samsung/exyn
 +	r800_mif_base = NULL;
 +	r800_mif_size = 0;
 +	spin_unlock_irqrestore(&r800_mif_lock, flags);
++	mutex_lock(&r800_flexpmu_io);
++	r800_flexpmu_ready = false;
++	mutex_unlock(&r800_flexpmu_io);
 +	/* The pinned debugfs full proxy drains active operations here. */
  	debugfs_remove_recursive(flexpmu_dbg_root);
 +	flexpmu_dbg_root = NULL;
