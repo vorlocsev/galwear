@@ -28570,7 +28570,7 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-i
  static inline void pmucal_rae_write(struct pmucal_seq *seq)
  {
  	if (seq->mask == U32_MAX)
-@@ -190,92 +221,90 @@
+@@ -190,92 +221,92 @@
  
  void pmucal_rae_save_seq(struct pmucal_seq *seq, unsigned int seq_size)
  {
@@ -28588,6 +28588,7 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-i
  		case PMUCAL_COND_SAVE_RESTORE:
  			if (!pmucal_rae_check_condition(&seq[i]))
  				break;
++			/* fall through */
  		case PMUCAL_SAVE_RESTORE:
  			pmucal_rae_read(&seq[i]);
  			seq[i].need_restore = true;
@@ -28635,6 +28636,7 @@ diff --git a/drivers/soc/samsung/cal-if/pmucal_rae.c b/drivers/soc/samsung/cal-i
 -			if (!pmucal_rae_check_condition(&seq[i]))
 +			if (!saved || !pmucal_rae_check_condition(&seq[i]))
  				break;
++			/* fall through */
  		case PMUCAL_SAVE_RESTORE:
 -			if (seq[i].need_restore) {
 -				seq[i].need_restore = false;
