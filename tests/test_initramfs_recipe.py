@@ -84,6 +84,17 @@ class InitramfsRecipeTests(unittest.TestCase):
         with self.assertRaisesRegex(spec.InitramfsError, "symlinked"):
             spec.validate_init(link)
 
+    def test_symlink_cannot_be_used_for_spec_generation(self):
+        link = self.folder / "linked-init"
+        try:
+            link.symlink_to(self.init)
+        except (NotImplementedError, OSError):
+            self.skipTest("No symlink support")
+        output = self.folder / "initramfs.list"
+        with self.assertRaisesRegex(spec.InitramfsError, "symlinked"):
+            spec.generate_spec(link, output)
+        self.assertFalse(output.exists())
+
     def test_generates_deterministic_entries(self):
         first = self.folder / "first.list"
         second = self.folder / "second.list"
