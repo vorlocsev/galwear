@@ -631,25 +631,34 @@ fi
     tnet() { $B ps w 2>/dev/null | $B grep -q '[t]elnetd' ||              $L/lib/ld-musl-aarch64.so.1 /oem/r800dev/bin/busybox-extras telnetd -p 23 -l /system/bin/sh; }
     # Android owns Wi-Fi: it gets a real network (apps have internet) and nothing
     # fights over wlan0. Join the Tizen network with the passphrase in wifi.pass.
-    SSID=$($B sed -n 's/^[[:space:]]*ssid="\(.*\)"[[:space:]]*$//p' /oem/r800dev/wpa.conf | $B head -1)
+    SSID=$($B sed -n 's/^[[:space:]]*ssid="\(.*\)"[[:space:]]*$/\1/p' /oem/r800dev/wpa.conf | $B head -1)
     PASS=$($B cat /oem/r800dev/wifi.pass 2>/dev/null)
     # Keep Wi-Fi on: once paired, WearWifiMediator turns it off ~30 s after boot
     # (OFF_NO_REQUESTS; the phone link is meant to carry traffic) and the shell is lost.
     /system/bin/settings put global cw_disable_wifimediator 1
     /system/bin/cmd wifi set-wifi-enabled enabled
     for i in $($B seq 1 20); do inet && break; $B sleep 2; done
-    if ! inet && [ -n "$PASS" ]; then
+    if ! inet && [ -n "$SSID" ] && [ -n "$PASS" ]; then
         /system/bin/cmd wifi connect-network "$SSID" wpa2 "$PASS" > /dev/null 2>&1
         for i in $($B seq 1 45); do inet && break; $B sleep 2; done
     fi
     MODE=android
-    if ! inet; then
+    # Fall back only when the helper has a readable config and binary.
+    # Never start a second network owner if Android could not be disabled.
+    if ! inet && [ -s /oem/r800dev/wpa.conf ] &&
+       [ -x "$L/sbin/wpa_supplicant" ] &&
+       [ -x "$L/lib/ld-musl-aarch64.so.1" ]; then
         # fallback: our own supplicant + DHCP (Android Wi-Fi off so it cannot fight)
+        if /system/bin/cmd wifi set-wifi-enabled disabled &&
+           /system/bin/setprop ctl.stop wpa_supplicant; then
+        $B sleep 3
+        if [ "$(/system/bin/getprop init.svc.wpa_supplicant)" = stopped ]; then
         MODE=helper
-        /system/bin/cmd wifi set-wifi-enabled disabled; /system/bin/setprop ctl.stop wpa_supplicant; $B sleep 3
         for i in 1 2 3 4 5 6 7 8 9 10; do [ -d /sys/class/net/wlan0 ] && break; $B sleep 1; done
         $B ifconfig wlan0 up
-        $B sed 's#^ctrl_interface=.*#ctrl_interface=/dev/r800wpa#' /oem/r800dev/wpa.conf > $W/wpa.conf
+        # The configuration may contain credentials. Create it privately.
+        ( umask 077; $B sed 's#^ctrl_interface=.*#ctrl_interface=/dev/r800wpa#' /oem/r800dev/wpa.conf > "$W/wpa.conf" )
+        $B chmod 600 "$W/wpa.conf"
         $B cat > $W/dhcp.sh <<'H'
 #!/oem/r800dev/bin/busybox sh
 B=/oem/r800dev/bin/busybox
@@ -662,9 +671,16 @@ esac
 exit 0
 H
         $B chmod 755 $W/dhcp.sh
-        $L/lib/ld-musl-aarch64.so.1 --library-path $L/lib:$L/usr/lib $L/sbin/wpa_supplicant             -B -i wlan0 -D nl80211 -c $W/wpa.conf > /dev/null 2>&1
-        $B udhcpc -i wlan0 -s $W/dhcp.sh -b -t 20 -T 3 -x hostname:galaxywatch > /dev/null 2>&1
-        for i in $($B seq 1 30); do inet && break; $B sleep 1; done
+        # Keep foreground children under the supervision loop below.
+        # No daemonized DHCP/supplicant instance is started here.
+        else
+            k "wifi fallback skipped: Android supplicant not stopped"
+            /system/bin/cmd wifi set-wifi-enabled enabled
+        fi
+        else
+            k "wifi fallback skipped: Android Wi-Fi disable failed"
+            /system/bin/cmd wifi set-wifi-enabled enabled
+        fi
     fi
     # Policy routing: replies to the telnet shell must find the LAN route, which
     # lives in the main table (helper mode) or the wlan0 table (Android mode).
@@ -679,13 +695,13 @@ H
     # The phone proxy (sysproxyd) now runs and becomes the default network, so
     # hold the Wi-Fi request from the start: on 2026-11-20 Wi-Fi was torn down
     # and re-made several times (network 102 -> 106) and the shell dropped.
-    [ -f /oem/r800dev/keepwifi.dex ] && ! $B pgrep -f KeepWifi > /dev/null &&
+    [ "$MODE" = android ] && [ -f /oem/r800dev/keepwifi.dex ] && ! $B pgrep -f KeepWifi > /dev/null &&
         CLASSPATH=/oem/r800dev/keepwifi.dex $B setsid /system/bin/app_process / KeepWifi > /oem/r800dev/keepwifi.log 2>&1 &
     # KeepWifi's request lives in system_server: when that restarts (2026-11-20: a
     # KEYCODE_ASSIST crashed it, SearchManager is null on Wear) the request is gone
     # though KeepWifi still runs, the proxy took over and Wi-Fi was torn down. So
     # restart KeepWifi whenever system_server's pid changes.
-    [ -f /oem/r800dev/keepwifi.dex ] && ( down=0; ss=$(/system/bin/pidof system_server); while :; do
+    [ "$MODE" = android ] && [ -f /oem/r800dev/keepwifi.dex ] && ( down=0; ss=$(/system/bin/pidof system_server); while :; do
         $B sleep 20
         if $B ip -4 addr show wlan0 2>/dev/null | $B grep -q inet; then down=0
         else down=$((down+1)); fi
@@ -703,25 +719,40 @@ H
       done ) &
     k "wifi($MODE) $($B ip -4 addr show wlan0 | $B grep -o 'inet [0-9.]*'), telnet on 23"
     # Keep the shell alive; in Android mode re-join if the network is lost.
-    ( n=0; while :; do
+    ( n=0; wpa_pid=; dhcp_pid=; while :; do
         tnet
         if [ $MODE = android ]; then
             if inet; then n=0; else n=$((n+1)); fi
-            [ $n -eq 4 ] && [ -n "$PASS" ] && /system/bin/cmd wifi connect-network "$SSID" wpa2 "$PASS" > /dev/null 2>&1
+            [ $n -eq 4 ] && [ -n "$SSID" ] && [ -n "$PASS" ] && /system/bin/cmd wifi connect-network "$SSID" wpa2 "$PASS" > /dev/null 2>&1
             # 2026-11-19: after an AP deauth (reason 6) one connect-network was
             # not enough: Android sat scanning for 24 min until Wi-Fi was
             # toggled by hand. Still down after 4 min: toggle and re-join,
             # every 4 min until it comes back.
-            if [ $n -ge 8 ] && [ $((n % 8)) -eq 0 ] && [ -n "$PASS" ]; then
+            if [ $n -ge 8 ] && [ $((n % 8)) -eq 0 ] && [ -n "$SSID" ] && [ -n "$PASS" ]; then
                 k "wifi down $((n / 2)) min: toggling Wi-Fi"
                 /system/bin/cmd wifi set-wifi-enabled disabled; $B sleep 3
                 /system/bin/cmd wifi set-wifi-enabled enabled; $B sleep 8
                 /system/bin/cmd wifi connect-network "$SSID" wpa2 "$PASS" > /dev/null 2>&1
             fi
-            /system/bin/ip rule add from all lookup wlan0 pref 9998 2>/dev/null
+            # Avoid appending duplicate policy rules on every retry.
+            /system/bin/ip rule show | $B grep -q '^9998:.*lookup wlan0' ||
+                /system/bin/ip rule add from all lookup wlan0 pref 9998 2>/dev/null
         else
-            $B ps w 2>/dev/null | $B grep -q '[r]800wpa' ||                 $L/lib/ld-musl-aarch64.so.1 --library-path $L/lib:$L/usr/lib $L/sbin/wpa_supplicant                     -B -i wlan0 -D nl80211 -c $W/wpa.conf > /dev/null 2>&1
-            inet || $B udhcpc -i wlan0 -s $W/dhcp.sh -b -t 10 -T 3 -x hostname:galaxywatch > /dev/null 2>&1
+            # The fallback loop owns these foreground child processes.
+            if [ "$(/system/bin/getprop init.svc.wpa_supplicant)" != stopped ]; then
+                k "wifi fallback stopped: Android supplicant is no longer stopped"
+                [ -n "$dhcp_pid" ] && kill "$dhcp_pid" 2>/dev/null
+                [ -n "$wpa_pid" ] && kill "$wpa_pid" 2>/dev/null
+                break
+            fi
+            if [ -z "$wpa_pid" ] || ! kill -0 "$wpa_pid" 2>/dev/null; then
+                "$L/lib/ld-musl-aarch64.so.1" --library-path "$L/lib:$L/usr/lib" "$L/sbin/wpa_supplicant" -i wlan0 -D nl80211 -c "$W/wpa.conf" > /dev/null 2>&1 &
+                wpa_pid=$!
+            fi
+            if [ -z "$dhcp_pid" ] || ! kill -0 "$dhcp_pid" 2>/dev/null; then
+                $B udhcpc -f -i wlan0 -s "$W/dhcp.sh" -t 10 -T 3 -x hostname:galaxywatch > /dev/null 2>&1 &
+                dhcp_pid=$!
+            fi
         fi
         $B sleep 30
       done ) &
