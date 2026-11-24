@@ -75,6 +75,9 @@ jobs:
                     "safe_to_flash": False}
           (Path(os.environ["RUNNER_TEMP"]) / "decon-abi.json").write_text(json.dumps(report) + "\n")
           PY
+      - name: Verify pinned Mali R28P0 ioctl ABI on ARM32 and ARM64
+        run: |
+          python3 build/r800_mali_abi_check.py --source "$RUNNER_TEMP/decon-source" --ndk "$ANDROID_HOME/ndk/27.2.12479018" --scratch "$RUNNER_TEMP/mali-abi" --output "$RUNNER_TEMP/mali-abi.json"
       - name: Check full kernel patch against pinned source
         if: ${{ !cancelled() }}
         run: |
@@ -95,7 +98,7 @@ jobs:
       - name: Collect mandatory JSON reports
         run: |
           mkdir "$RUNNER_TEMP/hal-evidence"
-          cp "$RUNNER_TEMP/r800-hal/objects/hal-compile.json" "$RUNNER_TEMP/r800-hal/hal-link.json" "$RUNNER_TEMP/decon-abi.json" "$RUNNER_TEMP/r800-patch-check.json" "$RUNNER_TEMP/hal-evidence/"
+          cp "$RUNNER_TEMP/r800-hal/objects/hal-compile.json" "$RUNNER_TEMP/r800-hal/hal-link.json" "$RUNNER_TEMP/decon-abi.json" "$RUNNER_TEMP/mali-abi.json" "$RUNNER_TEMP/r800-patch-check.json" "$RUNNER_TEMP/hal-evidence/"
       - name: Upload JSON evidence only
         uses: actions/upload-artifact@v4
         with:
