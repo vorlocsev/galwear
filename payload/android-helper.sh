@@ -324,10 +324,24 @@ fi
     for i in $($B seq 1 120); do [ "$(/system/bin/getprop sys.boot_completed)" = 1 ] && break; $B sleep 1; done
     # boot got through: reset start.sh's Gemini priv-app failure counter
     [ "$(/system/bin/getprop sys.boot_completed)" = 1 ] && echo 0 > /oem/r800dev/android/gemini.tries
-    # Kernel #66+ re-initialises the panel after a real power-down, so let
-    # screen-off power the panel/DSIM/DECON down (the composer blanks with
-    # FBIOBLANK). Revert: echo 1 here, or setprop debug.r800.realblank 0.
-    echo 0 > /sys/module/decon/parameters/r800_keep_panel_on 2>/dev/null
+    # DISPLAY POWER POLICY: real panel power-down is an independent,
+    # experimental opt-in. Retain the kernel's keep-panel-on default unless
+    # Android has actually completed boot and the marker is present.
+    if [ "$(/system/bin/getprop sys.boot_completed)" = 1 ]; then
+        if [ -f /oem/r800dev/android/PANEL_REALBLANK ]; then
+            if echo 0 > /sys/module/decon/parameters/r800_keep_panel_on 2>/dev/null; then
+                k "power: experimental real panel blank enabled"
+            else
+                k "power: real panel blank parameter unavailable"
+            fi
+        else
+            echo 1 > /sys/module/decon/parameters/r800_keep_panel_on 2>/dev/null ||
+                k "power: keep-panel-on parameter unavailable"
+        fi
+    else
+        k "power: panel policy unchanged; Android boot not complete"
+    fi
+    # END DISPLAY POWER POLICY
     # storaged is left running (2026-11-19): with it stopped, system_server's
     # StorageManagerService retried "storaged not found" once a second for
     # the whole session (seen in the realuse97 logcat), which cost more
@@ -350,11 +364,30 @@ fi
     # (MIF seq down 0 -> ~10/s). It applies at the next ABOX runtime
     # suspend, so cycle the device once (DSP firmware needs ~16 s to boot
     # before it may be stopped). Undo: delete this block.
-    (
-        echo 1 > /sys/module/abox/parameters/r800_rtpm_poweroff
-        A=/sys/devices/platform/14a50000.abox/power
-        echo on > $A/control; $B sleep 25; echo auto > $A/control
-    ) &
+    # ABOX POWER POLICY: do not cycle the DSP unless independently opted in
+    # and Android boot is confirmed. Keep the original runtime PM setting.
+    if [ "$(/system/bin/getprop sys.boot_completed)" = 1 ] &&
+       [ -f /oem/r800dev/android/ABOX_POWEROFF ]; then
+        (
+            A=/sys/devices/platform/14a50000.abox/power
+            PARAM=/sys/module/abox/parameters/r800_rtpm_poweroff
+            original=$($B cat "$A/control" 2>/dev/null) || exit 0
+            case "$original" in on|auto) ;; *) exit 0 ;; esac
+            if echo on > "$A/control" 2>/dev/null; then
+                if echo 1 > "$PARAM" 2>/dev/null; then
+                    $B sleep 25
+                    k "power: experimental ABOX power-off enabled"
+                else
+                    k "power: ABOX power-off parameter unavailable"
+                fi
+                echo "$original" > "$A/control" 2>/dev/null ||
+                    k "power: ABOX control restore failed"
+            else
+                k "power: ABOX control unavailable"
+            fi
+        ) &
+    fi
+    # END ABOX POWER POLICY
     # Top button (gpio_keys, BACK) on the watch face turns the screen off (Back
     # does nothing there; neither button maps to POWER). Native helper with a
     # persistent uinput keyboard: "input keyevent" would take ~3 s.
