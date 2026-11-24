@@ -1,0 +1,49 @@
+name: SM-R800 exact AOSP kernel source probe (read only)
+
+on:
+  push:
+    branches:
+      - "development/r800-kernel-source-ci-20261124"
+    paths:
+      - ".github/workflows/r800-kernel-source-validation.yml"
+      - "build/r800_aosp_source_probe.sh"
+      - "build/r800_kernel_preflight.py"
+      - "src/kernel/r800-wearos.patch"
+      - "src/kernel/r800.config"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and offline source probe tests
+        run: |
+          sh -n build/r800_aosp_source_probe.sh
+          python3 -m py_compile build/r800_toolchain_inventory.py
+          python3 -m unittest discover -s tests -p 'test_kernel_source_ci.py' -v
+      - name: Report toolchain versions without installing anything
+        run: |
+          python3 build/r800_toolchain_inventory.py \
+            --config src/kernel/r800.config \
+            --report "$RUNNER_TEMP/r800-toolchain-inventory.json"
+      - name: Verify exact pinned AOSP Exynos kernel base and patch applicability
+        run: |
+          sh build/r800_aosp_source_probe.sh \
+            "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/r800-exynos-kernel" \
+            "$RUNNER_TEMP/r800-aosp-source-check.json"
+      - name: Upload offline source/toolchain evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-aosp-source-probe
+          path: |
+            ${{ runner.temp }}/r800-toolchain-inventory.json
+            ${{ runner.temp }}/r800-aosp-source-check.json
+          if-no-files-found: warn
+          retention-days: 7
