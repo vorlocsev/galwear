@@ -1,0 +1,107 @@
+name: SM-R800 kernel with embedded initramfs (NON-RELEASE)
+
+on:
+  push:
+    branches:
+      - "development/r800-embedded-initramfs-20261125"
+    paths:
+      - ".github/workflows/r800-embedded-initramfs-build.yml"
+      - "build/r800_aosp_source_probe.sh"
+      - "build/r800_kernel_preflight.py"
+      - "build/r800_kernel_compile_smoke.sh"
+      - "build/r800_embedded_initramfs_config.py"
+      - "build/r800_initramfs_spec.py"
+      - "build/r800_initramfs_compile_smoke.sh"
+      - "tests/test_embedded_initramfs.py"
+      - "tests/test_initramfs_recipe.py"
+      - "src/initramfs/init.c"
+      - "src/kernel/r800.config"
+      - "src/kernel/r800-wearos.patch"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  embedded-image-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate scripts, offline gates and temporary Kconfig tests
+        run: |
+          sh -n build/r800_kernel_compile_smoke.sh
+          sh -n build/r800_initramfs_compile_smoke.sh
+          python3 -m py_compile build/r800_embedded_initramfs_config.py
+          python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
+          python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
+
+      - name: Fetch pinned combined Exynos base and read-only patch check
+        run: |
+          sh build/r800_aosp_source_probe.sh \
+            "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/r800-embedded-source" \
+            "$RUNNER_TEMP/r800-embedded-source-preflight.json"
+
+      - name: Expand disposable source tree
+        run: |
+          git -C "$RUNNER_TEMP/r800-embedded-source" sparse-checkout disable
+          test "$(git -C "$RUNNER_TEMP/r800-embedded-source" rev-parse HEAD)" = \
+            50db73fc799f20a7120a8b5f653b16cc123d856f
+          test -z "$(git -C "$RUNNER_TEMP/r800-embedded-source" status --porcelain)"
+
+      - name: Compile experimental /init and kernel Image in container
+        run: |
+          docker run --rm --pull=always \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/r800-embedded-source:/source" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache \
+                clang19=19.1.4-r0 lld=19.1.4-r0 llvm19=19.1.4-r1 \
+                git make bash bc bison flex perl python3 openssl-dev \
+                elfutils-dev build-base linux-headers coreutils findutils
+              git config --global --add safe.directory /source
+              sh /repo/build/r800_initramfs_compile_smoke.sh \
+                /repo /scratch/r800-embedded-initramfs
+              R800_SMOKE_INITRAMFS_LIST=/scratch/r800-embedded-initramfs/initramfs.list \
+                sh /repo/build/r800_kernel_compile_smoke.sh \
+                /source /repo /scratch/r800-embedded-kernel
+            '
+
+      - name: Produce evidence only; no Image or init executable uploads
+        if: always()
+        run: |
+          {
+            echo "source_sha=50db73fc799f20a7120a8b5f653b16cc123d856f"
+            echo "kind=NON_RELEASE_EXPERIMENTAL_EMBEDDED_INITRAMFS"
+            echo "compiler=clang19-19.1.4"
+            echo "device_contacted=false"
+            echo "kernel_boot_tested=false"
+            echo "firmware_published=false"
+            if [ -s "$RUNNER_TEMP/r800-embedded-kernel/arch/arm64/boot/Image" ]; then
+              echo "kernel_Image_compiled=true"
+              sha256sum "$RUNNER_TEMP/r800-embedded-kernel/arch/arm64/boot/Image"
+            else
+              echo "kernel_Image_compiled=false"
+            fi
+            if [ -f "$RUNNER_TEMP/r800-embedded-kernel/embedded-initramfs-gate.json" ]; then
+              echo "embedded_spec_gate_report_present=true"
+            else
+              echo "embedded_spec_gate_report_present=false"
+            fi
+          } > "$RUNNER_TEMP/r800-embedded-build-evidence.txt"
+
+      - name: Upload text/JSON build evidence only (never device binaries)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-embedded-initramfs-evidence-only
+          path: |
+            ${{ runner.temp }}/r800-embedded-build-evidence.txt
+            ${{ runner.temp }}/r800-embedded-source-preflight.json
+            ${{ runner.temp }}/r800-embedded-initramfs/initramfs-evidence.json
+            ${{ runner.temp }}/r800-embedded-kernel/embedded-initramfs-gate.json
+          if-no-files-found: warn
+          retention-days: 7
