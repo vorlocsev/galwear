@@ -11,6 +11,7 @@ on:
       - "build/r800_initramfs_spec.py"
       - "src/initramfs/init.c"
       - "src/initramfs/init-readonly.c"
+      - "tests/test_readonly_init.py"
   workflow_dispatch:
 
 permissions:
@@ -29,6 +30,10 @@ jobs:
       REPLICA: ${{ matrix.replica }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check safe PID1 syscall whitelist and offline build recipe
+        run: |
+          python3 -m unittest discover -s tests -p 'test_readonly_init.py' -v
+          python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
       - name: Pull and record actual container image identity
         run: |
           docker pull alpine:3.21
