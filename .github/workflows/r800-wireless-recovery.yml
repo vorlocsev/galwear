@@ -1,0 +1,20 @@
+name: SM-R800 wireless recovery (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-wireless-recovery-20261125
+    paths:
+      - .github/workflows/r800-wireless-recovery.yml
+      - payload/android-helper.sh
+      - tests/test_wireless_recovery.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-wireless-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wireless shell regression tests
+        run: python3 -m unittest discover -s tests -p 'test_wireless_recovery.py' -v
