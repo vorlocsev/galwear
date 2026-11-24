@@ -130,6 +130,9 @@ jobs:
           report = json.loads(
               (Path(os.environ["RUNNER_TEMP"]) / "r800-two-image-comparison.json").read_text())
           assert report["status"] == "TWO_RUN_HASH_MATCH"
+          assert report["first_runner_replica"] == "a"
+          assert report["second_runner_replica"] == "b"
+          assert report["first_run_id"] == report["second_run_id"] == int(os.environ["GITHUB_RUN_ID"])
           assert report["two_run_byte_identity_observed"] is True
           assert report["safe_to_flash"] is False
           assert report["general_reproducibility_proven"] is False
