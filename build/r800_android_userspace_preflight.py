@@ -139,7 +139,7 @@ def audit(root: Path, config: Path) -> dict:
     errors = []
     binaries = {}
     for name in ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager",
-                 "/system/bin/vndservicemanager", "/system/bin/app_process32"):
+                 "/vendor/bin/vndservicemanager", "/system/bin/app_process32"):
         try:
             info = elf_check(root, name)
             if info["interpreter"]:
@@ -169,6 +169,8 @@ def main():
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
+    if args.output.resolve().is_relative_to(args.root.resolve()):
+        p.error("Report must be outside the guest root")
     try:
         result = audit(args.root, args.config)
     except (OSError, ValueError) as exc:
