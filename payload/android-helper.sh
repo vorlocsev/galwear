@@ -594,18 +594,41 @@ fi
         fi
         $B sleep 7200
       done ) > /dev/null 2>&1 &
-    # CPU deep-idle is independent of system suspend. Separate the flags so
-    # either mechanism can be tested on its own. Keep state1 off by default;
-    # opt in only with android/CPUIDLE_DEEP (may hang, may save battery).
-    for c in 0 1; do
-        IDLE=/sys/devices/system/cpu/cpu$c/cpuidle/state1/disable
-        [ -e "$IDLE" ] || continue
+    # CPU idle has its own kernel gate; never infer permission from SLEEP.
+    IDLE_GATE=/sys/module/cpuidle_exynos64/parameters/r800_allow_deep_idle
+    IDLE_OK=0
+    if [ -e "$IDLE_GATE" ] &&
+       printf 'N\n' > "$IDLE_GATE" 2>/dev/null &&
+       [ "$($B cat "$IDLE_GATE" 2>/dev/null)" = N ]; then
         if [ -f /oem/r800dev/android/CPUIDLE_DEEP ]; then
-            echo 0 > "$IDLE" 2>/dev/null || k "power: state1 enable failed cpu$c"
-        else
-            echo 1 > "$IDLE" 2>/dev/null || k "power: state1 disable failed cpu$c"
+            IDLE_OK=1
+            for c in 0 1; do
+                IDLE=/sys/devices/system/cpu/cpu$c/cpuidle/state1/disable
+                if ! printf '0\n' > "$IDLE" 2>/dev/null ||
+                   [ "$($B cat "$IDLE" 2>/dev/null)" != 0 ]; then
+                    IDLE_OK=0
+                    break
+                fi
+            done
+            if [ "$IDLE_OK" = 1 ] &&
+               printf 'Y\n' > "$IDLE_GATE" 2>/dev/null &&
+               [ "$($B cat "$IDLE_GATE" 2>/dev/null)" = Y ]; then
+                k "power: experimental deep CPU idle enabled (unverified)"
+            else
+                IDLE_OK=0
+            fi
         fi
-    done
+    else
+        k "power: CPU idle gate unavailable; refusing experimental opt-in"
+    fi
+    if [ "$IDLE_OK" = 0 ]; then
+        printf 'N\n' > "$IDLE_GATE" 2>/dev/null || k "power: CPU idle gate reset unavailable"
+        for c in 0 1; do
+            IDLE=/sys/devices/system/cpu/cpu$c/cpuidle/state1/disable
+            [ -e "$IDLE" ] || continue
+            printf '1\n' > "$IDLE" 2>/dev/null || k "power: state1 disable failed cpu$c"
+        done
+    fi
 
     # /data is only 190 MB: Play Store keeps re-downloading an update (35-57 MB a
     # try) that can never install, until writes fail with ENOSPC (overlays, prefs
