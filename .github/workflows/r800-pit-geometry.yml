@@ -1,0 +1,26 @@
+name: SM-R800 offline PIT geometry and size checks
+
+on:
+  push:
+    branches:
+      - "hardening/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pit-geometry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Python sources
+        run: python3 -m py_compile installer/netodin.py installer/r800_geometry.py tests/test_pit_geometry.py
+      - name: Run PIT geometry synthetic tests
+        run: python3 -m unittest discover -s tests -p 'test_pit_geometry.py' -v
+      - name: Verify NetOdin and recovery regressions
+        run: |
+          python3 -m unittest discover -s tests -p 'test_netodin_protocol.py' -v
+          python3 -m unittest discover -s tests -p 'test_installer_guard.py' -v
+          python3 -m unittest discover -s tests -p 'test_recovery_audit.py' -v
