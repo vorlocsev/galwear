@@ -29,6 +29,16 @@ CMD_PIT = 101           # 0x65
 CMD_FILE_TRANSFER = 102 # 0x66
 CMD_SESSION_END = 103   # 0x67
 
+# Bounded to the maximum PIT entry count accepted by r800_safety.
+# Reserve a small amount for format-specific trailing data; it is never
+# interpreted as additional partition entries.
+MAX_WIRE_PIT_SIZE = (
+    r800_safety.PIT_HEADER_SIZE
+    + r800_safety.MAX_PIT_ENTRIES * r800_safety.PIT_ENTRY_SIZE
+    + 512
+)
+PIT_WIRE_CHUNK_BYTES = 500
+
 # No hardcoded PIT fallback is ever permitted for a flash operation.
 
 
@@ -70,6 +80,39 @@ def recv_exact(sock: socket.socket, length: int) -> bytes:
             raise ConnectionResetError(f"Socket closed unexpectedly while waiting for {length - len(buf)} bytes.")
         buf.extend(chunk)
     return bytes(buf)
+
+
+def receive_live_pit(sock: socket.socket) -> bytes:
+    """Read one PIT transfer, with a finite bound and no automatic retries.
+
+    Framing of the final 500-byte Odin PIT block is not yet confirmed on
+    physical SM-R800: read only the announced remainder, matching the
+    existing implementation. If extra padding appears, the finalize ACK
+    will fail closed rather than treating leftover bytes as an ACK.
+    """
+    _, pit_size = send_control_packet(sock, CMD_PIT, 1, expect_resp=True)
+    minimum = r800_safety.PIT_HEADER_SIZE + r800_safety.PIT_ENTRY_SIZE
+    if not minimum <= pit_size <= MAX_WIRE_PIT_SIZE:
+        raise r800_safety.SafetyError(
+            f"Refusing suspicious PIT wire length: {pit_size} bytes "
+            f"(allowed {minimum}..{MAX_WIRE_PIT_SIZE}); no writes")
+    print(f"  [+] Device announced PIT size {pit_size} bytes")
+    result = bytearray()
+    count = (pit_size + PIT_WIRE_CHUNK_BYTES - 1) // PIT_WIRE_CHUNK_BYTES
+    for index in range(count):
+        # The peer sends raw PIT data after the request; no per-block ACK
+        # should be consumed here. Any timeout, disconnect or short stream
+        # is fatal and the session is NOT automatically resumed.
+        send_control_packet(sock, CMD_PIT, 2, data=[index], expect_resp=False)
+        amount = min(PIT_WIRE_CHUNK_BYTES, pit_size - len(result))
+        result.extend(recv_exact(sock, amount))
+    _, finish_status = send_control_packet(sock, CMD_PIT, 3, expect_resp=True)
+    if finish_status != 0:
+        raise r800_safety.SafetyError(
+            f"PIT finalize rejected/unknown status {finish_status:#x}")
+    # Parsing occurs before any CMD_FILE_TRANSFER can be sent.
+    r800_safety.validate_r800_pit(r800_safety.parse_pit_strict(bytes(result)))
+    return bytes(result)
 
 
 def require_transfer_success(status: int, phase: str) -> None:
@@ -171,6 +214,11 @@ def flash_ap_package(
         tar_obj.close()
         raise TimeoutError("No Odin connection after 120 s. Check Wi-Fi AP IP, "
                            "inbound TCP/13579 and other devices joining the AP.") from exc
+    except BaseException:
+        # Even unexpected accept() failures must not leak a listener/archive.
+        srv.close()
+        tar_obj.close()
+        raise
     print(f"[+] Watch connected from {client_addr[0]}:{client_addr[1]}!")
     sock.settimeout(300.0)  # 5 min timeout
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -201,35 +249,19 @@ def flash_ap_package(
         total_high = (total_payload >> 32) & 0xFFFFFFFF
         send_control_packet(sock, CMD_SETUP, 2, data=[total_low, total_high], expect_resp=True)
 
-        # Step 5: Read PIT table from device
-        print("[*] Requesting partition table (PIT) from device...")
-        ack_cmd, pit_size = send_control_packet(sock, CMD_PIT, 1, expect_resp=True)
-        pit_map = None  # Never fall back to guessed partition IDs for writes
-        if ack_cmd == CMD_PIT and 0 < pit_size < 100000:
-            print(f"  [+] Device PIT size: {pit_size} bytes. Downloading...")
-            pit_data = bytearray()
-            chunk_cnt = (pit_size + 499) // 500
-            for i in range(chunk_cnt):
-                # Cmd 101, Sub 2 (expect_resp=False, device streams raw 500 bytes)
-                send_control_packet(sock, CMD_PIT, 2, data=[i], expect_resp=False)
-                rem = min(500, pit_size - len(pit_data))
-                chunk = recv_exact(sock, rem)
-                pit_data.extend(chunk)
-            # Finalize PIT transfer
-            send_control_packet(sock, CMD_PIT, 3, expect_resp=True)
-            pit_map = r800_safety.parse_pit_strict(bytes(pit_data))
-            r800_safety.validate_r800_pit(pit_map)
-            # Complete geometry audit before any CMD_FILE_TRANSFER (102).
-            geometry = r800_geometry.parse_pit_geometry(bytes(pit_data))
-            transfer_plan = r800_geometry.plan_image_transfers(geometry, members)
-            print(f"  [+] Live PIT validated ({len(pit_map)} flash-file mappings).")
-            print("  [+] Assumed 512-byte sector geometry / 128-KiB padded-transfer check:")
-            for item in transfer_plan:
-                print(f"      {item['image']}: {item['image_bytes']} bytes "
-                      f"(padded {item['transmitted_padded_bytes']}) / "
-                      f"capacity {item['assumed_partition_bytes']} bytes")
-        else:
-            raise r800_safety.SafetyError("No valid live PIT; refusing all writes.")
+        # Step 5: Read/validate the live PIT. Never guess missing entries.
+        print("[*] Requesting live partition table (PIT)...")
+        pit_data = receive_live_pit(sock)
+        pit_map = r800_safety.parse_pit_strict(pit_data)
+        # Entire transfer plan is validated before the first write request.
+        geometry = r800_geometry.parse_pit_geometry(pit_data)
+        transfer_plan = r800_geometry.plan_image_transfers(geometry, members)
+        print(f"  [+] PIT validated ({len(pit_map)} image mappings)")
+        print("  [+] Assumed 512-byte sector geometry / 128-KiB padding:")
+        for item in transfer_plan:
+            print(f"      {item['image']}: {item['image_bytes']} bytes "
+                  f"(padded {item['transmitted_padded_bytes']}) / "
+                  f"capacity {item['assumed_partition_bytes']} bytes")
 
         # Step 6: Stream each partition file in the AP archive
         print("\n" + "=" * 72)
