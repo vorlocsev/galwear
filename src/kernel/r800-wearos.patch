@@ -26269,7 +26269,152 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	unsigned int suspend_mode_idx;		/* power mode to be used in suspend scenario */
  	unsigned int suspend_psci_idx;		/* psci index to be used in suspend scenario */
  	u8 num_extra_stat;			/* Total number of extra wakeup_stat */
-@@ -263,6 +269,14 @@
+@@ -83,122 +88,138 @@
+ static void exynos_show_wakeup_reason_eint(void)
+ {
+ 	int bit;
+ 	int i, size;
+ 	long unsigned int ext_int_pend;
+ 	u32 eint_wakeup_mask;
+ 	bool found = 0;
+ 	unsigned int val = 0;
+ 
+-	exynos_pmu_read(EXYNOS_PMU_EINT_WAKEUP_MASK, &val);
++	if (exynos_pmu_read(EXYNOS_PMU_EINT_WAKEUP_MASK, &val)) {
++		pr_warn("%s EINT wake mask unavailable\n", EXYNOS_PM_PREFIX);
++		return;
++	}
+ 	eint_wakeup_mask = val;
+ 
+ 	for (i = 0, size = 8; i < pm_info->num_eint; i += size) {
+ 		ext_int_pend =
+ 			__raw_readl(EXYNOS_EINT_PEND(pm_info->eint_base, i));
+ 
+ 		for_each_set_bit(bit, &ext_int_pend, size) {
+ 			u32 gpio;
+ 			int irq;
+ 
+-			if (eint_wakeup_mask & (1 << (i + bit)))
++			/* The final bank can contain fewer than eight EINTs.\n			 * Only the first 32 sources have a mask in this register. */
++			if (i + bit >= pm_info->num_eint || i + bit >= 32)
+ 				continue;
++			if (eint_wakeup_mask & BIT(i + bit))
++				continue;
+ 
+ 			gpio = exynos_eint_to_pin_num(i + bit);
+ 			irq = gpio_to_irq(gpio);
++			if (irq < 0) {
++				pr_warn("%s EINT %d has no IRQ mapping (%d)\n",
++					EXYNOS_PM_PREFIX, i + bit, irq);
++				continue;
++			}
+ 
+ #ifdef CONFIG_SUSPEND
+ 			log_irq_wakeup_reason(irq);
+ 		//	update_wakeup_reason_stats(irq, i + bit);
+ #endif
+ 			found = 1;
+ 		}
+ 	}
+ 
+ 	if (!found)
+ 		pr_info("%s Resume caused by unknown EINT\n", EXYNOS_PM_PREFIX);
+ }
+ 
+ static void exynos_show_wakeup_registers(unsigned int wakeup_stat)
+ {
+ 	int i, size;
+-	int extra_wakeup_stat;
++	unsigned int extra_wakeup_stat;
+ 
+ 	pr_info("WAKEUP_STAT:\n");
+ 	pr_info("0x%08x\n", wakeup_stat);
+ 	for (i = 0; i < pm_info->num_extra_stat; i++) {
+-		exynos_pmu_read(pm_info->extra_wakeup_stat[i], &extra_wakeup_stat);
++		if (exynos_pmu_read(pm_info->extra_wakeup_stat[i], &extra_wakeup_stat)) {
++			pr_warn("%s extra wake status %d unavailable\n", EXYNOS_PM_PREFIX, i);
++			continue;
++		}
+ 		pr_info("0x%08x\n", extra_wakeup_stat);
+ 	}
+ 
+ 	pr_info("EINT_PEND: ");
+ 	for (i = 0, size = 8; i < pm_info->num_eint; i += size)
+ 		pr_info("0x%02x ", __raw_readl(EXYNOS_EINT_PEND(pm_info->eint_base, i)));
+ }
+ 
+ static void exynos_show_wakeup_reason_sysint(unsigned int stat,
+ 					     struct wakeup_stat_name *ws_names)
+ {
+ 	int bit;
+ 	unsigned long lstat = stat;
+ 	const char *name;
+ 
+ 	for_each_set_bit(bit, &lstat, 32) {
+ 		name = ws_names->name[bit];
+ 
+ 		if (!name)
+ 			continue;
+ #ifdef CONFIG_SUSPEND
+ 		log_abnormal_wakeup_reason(name);
+ #endif
+ 	}
+ }
+ 
+ static void exynos_show_wakeup_reason_detail(unsigned int wakeup_stat)
+ {
+ 	unsigned int wss;
+ 
+ 	if ((wakeup_stat & WAKEUP_STAT_EINT))
+ 		exynos_show_wakeup_reason_eint();
+ 
+ 	if (unlikely(!pm_info->ws_names))
+ 		return;
+ 
+-	exynos_pmu_read(EXYNOS_PMU_WAKEUP_STAT, &wss);
+ 	wss = wakeup_stat & ~(WAKEUP_STAT_EINT);
+ 	wss = wss & ~(WAKEUP_STAT_WAKEUP);
+ 	wss = wss & ~(WAKEUP_STAT_RTC_ALARM);
+ 	exynos_show_wakeup_reason_sysint(wss, &pm_info->ws_names[0]);
+ }
+ 
+ static void exynos_show_wakeup_reason(bool sleep_abort)
+ {
+ 	unsigned int wakeup_stat;
+ 	int i, size;
+ 
+ 	if (sleep_abort) {
+ 		pr_info("%s early wakeup! Dumping pending registers...\n", EXYNOS_PM_PREFIX);
+ 
+ 		pr_info("EINT_PEND:\n");
+ 		for (i = 0, size = 8; i < pm_info->num_eint; i += size)
+ 			pr_info("0x%x\n", __raw_readl(EXYNOS_EINT_PEND(pm_info->eint_base, i)));
+ 
+ 		pr_info("GIC_PEND:\n");
+ 		for (i = 0; i < pm_info->num_gic; i++)
+ 			pr_info("GICD_ISPENDR[%d] = 0x%x\n", i, __raw_readl(pm_info->gic_base + i*4));
+ 
+ 		pr_info("%s done.\n", EXYNOS_PM_PREFIX);
+ 		return ;
+ 	}
+ 
+-	exynos_pmu_read(EXYNOS_PMU_WAKEUP_STAT, &wakeup_stat);
++	if (exynos_pmu_read(EXYNOS_PMU_WAKEUP_STAT, &wakeup_stat)) {
++		pr_warn("%s wake status unavailable\n", EXYNOS_PM_PREFIX);
++		return;
++	}
+ 	exynos_show_wakeup_registers(wakeup_stat);
+ 
+ 	exynos_show_wakeup_reason_detail(wakeup_stat);
+ 
+ 	if (wakeup_stat & WAKEUP_STAT_RTC_ALARM)
+ 		pr_info("%s Resume caused by RTC alarm\n", EXYNOS_PM_PREFIX);
+ 	else
+ 		pr_info("%s Resume caused by wakeup_stat 0x%08x\n",
+ 			EXYNOS_PM_PREFIX, wakeup_stat);
+ }
+ 
+@@ -263,6 +285,14 @@
  
  static int exynos_pm_syscore_suspend(void)
  {
@@ -26284,7 +26429,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  #if 0 
  	if (!exynos_check_cp_status()) {
  		pr_info("%s %s: sleep canceled by CP reset \n",
-@@ -276,31 +290,52 @@
+@@ -276,31 +306,52 @@
  			pm_info->is_usbl2_suspend = pm_info->usb_is_connect();
  	}
  
@@ -26353,7 +26498,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  }
  
  static struct syscore_ops exynos_pm_syscore_ops = {
-@@ -313,7 +348,11 @@
+@@ -313,7 +364,11 @@
  	unsigned int psci_index;
  	unsigned int prev_mif = 0, post_mif = 0;
  	unsigned int prev_req, off_count;
@@ -26365,7 +26510,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	psci_index = pm_info->suspend_psci_idx;
  
  	/* Send an IPI if test_early_wakeup flag is set */
-@@ -328,7 +367,12 @@
+@@ -328,7 +383,12 @@
  	/* This will also act as our return point when
  	 * we resume as it saves its own register state and restores it
  	 * during the resume. */
@@ -26379,7 +26524,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  
  	pr_info("%s: is_early_wakeup : %d\n", EXYNOS_PM_PREFIX, pm_info->is_early_wakeup);
  	if (pm_info->is_early_wakeup)
-@@ -339,6 +383,9 @@
+@@ -339,6 +399,9 @@
  	exynos_pmu_read(CPU_INFORM4, &off_count);
  	pr_info("%s: post mif_count %d	%d\n",EXYNOS_PM_PREFIX, post_mif,off_count);
  
@@ -26389,7 +26534,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	if (post_mif == prev_mif) {
  		pr_info("%s: MIF blocked. MIF request Mster was  0x%x\n", EXYNOS_PM_PREFIX, prev_req);
  		return -EBUSY;
-@@ -347,7 +394,7 @@
+@@ -347,7 +410,7 @@
  		pr_info("%s: MIF down. cur_count: %d, acc_count: %d\n",
  				EXYNOS_PM_PREFIX, post_mif - prev_mif, post_mif);
  
