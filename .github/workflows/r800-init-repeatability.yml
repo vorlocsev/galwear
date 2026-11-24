@@ -46,7 +46,7 @@ jobs:
             -v "$RUNNER_TEMP:/scratch" \
             alpine:3.21 sh -eu -c '
               apk add --no-cache clang19=19.1.4-r0 \
-                lld=19.1.4-r0 llvm19=19.1.4-r1 python3
+                lld=19.1.4-r0 llvm19=19.1.4-r1 python3 \
                 coreutils qemu-aarch64
               sh /repo/build/r800_initramfs_compile_smoke.sh \
                 /repo /scratch/r800-repeatability-init
