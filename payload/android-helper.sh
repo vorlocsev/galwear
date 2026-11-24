@@ -25,37 +25,53 @@ done
 $B chmod 666 /dev/loop3
 $B mkdir -p /dev/block/bootdevice/by-name
 [ -e /dev/block/bootdevice/by-name/config ] || $B ln -s /dev/loop3 /dev/block/bootdevice/by-name/config
-# Kernel wakelock r800helper keeps the board out of deep sleep. Deep sleep
-# itself works (Wi-Fi wakes the SoC, so the telnet shell still answers, and
-# wpcd holds its own wakelock on the charging pad), but the watch can hang
-# in it: 2026-11-16 it froze ~16 min into a sleep trial and needed a forced
-# restart. Opt in with android/SLEEP until that is fixed.
-# System suspend and per-core CPU idle are separate power states.
-# Keep system suspend guarded by default; explicit SLEEP is experimental.
+# System suspend is denied in the patched kernel by default. Keep the
+# userspace wake lock as defense in depth, including on historical kernels.
+# An explicit SLEEP marker requests experimental opt-in, never release mode.
 SLEEPF=/oem/r800dev/android/SLEEP
-if [ -f "$SLEEPF" ]; then
-    k "power: full suspend enabled by SLEEP opt-in (unverified stability)"
+SUSPEND_GATE=/sys/module/exynos_pm/parameters/r800_allow_system_suspend
+PD_GATE=/sys/module/exynos_pd/parameters/r800_sleep_pd_off
+DISPAUD_GATE=/sys/module/exynos_pd/parameters/r800_dispaud_sleep_off
+SLEEP_ENABLED=0
+r800_set_suspend_gate() {
+    printf '%s\n' "$1" > "$SUSPEND_GATE" 2>/dev/null &&
+        [ "$($B cat "$SUSPEND_GATE" 2>/dev/null)" = "$2" ]
+}
+# Acquire the lock before configuring any experimental policy.
+if echo r800helper > /sys/power/wake_lock 2>/dev/null; then
+    k "power: system suspend guarded"
 else
-    if echo r800helper > /sys/power/wake_lock 2>/dev/null; then
-        k "power: system suspend guarded"
-    else
-        k "power: WARNING: r800helper wake lock unavailable"
+    k "power: WARNING: r800helper wake lock unavailable"
+fi
+# Missing gate is NOT permission to experiment on an older kernel.
+if [ -e "$SUSPEND_GATE" ] && r800_set_suspend_gate N N; then
+    if [ -f "$SLEEPF" ]; then
+        if printf '3\n' > "$PD_GATE" 2>/dev/null &&
+           [ "$($B cat "$PD_GATE" 2>/dev/null)" = 3 ] &&
+           printf 'Y\n' > "$DISPAUD_GATE" 2>/dev/null &&
+           [ "$($B cat "$DISPAUD_GATE" 2>/dev/null)" = Y ] &&
+           r800_set_suspend_gate Y Y &&
+           echo r800helper > /sys/power/wake_unlock 2>/dev/null; then
+            SLEEP_ENABLED=1
+            k "power: experimental suspend explicitly enabled (unverified)"
+        else
+            r800_set_suspend_gate N N || k "power: ERROR: kernel gate disable unconfirmed"
+            echo r800helper > /sys/power/wake_lock 2>/dev/null || k "power: wake lock unavailable"
+            k "power: opt-in failed; suspend not authorized"
+        fi
     fi
+else
+    k "power: kernel suspend gate unavailable; refusing experimental opt-in"
+fi
+if [ "$SLEEP_ENABLED" = 0 ]; then
+    printf '0\n' > "$PD_GATE" 2>/dev/null || k "power: PD override reset unavailable"
+    printf 'N\n' > "$DISPAUD_GATE" 2>/dev/null || k "power: DISPAUD override reset unavailable"
 fi
 # Composer DECON overlays off by default (2026-11-19): A/B with the same
 # 30 s scroll had 10.7% of SysUI frames >16 ms with overlays vs 6.7% with
 # GPU composition (p99 150 vs 73 ms), although overlays halve SF/GPU work.
 # Suspect: the GPU fallback for animated/scaled layers. Opt in: android/OVERLAY.
 [ -f /oem/r800dev/android/OVERLAY ] || /system/bin/setprop vendor.hwc.r800.overlay 0
-# Full SLEEP (MIF down) needs pd-is, pd-vts and pd-dispaud off, as in Tizen
-# (kernel #97+: Tizen's PD SMC argument, decon keeps disp-rst-prev in
-# ambient). With android/SLEEP the domains go off in the last syscore step;
-# ABOX powers off when idle (set further down). 3 of 3 forced sleeps resumed
-# with ambient on, 2026-11-19.
-if [ -f /oem/r800dev/android/SLEEP ]; then
-    echo 3 > /sys/module/exynos_pd/parameters/r800_sleep_pd_off 2>/dev/null
-    echo Y > /sys/module/exynos_pd/parameters/r800_dispaud_sleep_off 2>/dev/null
-fi
 # bcmdhd prefixes /vendor to its firmware paths; vendor.img has an empty mount point
 $B mount --bind /oem/r800dev/fw /vendor/data/r800dev/fw
 # Kernel firmware search path (no user-mode helper): /mnt/r800fw resolves both
