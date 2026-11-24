@@ -82,6 +82,20 @@ def recv_exact(sock: socket.socket, length: int) -> bytes:
     return bytes(buf)
 
 
+def open_listener(host: str, port: int, accept_timeout: float = 120):
+    """Open bounded listener and clean up on any bind/listen failure."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((host, port))
+        srv.listen(1)
+        srv.settimeout(accept_timeout)
+        return srv
+    except BaseException:
+        srv.close()
+        raise
+
+
 def receive_live_pit(sock: socket.socket) -> bytes:
     """Read one PIT transfer, with a finite bound and no automatic retries.
 
@@ -183,17 +197,22 @@ def flash_ap_package(
     # 2. Inspect AP Tar file members (skip .pit table files from partition flash list)
     print(f"[*] Analyzing firmware package: {os.path.basename(ap_path)}")
     tar_obj = tarfile.open(ap_path, "r:")
-    members = r800_safety.validate_archive(tar_obj)
-    total_payload = sum(m.size for m in members)
+    try:
+        members = r800_safety.validate_archive(tar_obj)
+        total_payload = sum(m.size for m in members)
+    except BaseException:
+        tar_obj.close()
+        raise
     print(f"  [+] Found {len(members)} partitions to flash (Total: {total_payload / 1024 / 1024:.2f} MB):")
     for m in members:
         print(f"      - {m.name:22s} : {m.size:10d} bytes ({m.size / 1024 / 1024:6.2f} MB)")
 
-    # 3. Bind TCP Server
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((host, port))
-    srv.listen(1)
+    # 3. Bind TCP Server. No archived file handle leaks on bind failure.
+    try:
+        srv = open_listener(host, port)
+    except BaseException:
+        tar_obj.close()
+        raise
 
     print("\n" + "-" * 72)
     print(f"[*] TCP Server listening on {host}:{port}")
@@ -206,7 +225,6 @@ def flash_ap_package(
     print("  3. Waiting for connection from watch...")
     print("-" * 72)
 
-    srv.settimeout(120)
     try:
         sock, client_addr = srv.accept()
     except socket.timeout as exc:
@@ -220,11 +238,10 @@ def flash_ap_package(
         tar_obj.close()
         raise
     print(f"[+] Watch connected from {client_addr[0]}:{client_addr[1]}!")
-    sock.settimeout(300.0)  # 5 min timeout
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-
     try:
+        sock.settimeout(300.0)  # 5 min timeout
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         # Step 1: Handshake (ODIN -> LOKE)
         print("[*] Handshaking: sending 'ODIN'...")
         sock.sendall(b"ODIN")
@@ -352,16 +369,17 @@ def reboot_only(host: str = "0.0.0.0", port: int = ODIN_PORT):
     """Handshake with a watch in Download (Wireless) mode and reboot it to the
     normal OS without writing anything. Used to leave a boot-to-recovery loop
     with a warm reset (keeps DRAM, so the previous kernel's log ring survives)."""
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((host, port))
-    srv.listen(1)
+    srv = open_listener(host, port)
     print(f"[*] REBOOT-ONLY: listening on {host}:{port}; nothing will be flashed.")
     print("[*] Put the watch in 'Download (Wireless)' AP mode and join its Wi-Fi...")
-    sock, client_addr = srv.accept()
-    print(f"[+] Watch connected from {client_addr[0]}:{client_addr[1]}")
-    sock.settimeout(60.0)
     try:
+        sock, client_addr = srv.accept()
+    except BaseException:
+        srv.close()
+        raise
+    print(f"[+] Watch connected from {client_addr[0]}:{client_addr[1]}")
+    try:
+        sock.settimeout(60.0)
         sock.sendall(b"ODIN")
         resp = recv_exact(sock, 4)
         if resp != b"LOKE":
