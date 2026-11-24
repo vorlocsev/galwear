@@ -1,5 +1,15 @@
 # Wear OS 3.5 for the Galaxy Watch SM-R800
 
+> **Galwear experimental development branch — read before installation.** The
+> historical installation instructions below describe an earlier prototype;
+> they are not validated on a retail SM-R800. The hardened NetOdin on this
+> branch intentionally refuses live flashing without separate reference
+> verification. Do **not** attempt an installation based on green GitHub Actions:
+> all tests are synthetic. First use the read-only `--preflight-only` mode and
+> see `docs/R800_STAGE10_PROVENANCE_RU.md`. Neither a proven wired recovery
+> path nor retail S-Boot compatibility is established.
+
+
 This project runs Wear OS 3.5 on the Samsung Galaxy Watch 46 mm Bluetooth, model
 SM-R800. Wear OS 3.5 here is Android 11, from the Pixel Watch system image
 `RWDC.230905.003`. A custom Linux 4.19 kernel runs it. Tizen is removed, and
