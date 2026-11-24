@@ -25882,7 +25882,94 @@ index fa851b858..b47915125 100644
 diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
 --- a/drivers/soc/samsung/exynos-pd.c
 +++ b/drivers/soc/samsung/exynos-pd.c
-@@ -522,8 +522,23 @@ static void exynos_pd_sync_state(struct exynos_pm_domain *pd)
+@@ -76,7 +76,7 @@
+ static void exynos_pd_power_on_post(struct exynos_pm_domain *pd)
+ {
+ #if defined(CONFIG_EXYNOS_BCM)
+-	if (cal_pd_status(pd->cal_pdid) && pd->bcm)
++	if (cal_pd_status(pd->cal_pdid) == 1 && pd->bcm)
+ 		bcm_pd_sync(pd->bcm, true);
+ #endif
+ }
+@@ -84,7 +84,7 @@
+ static void exynos_pd_power_off_pre(struct exynos_pm_domain *pd)
+ {
+ #if defined(CONFIG_EXYNOS_BCM)
+-	if (cal_pd_status(pd->cal_pdid) && pd->bcm)
++	if (cal_pd_status(pd->cal_pdid) == 1 && pd->bcm)
+ 		bcm_pd_sync(pd->bcm, false);
+ #endif
+ 	if (!strcmp(pd->name, "pd-dispaud"))
+@@ -106,7 +106,7 @@
+  */
+ static int __exynos_pd_power_on(struct exynos_pm_domain *pd)
+ {
+-	int ret = 0;
++	int ret = 0, status;
+ 
+ 	pr_debug("pd_power_on:(%s)+\n", pd->name);
+ 
+@@ -128,7 +128,12 @@
+ 		goto acc_unlock;
+ 	}
+ 
+-	if (cal_pd_status(pd->cal_pdid)) {
++	status = cal_pd_status(pd->cal_pdid);
++	if (status != 0 && status != 1) {
++		ret = status < 0 ? status : -EIO;
++		goto acc_unlock;
++	}
++	if (status == 1) {
+ 		pr_debug("pd_power_on:(%s) is already ON\n", pd->name);
+ 		goto acc_unlock;
+ 	}
+@@ -183,7 +188,7 @@
+  */
+ static int __exynos_pd_power_off(struct exynos_pm_domain *pd)
+ {
+-	int ret = 0;
++	int ret = 0, status;
+ 	ktime_t now;
+ 
+ 	pr_debug("pd_power_off:(%s)+\n", pd->name);
+@@ -211,7 +216,12 @@
+ 		goto acc_unlock;
+ 	}
+ 
+-	if (!cal_pd_status(pd->cal_pdid)) {
++	status = cal_pd_status(pd->cal_pdid);
++	if (status != 0 && status != 1) {
++		ret = status < 0 ? status : -EIO;
++		goto acc_unlock;
++	}
++	if (status == 0) {
+ 		pr_debug("pd_power_off:(%s) is already OFF\n", pd->name);
+ 		goto acc_unlock;
+ 	}
+@@ -438,10 +448,10 @@
+ 			pd->need_smc);
+ 	}
+ 	initial_state = cal_pd_status(pd->cal_pdid);
+-	if (initial_state == -1) {
+-		dev_err(dev, "%s is in unknown state\n", pd->name);
++	if (initial_state != 0 && initial_state != 1) {
++		dev_err(dev, "%s is in unknown state (%d)\n", pd->name, initial_state);
+ 		kfree(pd->name);
+-		return -EINVAL;
++		return initial_state < 0 ? initial_state : -EIO;
+ 	}
+ 
+ 	now = ktime_get_boottime();
+@@ -476,7 +486,7 @@
+ 		dev_info(dev, " - %s\n", "on,  always");
+ 	} else {
+ 		dev_info(dev, " - %-3s\n",
+-			 cal_pd_status(pd->cal_pdid) ? "on" : "off");
++			 initial_state == 1 ? "on" : "off");
+ 	}
+ 
+ 	parent = of_parse_phandle(np, "power-domains", 0);
+@@ -522,8 +532,23 @@ static void exynos_pd_sync_state(struct exynos_pm_domain *pd)
  	if (need_sync == 0) {
  		pr_info("%s sync_state: turn_off = %d\n", pd->name,
  			pd->turn_off_on_sync);
@@ -25908,7 +25995,7 @@ diff --git a/drivers/soc/samsung/exynos-pd.c b/drivers/soc/samsung/exynos-pd.c
  		if (pd->parent)
  			exynos_pd_sync_state(pd->parent);
  	} else {
-@@ -575,6 +590,282 @@ static int exynos_pd_init(void)
+@@ -575,6 +600,282 @@ static int exynos_pd_init(void)
  }
  subsys_initcall(exynos_pd_init);
  
@@ -28396,3 +28483,37 @@ diff --git a/include/soc/samsung/exynos-powermode.h b/include/soc/samsung/exynos
  extern void exynos_prepare_cp_call(void);
  extern void exynos_wakeup_cp_call(bool early_wakeup);
  extern int exynos_rtc_wakeup(void);
+diff --git a/drivers/soc/samsung/cal-if/pmucal_local.c b/drivers/soc/samsung/cal-if/pmucal_local.c
+--- a/drivers/soc/samsung/cal-if/pmucal_local.c
++++ b/drivers/soc/samsung/cal-if/pmucal_local.c
+@@ -130,7 +130,7 @@
+  */
+ int pmucal_local_is_enabled(unsigned int pd_id)
+ {
+-	int i;
++	int i, ret;
+ 
+ 	dbg_snapshot_pmu(pd_id, __func__, DSS_FLAG_IN);
+ 
+@@ -140,14 +140,19 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	if (!pmucal_pd_list[pd_id].status) {
++	if (!pmucal_pd_list[pd_id].status || !pmucal_pd_list[pd_id].num_status) {
+ 		pr_err("%s there is no sequence element for pd(%d) status.\n",
+ 				PMUCAL_PREFIX, pd_id);
+ 		return -ENOENT;
+ 	}
+ 
+-	pmucal_rae_handle_seq(pmucal_pd_list[pd_id].status,
++	ret = pmucal_rae_handle_seq(pmucal_pd_list[pd_id].status,
+ 				pmucal_pd_list[pd_id].num_status);
++	if (ret) {
++		pr_err("%s %s: status sequence failed (pd_id:%u, ret:%d)\n",
++		       PMUCAL_PREFIX, __func__, pd_id, ret);
++		return ret < 0 ? ret : -EIO;
++	}
+ 
+ 	for (i = 0; i < pmucal_pd_list[pd_id].num_status; i++) {
+ 		if (pmucal_pd_list[pd_id].status[i].value !=
