@@ -625,7 +625,7 @@ fi
     # telnet shell on port 23. Without it Wear OS runs Wi-Fi and the phone link
     # itself, as on a Pixel Watch, and there is no shell.
     if [ -f /oem/r800dev/android/DEV ]; then
-    W=/dev/r800wpa; $B mkdir -p $W
+    W=/dev/r800wpa; ( umask 077; $B mkdir -p "$W" ) && $B chmod 700 "$W" || exit 1
     L=/oem/r800dev/root      # musl wpa_supplicant and busybox-extras live here
     inet() { $B ip -4 addr show wlan0 2>/dev/null | $B grep -q inet; }
     tnet() { $B ps w 2>/dev/null | $B grep -q '[t]elnetd' ||              $L/lib/ld-musl-aarch64.so.1 /oem/r800dev/bin/busybox-extras telnetd -p 23 -l /system/bin/sh; }
@@ -657,8 +657,12 @@ fi
         for i in 1 2 3 4 5 6 7 8 9 10; do [ -d /sys/class/net/wlan0 ] && break; $B sleep 1; done
         $B ifconfig wlan0 up
         # The configuration may contain credentials. Create it privately.
-        ( umask 077; $B sed 's#^ctrl_interface=.*#ctrl_interface=/dev/r800wpa#' /oem/r800dev/wpa.conf > "$W/wpa.conf" )
-        $B chmod 600 "$W/wpa.conf"
+        if ! ( umask 077; $B sed 's#^ctrl_interface=.*#ctrl_interface=/dev/r800wpa#' /oem/r800dev/wpa.conf > "$W/wpa.conf" ) ||
+           ! $B chmod 600 "$W/wpa.conf"; then
+            k "wifi fallback aborted: config preparation failed"
+            /system/bin/cmd wifi set-wifi-enabled enabled
+            exit 1
+        fi
         $B cat > $W/dhcp.sh <<'H'
 #!/oem/r800dev/bin/busybox sh
 B=/oem/r800dev/bin/busybox
@@ -684,8 +688,10 @@ H
     fi
     # Policy routing: replies to the telnet shell must find the LAN route, which
     # lives in the main table (helper mode) or the wlan0 table (Android mode).
-    /system/bin/ip rule add from all lookup main pref 9999 2>/dev/null
-    /system/bin/ip rule add from all lookup wlan0 pref 9998 2>/dev/null
+    /system/bin/ip rule show | $B grep -q '^9999:.*lookup main' ||
+        /system/bin/ip rule add from all lookup main pref 9999 2>/dev/null
+    /system/bin/ip rule show | $B grep -q '^9998:.*lookup wlan0' ||
+        /system/bin/ip rule add from all lookup wlan0 pref 9998 2>/dev/null
     tnet
     # Once paired, the Bluetooth companion proxy outranks Wi-Fi (score 100 vs 60) and
     # ConnectivityService tears Wi-Fi down after a ~20 s linger. KeepWifi files a
