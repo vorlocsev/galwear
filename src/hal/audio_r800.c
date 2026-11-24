@@ -27,6 +27,8 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <limits.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -118,12 +120,12 @@ static const struct mix_setting mic_off[] = {
 struct r800_audio_device {
     struct audio_hw_device dev;   /* first: the framework casts back to this */
     pthread_mutex_t lock;
-    bool mic_mute;
+    _Atomic bool mic_mute;
     audio_mode_t mode;
     struct r800_stream_out *out;
     struct r800_stream_in *in;
     /* Bluetooth hands-free call audio (see the HFP section) */
-    volatile bool hfp_active;     /* the bridge owns the speaker, mic and UAIF1 */
+    _Atomic bool hfp_active;     /* the bridge owns the speaker, mic and UAIF1 */
     volatile bool hfp_run;
     int hfp_rate;                 /* SCO rate: 8000 (CVSD) or 16000 (mSBC) */
     volatile int hfp_volume;      /* 0..15 from the HFP client */
@@ -257,6 +259,8 @@ static int start_output(struct r800_stream_out *out)
 
     if (t < out->next_open_ns)
         return -EAGAIN;
+    if (out->adev->hfp_active)
+        return -EBUSY;
     memset(&cfg, 0, sizeof(cfg));
     cfg.channels = OUT_CHANNELS;
     cfg.rate = OUT_RATE;
@@ -268,10 +272,11 @@ static int start_output(struct r800_stream_out *out)
 
     apply_mixer(spk_on, sizeof(spk_on) / sizeof(spk_on[0]));
     out->pcm = pcm_open(CARD, SPK_DEVICE, PCM_OUT | PCM_MONOTONIC, &cfg);
-    if (!pcm_is_ready(out->pcm)) {
+    if (!out->pcm || !pcm_is_ready(out->pcm)) {
         LOGE("pcm_open(%d,%d): %s (DSP firmware not booted yet?)", CARD, SPK_DEVICE,
-             pcm_get_error(out->pcm));
-        pcm_close(out->pcm);
+             out->pcm ? pcm_get_error(out->pcm) : "no handle");
+        if (out->pcm)
+            pcm_close(out->pcm);
         out->pcm = NULL;
         apply_mixer(spk_off, sizeof(spk_off) / sizeof(spk_off[0]));
         out->next_open_ns = t + RETRY_NS;
@@ -287,23 +292,36 @@ static ssize_t out_write(struct audio_stream_out *s, const void *buf, size_t byt
     struct r800_stream_out *out = (struct r800_stream_out *)s;
     size_t frames = bytes / FRAME_BYTES;
     int r = 0;
+    if (bytes % FRAME_BYTES || frames > INT_MAX)
+        return -EINVAL;
+    if (!frames)
+        return 0;
 
     pthread_mutex_lock(&out->lock);
+    if (out->adev->hfp_active && out->pcm)
+        do_standby(out);
     if (out->standby && !out->pcm)
         r = start_output(out);
-    if (!r) {
-        r = pcm_writei(out->pcm, buf, frames);
-        if (r < 0) {
-            LOGE("pcm_writei: %s", pcm_get_error(out->pcm));
-            do_standby(out);   /* reopen on the next write */
+    size_t done = 0;
+    while (!r && done < frames) {
+        size_t n = frames - done;
+        if (n > OUT_PERIOD)
+            n = OUT_PERIOD;
+        int count = pcm_writei(out->pcm, (const char *)buf + done * FRAME_BYTES, n);
+        if (count <= 0 || (size_t)count > n) {
+            LOGE("pcm_writei made no valid progress: %d", count);
+            do_standby(out);
+            r = -EIO;
+            break;
         }
+        done += (size_t)count;
     }
-    out->written += frames;
+    out->written += done;
     pthread_mutex_unlock(&out->lock);
 
     /* no PCM: consume the data at the real rate so the mixer thread doesn't spin */
     if (r < 0)
-        usleep(frames * 1000000LL / OUT_RATE);
+        usleep((frames - done) * 1000000LL / OUT_RATE);
     return bytes;
 }
 
@@ -324,7 +342,8 @@ static int out_get_presentation_position(const struct audio_stream_out *s,
     if (out->pcm) {
         unsigned int avail;
         if (!pcm_get_htimestamp(out->pcm, &avail, ts)) {
-            uint64_t queued = pcm_get_buffer_size(out->pcm) - avail;
+            unsigned int capacity = pcm_get_buffer_size(out->pcm);
+            uint64_t queued = avail <= capacity ? capacity - avail : UINT64_MAX;
             if (queued <= out->written) {
                 *frames = out->written - queued;
                 ret = 0;
@@ -427,9 +446,11 @@ static int start_input(struct r800_stream_in *in)
     apply_mixer(mic_on, sizeof(mic_on) / sizeof(mic_on[0]));
     apply_mixer(mic_gain, sizeof(mic_gain) / sizeof(mic_gain[0]));
     in->pcm = pcm_open(CARD, MIC_DEVICE, PCM_IN | PCM_MONOTONIC, &cfg);
-    if (!pcm_is_ready(in->pcm)) {
-        LOGE("pcm_open(%d,%d) in: %s", CARD, MIC_DEVICE, pcm_get_error(in->pcm));
-        pcm_close(in->pcm);
+    if (!in->pcm || !pcm_is_ready(in->pcm)) {
+        LOGE("pcm_open(%d,%d) in: %s", CARD, MIC_DEVICE,
+             in->pcm ? pcm_get_error(in->pcm) : "no handle");
+        if (in->pcm)
+            pcm_close(in->pcm);
         in->pcm = NULL;
         apply_mixer(mic_off, sizeof(mic_off) / sizeof(mic_off[0]));
         in->next_open_ns = t + RETRY_NS;
@@ -451,6 +472,10 @@ static ssize_t in_read(struct audio_stream_in *s, void *buf, size_t bytes)
     size_t done = 0;
     int r = 0;
     bool mute;
+    if (bytes % (in->channels * 2) || frames > INT_MAX)
+        return -EINVAL;
+    if (!frames)
+        return 0;
 
     pthread_mutex_lock(&in->lock);
     if (in->adev->hfp_active && in->pcm)
@@ -465,11 +490,12 @@ static ssize_t in_read(struct audio_stream_in *s, void *buf, size_t bytes)
             r = pcm_readi(in->pcm, dst + done * IN_HW_CHANNELS, n);
         } else {
             r = pcm_readi(in->pcm, in->hwbuf, n);
-            for (int i = 0; i < r; i++)
+            for (int i = 0; r > 0 && (size_t)r <= n && i < r; i++)
                 dst[done + i] = in->hwbuf[i * IN_HW_CHANNELS];   /* left = DMIC1 */
         }
-        if (r < 0) {
-            LOGE("pcm_readi: %s", pcm_get_error(in->pcm));
+        if (r <= 0 || (size_t)r > n) {
+            LOGE("pcm_readi made no valid progress: %d", r);
+            r = -EIO;
             in_do_standby(in);
             break;
         }
@@ -496,7 +522,7 @@ static ssize_t in_read(struct audio_stream_in *s, void *buf, size_t bytes)
         memset(buf, 0, bytes);
     /* no PCM: deliver silence at the real rate so the record thread doesn't spin */
     if (r < 0)
-        usleep(frames * 1000000LL / IN_RATE);
+        usleep((frames - done) * 1000000LL / IN_RATE);
     return bytes;
 }
 
@@ -949,6 +975,9 @@ static int adev_open(const hw_module_t *module, const char *name, hw_device_t **
     if (!adev)
         return -ENOMEM;
     pthread_mutex_init(&adev->lock, NULL);
+    atomic_init(&adev->mic_mute, false);
+    atomic_init(&adev->hfp_active, false);
+    adev->hfp_rate = 8000;
     adev->hfp_volume = 11;
     adev->dev.common.tag = HARDWARE_DEVICE_TAG;
     adev->dev.common.version = AUDIO_DEVICE_API_VERSION_2_0;
