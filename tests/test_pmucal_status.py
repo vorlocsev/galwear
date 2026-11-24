@@ -25,11 +25,11 @@ class PmucalStatusTests(unittest.TestCase):
         self.assertIn("!pmucal_pd_list[pd_id].status || !pmucal_pd_list[pd_id].num_status", self.local)
         self.assertIn("return -ENOENT;", self.local)
 
-    def test_sequence_result_checked_before_status_comparison(self):
-        self.assertLess(self.local.index("ret = pmucal_rae_handle_seq("),
-                        self.local.index("if (ret)"))
-        self.assertLess(self.local.index("return ret < 0 ? ret : -EIO;"),
-                        self.local.index("for (i = 0; i < pmucal_pd_list[pd_id].num_status; i++)"))
+    def test_read_status_result_propagated(self):
+        self.assertIn("ret = pmucal_rae_read_status(", self.local)
+        self.assertIn("if (ret < 0)", self.local)
+        self.assertIn("return ret;", self.local)
+        self.assertNotIn("pmucal_rae_handle_seq(", self.local)
 
     def test_bcm_requires_confirmed_on(self):
         self.assertEqual(self.pd.count("if (cal_pd_status(pd->cal_pdid) == 1 && pd->bcm)"), 2)
