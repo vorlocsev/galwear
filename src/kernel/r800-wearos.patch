@@ -26381,18 +26381,30 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	if (!pm_info->is_early_wakeup)
  		pr_debug("%s %s: post sleep, preparing to return\n",
  						EXYNOS_PM_PREFIX, __func__);
-@@ -313,7 +356,10 @@
+@@ -312,8 +355,11 @@
+ {
  	unsigned int psci_index;
  	unsigned int prev_mif = 0, post_mif = 0;
- 	unsigned int prev_req, off_count;
-+	int ret;
+-	unsigned int prev_req, off_count;
++	unsigned int prev_req, off_count = 0;
++	int ret, diag_ret;
  
 +	if (!r800_pm_prepared)
 +		return -EINVAL;
  	psci_index = pm_info->suspend_psci_idx;
  
  	/* Send an IPI if test_early_wakeup flag is set */
-@@ -328,7 +374,11 @@
+@@ -323,12 +369,19 @@
+ 	prev_mif = acpm_get_mifdn_count();
+ 	prev_req = acpm_get_mif_request();
+ 
+-	exynos_pmu_read(CPU_INFORM4, &off_count);
+-	pr_info("%s: prev mif_count %d %d\n",EXYNOS_PM_PREFIX, prev_mif, off_count);
++	diag_ret = exynos_pmu_read(CPU_INFORM4, &off_count);
++	if (diag_ret)
++		pr_warn("r800-pm: pre-suspend INFORM4 unavailable (%d)\n", diag_ret);
++	else
++		pr_info("%s: prev mif_count %u %u\n", EXYNOS_PM_PREFIX, prev_mif, off_count);
  	/* This will also act as our return point when
  	 * we resume as it saves its own register state and restores it
  	 * during the resume. */
@@ -26405,9 +26417,17 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  
  	pr_info("%s: is_early_wakeup : %d\n", EXYNOS_PM_PREFIX, pm_info->is_early_wakeup);
  	if (pm_info->is_early_wakeup)
-@@ -339,6 +389,9 @@
- 	exynos_pmu_read(CPU_INFORM4, &off_count);
- 	pr_info("%s: post mif_count %d	%d\n",EXYNOS_PM_PREFIX, post_mif,off_count);
+@@ -336,18 +389,24 @@
+ 				EXYNOS_PM_PREFIX, __func__);
+ 
+ 	post_mif = acpm_get_mifdn_count();
+-	exynos_pmu_read(CPU_INFORM4, &off_count);
+-	pr_info("%s: post mif_count %d	%d\n",EXYNOS_PM_PREFIX, post_mif,off_count);
++	diag_ret = exynos_pmu_read(CPU_INFORM4, &off_count);
++	if (diag_ret)
++		pr_warn("r800-pm: post-suspend INFORM4 unavailable (%d)\n", diag_ret);
++	else
++		pr_info("%s: post mif_count %u %u\n", EXYNOS_PM_PREFIX, post_mif, off_count);
  
 +	if (ret)
 +		return ret < 0 ? ret : -EBUSY;
@@ -26415,8 +26435,10 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	if (post_mif == prev_mif) {
  		pr_info("%s: MIF blocked. MIF request Mster was  0x%x\n", EXYNOS_PM_PREFIX, prev_req);
  		return -EBUSY;
-@@ -347,7 +400,7 @@
- 		pr_info("%s: MIF down. cur_count: %d, acc_count: %d\n",
+ 	}
+ 	else
+-		pr_info("%s: MIF down. cur_count: %d, acc_count: %d\n",
++		pr_info("%s: MIF down. cur_count: %u, acc_count: %u\n",
  				EXYNOS_PM_PREFIX, post_mif - prev_mif, post_mif);
  
 -	return pm_info->is_early_wakeup;
@@ -26435,10 +26457,17 @@ diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos
  #include <linux/of.h>
  #include <linux/slab.h>
  #include <soc/samsung/exynos-pm.h>
-@@ -32,17 +33,52 @@
+@@ -28,28 +29,118 @@
+ };
+ 
+ static struct exynos_powermode_info *pm_info;
++static bool r800_masks_ready;
++#define R800_MAX_WAKE_MASKS 8
+ 
  /******************************************************************************
   *                              System power mode                             *
   ******************************************************************************/
+-static void exynos_set_wakeupmask(enum sys_powerdown mode)
 +/*
 + * SM-R800 deep-sleep bring-up: r800_wake_all=1 unmasks every wake source for
 + * SLEEP (instead of the DT masks), to tell "no wake event reaches the PMU"
@@ -26451,50 +26480,112 @@ diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos
 +static unsigned int r800_eint_override;
 +module_param(r800_eint_override, uint, 0644);
 +
- static void exynos_set_wakeupmask(enum sys_powerdown mode)
++static int r800_pmu_write_checked(unsigned int off, unsigned int val)
  {
- 	int i;
-+	/* bitmask: 1 = zero all masks, 2 = only 0x618, 4 = only 0x610, 8 = only EINT */
-+	int w = mode != SYS_SICD ? r800_wake_all : 0;
-+	unsigned int v, val;
-+	bool zero;
+-	int i;
++	unsigned int actual = 0;
++	int ret;
  
 -	for (i = 0; i < pm_info->num_wakeup_mask; i++)
 -		exynos_pmu_write(pm_info->wakeup_mask_offset[i],
 -				pm_info->wakeup_mask[mode][i]);
-+	for (i = 0; i < pm_info->num_wakeup_mask; i++) {
-+		unsigned int off = pm_info->wakeup_mask_offset[i];
++	ret = exynos_pmu_write(off, val);
++	if (ret)
++		return ret < 0 ? ret : -EIO;
++	ret = exynos_pmu_read(off, &actual);
++	if (ret)
++		return ret < 0 ? ret : -EIO;
++	if (actual != val) {
++		pr_err("r800-pm: mask readback mismatch off=%x expected=%x actual=%x\n",
++		       off, val, actual);
++		return -EIO;
++	}
++	return 0;
++}
  
 -	for (i = 0; i < pm_info->num_eint_wakeup_mask; i++)
 -		exynos_pmu_write(pm_info->eint_wakeup_mask_offset[i],
 -			exynos_eint_wake_mask_array[i]);
-+		zero = (w & 1) || ((w & 2) && off == 0x618) || ((w & 4) && off == 0x610);
-+		val = zero ? 0 : pm_info->wakeup_mask[mode][i];
-+		exynos_pmu_write(off, val);
-+		if (mode != SYS_SICD) {
-+			exynos_pmu_read(off, &v);
-+			pr_info("r800-pm: mode %d WAKEUP_MASK[0x%x] = 0x%08x (read 0x%08x)%s\n",
-+				mode, off, val, v, zero ? " ZEROED" : "");
-+		}
++static int exynos_set_wakeupmask(enum sys_powerdown mode)
++{
++	unsigned int off[R800_MAX_WAKE_MASKS + ARRAY_SIZE(exynos_eint_wake_mask_array)];
++	unsigned int val[ARRAY_SIZE(off)], saved[ARRAY_SIZE(off)];
++	unsigned int i, j, n = 0;
++	int ret, rollback = 0;
++	int w = mode != SYS_SICD ? r800_wake_all : 0;
++	bool zero;
++
++	if (!r800_masks_ready || (unsigned int)mode >= NUM_SYS_POWERDOWN)
++		return -EINVAL;
++	if (w & ~15)
++		return -EINVAL;
++
++	for (i = 0; i < pm_info->num_wakeup_mask; i++) {
++		off[n] = pm_info->wakeup_mask_offset[i];
++		zero = (w & 1) || ((w & 2) && off[n] == 0x618) ||
++		       ((w & 4) && off[n] == 0x610);
++		val[n++] = zero ? 0 : pm_info->wakeup_mask[mode][i];
++	}
++	for (i = 0; i < pm_info->num_eint_wakeup_mask; i++) {
++		off[n] = pm_info->eint_wakeup_mask_offset[i];
++		val[n] = (w & 1) || (w & 8) ? 0 : exynos_eint_wake_mask_array[i];
++		if (i == 0 && r800_eint_override && mode != SYS_SICD)
++			val[n] = r800_eint_override;
++		n++;
 +	}
 +
-+	zero = (w & 1) || (w & 8);
-+	for (i = 0; i < pm_info->num_eint_wakeup_mask; i++) {
-+		val = zero ? 0 : exynos_eint_wake_mask_array[i];
-+		/* r800_eint_override: raw EINT_WAKEUP_MASK for SLEEP (first word only) */
-+		if (i == 0 && r800_eint_override && mode != SYS_SICD)
-+			val = r800_eint_override;
-+		exynos_pmu_write(pm_info->eint_wakeup_mask_offset[i], val);
-+		if (mode != SYS_SICD) {
-+			exynos_pmu_read(pm_info->eint_wakeup_mask_offset[i], &v);
-+			pr_info("r800-pm: EINT_WAKEUP_MASK[0x%x] = 0x%08x (read 0x%08x)%s\n",
-+				pm_info->eint_wakeup_mask_offset[i], val, v, zero ? " ZEROED" : "");
++	/* Keep the frequent SICD path unchanged except for write errors. */
++	if (mode == SYS_SICD) {
++		for (i = 0; i < n; i++) {
++			ret = exynos_pmu_write(off[i], val[i]);
++			if (ret)
++				return ret < 0 ? ret : -EIO;
 +		}
++		return 0;
 +	}
++
++	/* Snapshot every mask before the first write, rejecting aliases. */
++	for (i = 0; i < n; i++) {
++		if (off[i] & 3)
++			return -EINVAL;
++		for (j = 0; j < i; j++)
++			if (off[j] == off[i])
++				return -EINVAL;
++		ret = exynos_pmu_read(off[i], &saved[i]);
++		if (ret)
++			return ret < 0 ? ret : -EIO;
++	}
++	for (i = 0; i < n; i++) {
++		ret = r800_pmu_write_checked(off[i], val[i]);
++		if (ret)
++			goto restore;
++	}
++	return 0;
++
++restore:
++	/* Include the failed write: it may have changed the register. */
++	for (j = i + 1; j > 0; j--) {
++		int err = r800_pmu_write_checked(off[j - 1], saved[j - 1]);
++
++		if (err && !rollback)
++			rollback = err;
++	}
++	pr_err("r800-pm: wake mask failed (%d), rollback=%d\n", ret, rollback);
++	return rollback ? rollback : ret;
  }
  
  int exynos_prepare_sys_powerdown(enum sys_powerdown mode)
-@@ -69,13 +105,18 @@
+ {
+ 	int ret;
+ 
+-	exynos_set_wakeupmask(mode);
++	ret = exynos_set_wakeupmask(mode);
++	if (ret)
++		return ret;
+ 
+ 	ret = cal_pm_enter(mode);
+ 	if (ret) {
+@@ -69,13 +160,18 @@
  	return ret;
  }
  
@@ -26516,7 +26607,7 @@ diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos
  	switch (mode) {
  	case SYS_SICD:
  		exynos_pm_notify(SICD_EXIT);
-@@ -83,6 +124,7 @@
+@@ -83,6 +179,7 @@
  	default:
  		break;
  	}
@@ -26524,6 +26615,77 @@ diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos
  }
  
  /******************************************************************************
+@@ -92,8 +189,12 @@
+ {
+ #define WAKEUP_MASK_RTC_TICK	BIT(2)
+ #define WAKEUP_MASK_RTC_ALARM	BIT(1)
+-	unsigned int sleep_mask = pm_info->wakeup_mask[SYS_SLEEP][0];
++	unsigned int sleep_mask;
+ 
++	if (!r800_masks_ready)
++		return -ENODEV;
++	sleep_mask = pm_info->wakeup_mask[SYS_SLEEP][0];
++
+ 	if (!(sleep_mask & WAKEUP_MASK_RTC_ALARM) ||
+ 			!(sleep_mask & WAKEUP_MASK_RTC_TICK))
+ 		return 0;
+@@ -140,7 +241,13 @@
+ 	unsigned int mode, mask_index = 0;
+ 
+ 	root = of_find_node_by_name(np, "wakeup-masks");
++	if (!root)
++		return -ENODEV;
+ 	pm_info->num_wakeup_mask = of_get_child_count(root);
++	if (!pm_info->num_wakeup_mask || pm_info->num_wakeup_mask > R800_MAX_WAKE_MASKS) {
++		of_node_put(root);
++		return -EINVAL;
++	}
+ 
+ 	ret = alloc_wakeup_mask(pm_info->num_wakeup_mask);
+ 	if (ret)
+@@ -177,22 +284,31 @@
+ 	}
+ 
+ 	np = of_find_node_by_name(NULL, "exynos-powermode");
++	if (!np)
++		return -ENODEV;
+ 	ret = parsing_dt_wakeup_mask(np);
+ 	if (ret)
+-		pr_warn("Fail to initialize the wakeup mask with err = %d\n", ret);
++		goto out;
+ 
+ 	ret = of_property_count_u32_elems(np, "eint_wakeup_mask_offset");
+-	if (!ret) {
+-		pr_err("exynos-powermode: unabled to get eint_wakeup_mask_offset from DT\n");
+-	} else if (ret > 0) {
+-		pm_info->num_eint_wakeup_mask = ret;
+-		pm_info->eint_wakeup_mask_offset =
+-			kzalloc(sizeof(unsigned int) * ret, GFP_KERNEL);
+-		of_property_read_u32_array(np, "eint_wakeup_mask_offset",
+-			pm_info->eint_wakeup_mask_offset, ret);
++	if (ret <= 0 || ret > ARRAY_SIZE(exynos_eint_wake_mask_array)) {
++		ret = -EINVAL;
++		goto out;
+ 	}
+-
+-	return 0;
++	pm_info->num_eint_wakeup_mask = ret;
++	pm_info->eint_wakeup_mask_offset =
++		kzalloc(sizeof(unsigned int) * ret, GFP_KERNEL);
++	if (!pm_info->eint_wakeup_mask_offset) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	ret = of_property_read_u32_array(np, "eint_wakeup_mask_offset",
++		pm_info->eint_wakeup_mask_offset, pm_info->num_eint_wakeup_mask);
++	if (!ret)
++		r800_masks_ready = true;
++out:
++	of_node_put(np);
++	return ret;
+ }
+ arch_initcall(exynos_powermode_init);
+ 
 diff --git a/drivers/tty/serial/samsung.c b/drivers/tty/serial/samsung.c
 index c8a220d15..49ce04e8d 100644
 --- a/drivers/tty/serial/samsung.c
