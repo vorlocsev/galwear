@@ -1,0 +1,118 @@
+name: SM-R800 AArch64 init repeatability on independent runners
+
+on:
+  push:
+    branches:
+      - "development/r800-reproducibility-audit-20261125"
+    paths:
+      - ".github/workflows/r800-init-repeatability.yml"
+      - "build/r800_initramfs_compile_smoke.sh"
+      - "build/r800_initramfs_spec.py"
+      - "src/initramfs/init.c"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-init:
+    name: "Independent init build: ${{ matrix.replica }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [a, b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      REPLICA: ${{ matrix.replica }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull and record actual container image identity
+        run: |
+          docker pull alpine:3.21
+          docker image inspect alpine:3.21 --format '{{.Id}}' > "$RUNNER_TEMP/container-identity.txt"
+      - name: Compile non-release AArch64 init in isolated runner
+        run: |
+          docker run --rm --pull=never \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache clang19=19.1.4-r0 \
+                lld=19.1.4-r0 llvm19=19.1.4-r1 python3
+              sh /repo/build/r800_initramfs_compile_smoke.sh \
+                /repo /scratch/r800-repeatability-init
+            '
+      - name: Record only hashes, no executable
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          tmp = Path(os.environ["RUNNER_TEMP"])
+          root = Path(os.environ["GITHUB_WORKSPACE"])
+          binary = tmp / "r800-repeatability-init/init"
+          assert binary.is_file() and binary.stat().st_size > 0
+          evidence = json.loads(
+              (tmp / "r800-repeatability-init/initramfs-evidence.json").read_text())
+          digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+          assert evidence["init"]["sha256"] == digest
+          assert evidence["status"] == "NON_RELEASE_INITRAMFS_SPEC_ONLY"
+          data = {
+              "schema": "galwear-r800-independent-init-build-v1",
+              "replica": os.environ["REPLICA"],
+              "galwear_commit": os.environ["GITHUB_SHA"],
+              "init_sha256": digest,
+              "init_bytes": binary.stat().st_size,
+              "source_sha256": hashlib.sha256(
+                  (root / "src/initramfs/init.c").read_bytes()).hexdigest(),
+              "container_image_id": (tmp / "container-identity.txt").read_text().strip(),
+              "clang": "19.1.4",
+              "lld": "19.1.4",
+              "boot_tested": False,
+              "safe_to_flash": False,
+          }
+          (tmp / "r800-init-hash-evidence.json").write_text(
+              json.dumps(data, sort_keys=True, indent=2) + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r800-init-hash-only-${{ matrix.replica }}
+          path: ${{ runner.temp }}/r800-init-hash-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-two-runners:
+    needs: compile-init
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: r800-init-hash-only-*
+          path: ${{ runner.temp }}/r800-independent
+          merge-multiple: false
+      - name: Require exact binary and environment identity
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "r800-independent"
+          a = json.loads((root / "r800-init-hash-only-a/r800-init-hash-evidence.json").read_text())
+          b = json.loads((root / "r800-init-hash-only-b/r800-init-hash-evidence.json").read_text())
+          assert (a["replica"], b["replica"]) == ("a", "b")
+          fields = ("schema", "galwear_commit", "init_sha256", "init_bytes",
+                    "source_sha256", "container_image_id", "clang", "lld")
+          assert all(a[k] == b[k] for k in fields), "Independent init builds differ"
+          assert a["schema"] == "galwear-r800-independent-init-build-v1"
+          assert a["galwear_commit"] == os.environ["GITHUB_SHA"]
+          assert a["clang"] == a["lld"] == "19.1.4"
+          assert a["safe_to_flash"] is False and b["safe_to_flash"] is False
+          assert a["boot_tested"] is False and b["boot_tested"] is False
+          print("PASS: /init SHA-256 is identical on two independent runner builds")
+          print("Only /init reproducibility observed; kernel/Wear OS not proven")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("Two independent AArch64 /init build hashes matched. ")
+              f.write("Kernel and hardware boot NOT tested.\n")
+          PY
