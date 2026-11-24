@@ -46,6 +46,10 @@ int accept(int, void *, unsigned int *);
 int close(int);
 long read(int, void *, size_t);
 long write(int, const void *, size_t);
+long send(int, const void *, size_t, int);
+int shutdown(int, int);
+#define MSG_NOSIGNAL 0x4000
+#define MSG_DONTWAIT 0x40
 int unlink(const char *);
 int chmod(const char *, unsigned int);
 long long strtoll(const char *, char **, int);
@@ -70,8 +74,9 @@ static int mtx[8];   /* glibc pthread_mutex_t (24 bytes), zero = default mutex *
 static void out(const char *line, int len)
 {
 	pthread_mutex_lock(mtx);
-	if (client >= 0 && write(client, line, len) != len) {
-		close(client);
+	if (client >= 0 && send(client, line, len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) {
+		/* The accept/read loop alone owns close, avoiding double-close. */
+		shutdown(client, 2);
 		client = -1;
 	}
 	pthread_mutex_unlock(mtx);
@@ -149,14 +154,16 @@ static void save_fix(const GpsLocation *l)
 	int fd, n;
 	if (!(l->flags & 1) || l->timestamp - last_saved < 60000)
 		return;
-	last_saved = l->timestamp;
 	n = snprintf(b, sizeof(b), "%.6f %.6f %lld\n", l->latitude, l->longitude, l->timestamp);
-	fd = open(LAST_TMP, O_WRONLY_CREAT_TRUNC, 0644);
+	if (n <= 0 || n >= (int)sizeof(b))
+		return;
+	fd = open(LAST_TMP, O_WRONLY_CREAT_TRUNC, 0600);
 	if (fd < 0)
 		return;
 	if (write(fd, b, n) == n) {
 		close(fd);
-		rename(LAST_TMP, LAST_PATH);
+		if (!rename(LAST_TMP, LAST_PATH))
+			last_saved = l->timestamp;
 	} else {
 		close(fd);
 	}
@@ -168,6 +175,8 @@ static void location_cb(GpsLocation *l)
 	int n = snprintf(b, sizeof(b), "FIX %u %.8f %.8f %.2f %.3f %.2f %.2f %lld\n",
 			 l->flags, l->latitude, l->longitude, l->altitude, (double)l->speed,
 			 (double)l->bearing, (double)l->accuracy, l->timestamp);
+	if (n <= 0 || n >= (int)sizeof(b))
+		return;
 	out(b, n);
 	save_fix(l);
 	if (daemon_mode)
@@ -193,11 +202,16 @@ static void sv_status_cb(void *sv)
 static void nmea_cb(GpsUtcTime t, const char *nmea, int len)
 {
 	char b[300];
+	if (!nmea || len <= 0 || len > 250)
+		return;
 	while (len > 0 && (nmea[len - 1] == '\n' || nmea[len - 1] == '\r'))
 		len--;
-	if (len > 250)
-		len = 250;
-	out(b, snprintf(b, sizeof(b), "NMEA %lld %.*s\n", t, len, nmea));
+	for (int i = 0; i < len; i++)
+		if (nmea[i] < 32 || nmea[i] > 126)
+			return;
+	int n = snprintf(b, sizeof(b), "NMEA %lld %.*s\n", t, len, nmea);
+	if (n > 0 && n < (int)sizeof(b))
+		out(b, n);
 	if (daemon_mode)
 		return;
 	printf("NMEA %.*s", len, nmea);
@@ -357,17 +371,21 @@ static int session(int on)
 	aid();
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				   GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-	r = gps->start();
+	if (!r)
+		r = gps->start();
 	if (r < 0) {
 		/* gpsd restarted under us: reconnect the client library and retry */
 		printf("start failed, re-init\n");
 		fflush(0);
 		gps->cleanup();
-		gps->init(&cbs);
+		r = gps->init(&cbs);
+		if (r)
+			return r;
 		aid();
-		gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
+		r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				       GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-		r = gps->start();
+		if (!r)
+			r = gps->start();
 	}
 	printf("session %s -> %d\n", on ? "start" : "stop", r);
 	fflush(0);
@@ -414,10 +432,16 @@ static int serve(void)
 			while ((nl = strchr(s, '\n'))) {
 				*nl = 0;
 				if (!strcmp(s, "START") && !on) {
-					session(1);
+					if (session(1)) {
+						shutdown(c, 2);
+						break;
+					}
 					on = 1;
 				} else if (!strcmp(s, "STOP") && on) {
-					session(0);
+					if (session(0)) {
+						shutdown(c, 2);
+						break;
+					}
 					on = 0;
 				} else if (!strncmp(s, "TIME ", 5)) {
 					/* TIME <utc_ms> [<elapsedRealtime_ms> <unc_ms>] */
@@ -482,6 +506,8 @@ int main(int argc, char **argv, char **envp)
 		return 1;
 	r = gps->init(&cbs);
 	printf("init %d\n", r);
+	if (r)
+		return 1;
 	if (daemon_mode) {
 		inject_now();
 		exit(serve());
