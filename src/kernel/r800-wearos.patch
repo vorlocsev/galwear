@@ -26259,20 +26259,24 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  
  extern u32 exynos_eint_to_pin_num(int eint);
  #define EXYNOS_EINT_PEND(b, x)      ((b) + 0xA00 + (((x) >> 3) * 4))
-@@ -61,6 +64,8 @@
+@@ -61,6 +64,9 @@
  	unsigned int num_gic;			/* Total number of GIC sources */
  	bool is_early_wakeup;
  	bool is_usbl2_suspend;
 +	unsigned int prepared_mode;
 +	bool prepared;
++	bool recovery_failed;
  	unsigned int suspend_mode_idx;		/* power mode to be used in suspend scenario */
  	unsigned int suspend_psci_idx;		/* psci index to be used in suspend scenario */
  	u8 num_extra_stat;			/* Total number of extra wakeup_stat */
-@@ -263,6 +268,11 @@
+@@ -263,6 +269,14 @@
  
  static int exynos_pm_syscore_suspend(void)
  {
 +	int ret;
++
++	if (pm_info->recovery_failed)
++		return -EIO;
 +
 +	/* syscore resume may run even when suspend_ops->enter never ran. */
 +	pm_info->is_early_wakeup = true;
@@ -26280,7 +26284,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  #if 0 
  	if (!exynos_check_cp_status()) {
  		pr_info("%s %s: sleep canceled by CP reset \n",
-@@ -276,31 +286,40 @@
+@@ -276,31 +290,52 @@
  			pm_info->is_usbl2_suspend = pm_info->usb_is_connect();
  	}
  
@@ -26306,7 +26310,10 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
 +		pr_err("%s prepare failed: mode=%u ret=%d\n",
 +			EXYNOS_PM_PREFIX, pm_info->prepared_mode, ret);
 +		R800_MARK(0x10);
-+		exynos_wakeup_sys_powerdown(pm_info->prepared_mode, true);
++		if (exynos_wakeup_sys_powerdown_checked(pm_info->prepared_mode, true)) {
++			pm_info->recovery_failed = true;
++			R800_MARK(0x11);
++		}
 +		return ret < 0 ? ret : -EIO;
 +	}
 +	pm_info->prepared = true;
@@ -26321,23 +26328,32 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
 -		exynos_wakeup_sys_powerdown(pm_info->usbl2_suspend_mode_idx, pm_info->is_early_wakeup);
 -	else
 -		exynos_wakeup_sys_powerdown(pm_info->suspend_mode_idx, pm_info->is_early_wakeup);
++	int ret;
+ 
 +	if (!pm_info->prepared)
 +		return;
- 
-+	exynos_wakeup_sys_powerdown(pm_info->prepared_mode, pm_info->is_early_wakeup);
++
++	ret = exynos_wakeup_sys_powerdown_checked(pm_info->prepared_mode, pm_info->is_early_wakeup);
 +	pm_info->prepared = false;
++	if (ret) {
++		pm_info->recovery_failed = true;
++		R800_MARK(0x12);
++		pr_err("%s PMU recovery failed: %d; further suspend blocked\n",
++			EXYNOS_PM_PREFIX, ret);
++		return;
++	}
  	exynos_show_wakeup_reason(pm_info->is_early_wakeup);
  
 -	if (!pm_info->is_early_wakeup)
 -		pr_debug("%s %s: post sleep, preparing to return\n",
 -						EXYNOS_PM_PREFIX, __func__);
-+	/* This marker means the PMU recovery call returned, not that every
++	/* This marker means the PMU recovery returned success, not that every
 +	 * domain and driver has resumed successfully. */
 +	R800_MARK(3 | (pm_info->is_early_wakeup ? 0x100 : 0));
  }
  
  static struct syscore_ops exynos_pm_syscore_ops = {
-@@ -313,7 +332,11 @@
+@@ -313,7 +348,11 @@
  	unsigned int psci_index;
  	unsigned int prev_mif = 0, post_mif = 0;
  	unsigned int prev_req, off_count;
@@ -26349,7 +26365,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	psci_index = pm_info->suspend_psci_idx;
  
  	/* Send an IPI if test_early_wakeup flag is set */
-@@ -328,7 +351,12 @@
+@@ -328,7 +367,12 @@
  	/* This will also act as our return point when
  	 * we resume as it saves its own register state and restores it
  	 * during the resume. */
@@ -26363,7 +26379,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  
  	pr_info("%s: is_early_wakeup : %d\n", EXYNOS_PM_PREFIX, pm_info->is_early_wakeup);
  	if (pm_info->is_early_wakeup)
-@@ -339,6 +367,9 @@
+@@ -339,6 +383,9 @@
  	exynos_pmu_read(CPU_INFORM4, &off_count);
  	pr_info("%s: post mif_count %d	%d\n",EXYNOS_PM_PREFIX, post_mif,off_count);
  
@@ -26373,7 +26389,7 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  	if (post_mif == prev_mif) {
  		pr_info("%s: MIF blocked. MIF request Mster was  0x%x\n", EXYNOS_PM_PREFIX, prev_req);
  		return -EBUSY;
-@@ -347,7 +378,7 @@
+@@ -347,7 +394,7 @@
  		pr_info("%s: MIF down. cur_count: %d, acc_count: %d\n",
  				EXYNOS_PM_PREFIX, post_mif - prev_mif, post_mif);
  
@@ -26383,7 +26399,6 @@ diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
  
  static const struct platform_suspend_ops exynos_pm_ops = {
 diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos-powermode.c
-index f1778003f..99b6216d9 100644
 --- a/drivers/soc/samsung/exynos-powermode.c
 +++ b/drivers/soc/samsung/exynos-powermode.c
 @@ -9,6 +9,7 @@
@@ -26394,7 +26409,7 @@ index f1778003f..99b6216d9 100644
  #include <linux/of.h>
  #include <linux/slab.h>
  #include <soc/samsung/exynos-pm.h>
-@@ -32,17 +33,52 @@ static struct exynos_powermode_info *pm_info;
+@@ -32,17 +33,52 @@
  /******************************************************************************
   *                              System power mode                             *
   ******************************************************************************/
@@ -26417,10 +26432,16 @@ index f1778003f..99b6216d9 100644
 +	int w = mode != SYS_SICD ? r800_wake_all : 0;
 +	unsigned int v, val;
 +	bool zero;
-+
+ 
+-	for (i = 0; i < pm_info->num_wakeup_mask; i++)
+-		exynos_pmu_write(pm_info->wakeup_mask_offset[i],
+-				pm_info->wakeup_mask[mode][i]);
 +	for (i = 0; i < pm_info->num_wakeup_mask; i++) {
 +		unsigned int off = pm_info->wakeup_mask_offset[i];
-+
+ 
+-	for (i = 0; i < pm_info->num_eint_wakeup_mask; i++)
+-		exynos_pmu_write(pm_info->eint_wakeup_mask_offset[i],
+-			exynos_eint_wake_mask_array[i]);
 +		zero = (w & 1) || ((w & 2) && off == 0x618) || ((w & 4) && off == 0x610);
 +		val = zero ? 0 : pm_info->wakeup_mask[mode][i];
 +		exynos_pmu_write(off, val);
@@ -26430,14 +26451,7 @@ index f1778003f..99b6216d9 100644
 +				mode, off, val, v, zero ? " ZEROED" : "");
 +		}
 +	}
- 
--	for (i = 0; i < pm_info->num_wakeup_mask; i++)
--		exynos_pmu_write(pm_info->wakeup_mask_offset[i],
--				pm_info->wakeup_mask[mode][i]);
--
--	for (i = 0; i < pm_info->num_eint_wakeup_mask; i++)
--		exynos_pmu_write(pm_info->eint_wakeup_mask_offset[i],
--			exynos_eint_wake_mask_array[i]);
++
 +	zero = (w & 1) || (w & 8);
 +	for (i = 0; i < pm_info->num_eint_wakeup_mask; i++) {
 +		val = zero ? 0 : exynos_eint_wake_mask_array[i];
@@ -26454,6 +26468,41 @@ index f1778003f..99b6216d9 100644
  }
  
  int exynos_prepare_sys_powerdown(enum sys_powerdown mode)
+@@ -69,12 +105,16 @@
+ 	return ret;
+ }
+ 
+-void exynos_wakeup_sys_powerdown(enum sys_powerdown mode, bool early_wakeup)
++int exynos_wakeup_sys_powerdown_checked(enum sys_powerdown mode, bool early_wakeup)
+ {
++	int ret;
++
+ 	if (early_wakeup)
+-		cal_pm_earlywakeup(mode);
++		ret = cal_pm_earlywakeup(mode);
+ 	else
+-		cal_pm_exit(mode);
++		ret = cal_pm_exit(mode);
++	if (ret)
++		pr_err("CAL recovery failed: mode=%d early=%d ret=%d\n", mode, early_wakeup, ret);
+ 
+ 	switch (mode) {
+ 	case SYS_SICD:
+@@ -83,8 +123,14 @@
+ 	default:
+ 		break;
+ 	}
++	return ret;
+ }
+ 
++void exynos_wakeup_sys_powerdown(enum sys_powerdown mode, bool early_wakeup)
++{
++	(void)exynos_wakeup_sys_powerdown_checked(mode, early_wakeup);
++}
++
+ /******************************************************************************
+  *                               Extern function                              *
+  ******************************************************************************/
 diff --git a/drivers/tty/serial/samsung.c b/drivers/tty/serial/samsung.c
 index c8a220d15..49ce04e8d 100644
 --- a/drivers/tty/serial/samsung.c
@@ -28888,3 +28937,14 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/fence.c b/drivers/video/fbdev/exyn
  	DPU_F_EVT_LOG(DPU_F_EVT_CREATE_RETIRE_FENCE, &decon->sd, &retire);
  	DPU_DEBUG_FENCE("[%s] %s: ctx(%llu) seqno(%d), fd(%d), flags(0x%lx)\n",
  			fence_evt[DPU_F_EVT_CREATE_RETIRE_FENCE], retire.name,
+diff --git a/include/soc/samsung/exynos-powermode.h b/include/soc/samsung/exynos-powermode.h
+--- a/include/soc/samsung/exynos-powermode.h
++++ b/include/soc/samsung/exynos-powermode.h
+@@ -15,6 +15,7 @@
+ 
+ extern int exynos_prepare_sys_powerdown(enum sys_powerdown mode);
+ extern void exynos_wakeup_sys_powerdown(enum sys_powerdown mode, bool early_wakeup);
++extern int exynos_wakeup_sys_powerdown_checked(enum sys_powerdown mode, bool early_wakeup);
+ extern void exynos_prepare_cp_call(void);
+ extern void exynos_wakeup_cp_call(bool early_wakeup);
+ extern int exynos_rtc_wakeup(void);
