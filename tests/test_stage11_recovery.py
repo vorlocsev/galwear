@@ -24,6 +24,8 @@ from r800_safety import SafetyError
 from test_installer_guard import fake_pit
 from test_recovery_audit import build_archives
 from test_pit_geometry import replace_pit_field
+from test_netodin_protocol import SimulatedWatch, SimulatedServer
+import netodin
 
 
 def with_partition(pit: bytes, *, name="CSA", filename="", identifier=99,
@@ -181,6 +183,27 @@ class OfflineRecoveryReadinessTests(unittest.TestCase):
     def test_never_automatically_retry_partial_flash(self):
         for state in FAILURE_HANDLING.values():
             self.assertFalse(state["automatic_retry"])
+
+    def _simulate_live_pit(self, pit):
+        watch = SimulatedWatch(pit_data=pit)
+        with mock.patch.object(netodin.socket, "socket",
+                               return_value=SimulatedServer(watch)):
+            with mock.patch.object(netodin, "format_progress"):
+                with self.assertRaises(SafetyError):
+                    netodin.flash_ap_package(
+                        str(self.package), combination_path=str(self.combo),
+                        auto_reboot=False)
+        self.assertEqual(watch.transfer_commands, [])
+        self.assertEqual(watch.raw_blocks, 0)
+
+    def test_installer_rejects_hidden_factory_identifier_collision_prewrite(self):
+        self._simulate_live_pit(with_partition(
+            fake_pit(), name="CSA", filename="", identifier=80))
+
+    def test_installer_rejects_factory_block_overlap_prewrite(self):
+        self._simulate_live_pit(with_partition(
+            fake_pit(), name="CM", filename="", identifier=99,
+            offset=0, blocks=100))
 
 
 if __name__ == "__main__":
