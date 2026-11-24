@@ -77,6 +77,22 @@ class CpioAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(audit.CpioError, "Wrong CPIO file type"):
             audit.inspect_cpio(self.cpio, self.init)
 
+    def test_wrong_init_permissions_rejected(self):
+        self.entries[-1] = ("init", 0o100644, self.init.read_bytes())
+        self.cpio.write_bytes(make_newc(self.entries))
+        with self.assertRaisesRegex(audit.CpioError, "permissions"):
+            audit.inspect_cpio(self.cpio, self.init)
+
+    def test_wrong_console_device_numbers_rejected(self):
+        data = bytearray(self.cpio.read_bytes())
+        second = data.find(b"070701", 6)
+        self.assertGreater(second, 0)
+        # newc rdevmajor is the tenth 8-character integer
+        data[second + 6 + 9 * 8: second + 6 + 10 * 8] = b"00000008"
+        self.cpio.write_bytes(data)
+        with self.assertRaisesRegex(audit.CpioError, "major/minor"):
+            audit.inspect_cpio(self.cpio, self.init)
+
     def test_extra_unexpected_path_rejected(self):
         self.entries.append(("../root/passwd", 0o100644, b"secret"))
         self.cpio.write_bytes(make_newc(self.entries))
