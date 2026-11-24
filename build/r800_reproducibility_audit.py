@@ -85,7 +85,8 @@ def version(binary: str) -> str:
 
 def emit(*, image: Path, config: Path, patch: Path, init_evidence: Path,
          cpio_evidence: Path, source: Path, run_id: str, attempt: str,
-         galwear_commit: str, container_image_id: str) -> dict:
+         galwear_commit: str, container_image_id: str,
+         runner_replica: str | None = None) -> dict:
     if not str(run_id).isdigit() or int(run_id) < 1:
         raise EvidenceError("Invalid build run ID")
     if not str(attempt).isdigit() or int(attempt) < 1:
@@ -94,6 +95,8 @@ def emit(*, image: Path, config: Path, patch: Path, init_evidence: Path,
         raise EvidenceError("Invalid Galwear source SHA")
     if not IMAGE_ID.fullmatch(container_image_id):
         raise EvidenceError("Container image identity not recorded")
+    if runner_replica is not None and runner_replica not in ("a", "b"):
+        raise EvidenceError("Invalid independent runner replica")
     source_sha = local_git_commit(source)
     ci = read_json(init_evidence)
     cp = read_json(cpio_evidence)
@@ -117,6 +120,7 @@ def emit(*, image: Path, config: Path, patch: Path, init_evidence: Path,
         "status": "ONE_BUILD_EVIDENCE_ONLY",
         "run_id": int(run_id),
         "run_attempt": int(attempt),
+        "runner_replica": runner_replica,
         "galwear_commit": galwear_commit,
         "source_commit": source_sha,
         "container_image_id": container_image_id,
@@ -143,6 +147,8 @@ def validate_manifest(obj: dict) -> None:
         raise EvidenceError("Missing run ID")
     if type(obj.get("run_attempt")) is not int or obj["run_attempt"] < 1:
         raise EvidenceError("Missing run attempt")
+    if obj.get("runner_replica") not in (None, "a", "b"):
+        raise EvidenceError("Invalid independent runner replica")
     if obj.get("source_commit") != BASE or not GIT_SHA.fullmatch(str(obj.get("galwear_commit", ""))):
         raise EvidenceError("Unknown source revision")
     if not IMAGE_ID.fullmatch(str(obj.get("container_image_id", ""))):
@@ -163,14 +169,24 @@ def validate_manifest(obj: dict) -> None:
 def compare(first: dict, second: dict) -> dict:
     validate_manifest(first)
     validate_manifest(second)
-    if (first["run_id"], first["run_attempt"]) == (second["run_id"], second["run_attempt"]):
-        raise EvidenceError("Two independent build attempts are required")
+    same_attempt = (
+        (first["run_id"], first["run_attempt"]) ==
+        (second["run_id"], second["run_attempt"])
+    )
+    if same_attempt and (
+        first.get("runner_replica") not in ("a", "b") or
+        second.get("runner_replica") not in ("a", "b") or
+        first["runner_replica"] == second["runner_replica"]
+    ):
+        raise EvidenceError("Two independent build attempts or matrix runners are required")
     differences = [name for name in COMPARE_FIELDS if first.get(name) != second.get(name)]
     return {
         "schema": "galwear-r800-image-repeatability-comparison-v1",
         "status": ("TWO_RUN_HASH_MATCH" if not differences else "REJECT_MISMATCH"),
         "first_run_id": first["run_id"],
         "second_run_id": second["run_id"],
+        "first_runner_replica": first.get("runner_replica"),
+        "second_runner_replica": second.get("runner_replica"),
         "differences": differences,
         "two_run_byte_identity_observed": not differences,
         "general_reproducibility_proven": False,
@@ -190,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--attempt", required=True)
     a.add_argument("--galwear-commit", required=True)
     a.add_argument("--container-image-id", required=True)
+    a.add_argument("--runner-replica", choices=("a", "b"))
     c = sub.add_parser("compare")
     c.add_argument("--first", type=Path, required=True)
     c.add_argument("--second", type=Path, required=True)
@@ -201,7 +218,8 @@ def main(argv: list[str] | None = None) -> int:
                           init_evidence=args.init_evidence, cpio_evidence=args.cpio_evidence,
                           source=args.source, run_id=args.run_id, attempt=args.attempt,
                           galwear_commit=args.galwear_commit,
-                          container_image_id=args.container_image_id)
+                          container_image_id=args.container_image_id,
+                          runner_replica=args.runner_replica)
         else:
             result = compare(read_json(args.first), read_json(args.second))
         rc = 0 if result["status"] in ("ONE_BUILD_EVIDENCE_ONLY", "TWO_RUN_HASH_MATCH") else 2
