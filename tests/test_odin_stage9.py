@@ -210,6 +210,52 @@ class PITWireFaults(unittest.TestCase):
         self.assertTrue(srv.closed)
         self.assert_no_data_commands(peer)
 
+    def test_bind_failure_closes_listener(self):
+        peer = SimulatedWatch()
+        class BindFailureServer(SimulatedServer):
+            def bind(self, address):
+                raise OSError("port already bound")
+        srv = BindFailureServer(peer)
+        with self.assertRaisesRegex(OSError, "port already bound"):
+            self.run_mock(peer, srv)
+        self.assertTrue(srv.closed)
+        self.assert_no_data_commands(peer)
+
+    def test_listen_failure_closes_listener(self):
+        peer = SimulatedWatch()
+        class ListenFailureServer(SimulatedServer):
+            def listen(self, count):
+                raise OSError("cannot listen")
+        srv = ListenFailureServer(peer)
+        with self.assertRaisesRegex(OSError, "cannot listen"):
+            self.run_mock(peer, srv)
+        self.assertTrue(srv.closed)
+        self.assert_no_data_commands(peer)
+
+    def test_socket_option_failure_after_accept_closes_both(self):
+        class OptionsFailurePeer(SimulatedWatch):
+            def settimeout(self, timeout):
+                raise OSError("cannot set socket timeout")
+        peer = OptionsFailurePeer()
+        srv = SimulatedServer(peer)
+        with self.assertRaisesRegex(OSError, "socket timeout"):
+            self.run_mock(peer, srv)
+        self.assertTrue(srv.closed)
+        self.assertTrue(peer.closed)
+        self.assert_no_data_commands(peer)
+
+    def test_reboot_only_accept_timeout_closes_listener(self):
+        peer = SimulatedWatch()
+        class TimedOutServer(SimulatedServer):
+            def accept(self):
+                raise socket.timeout("no watch connected")
+        srv = TimedOutServer(peer)
+        with mock.patch.object(netodin.socket, "socket", return_value=srv):
+            with self.assertRaises(socket.timeout):
+                netodin.reboot_only()
+        self.assertTrue(srv.closed)
+        self.assertEqual(peer.reboot_commands, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
