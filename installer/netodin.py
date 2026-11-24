@@ -70,6 +70,32 @@ def recv_exact(sock: socket.socket, length: int) -> bytes:
     return bytes(buf)
 
 
+def require_transfer_success(status: int, phase: str) -> None:
+    """An unknown nonzero transfer status must never be treated as success.
+
+    Unlike CMD_SETUP, these data-transfer acknowledgements do not encode a
+    protocol version in their status field.
+    """
+    if status != 0:
+        raise IOError(f"Odin {phase} failed or returned unknown status: {status:#010x}")
+
+
+def read_image_chunk(stream, expected_bytes: int, filename: str) -> bytes:
+    """Abort immediately on a short read instead of committing partial data.
+
+    Premature EOF in the old nested streaming loops could result in zero
+    progress and repeated transfer windows.
+    """
+    if expected_bytes <= 0:
+        raise ValueError("Cannot read a nonpositive image chunk")
+    chunk = stream.read(expected_bytes)
+    if chunk is None or len(chunk) != expected_bytes:
+        raise IOError(
+            f"Short image read for {filename}: expected {expected_bytes} bytes, "
+            f"got {0 if chunk is None else len(chunk)}; transfer aborted")
+    return chunk
+
+
 def format_progress(prefix: str, current: int, total: int, start_time: float):
     elapsed = max(time.time() - start_time, 0.001)
     speed_mb = (current / (1024 * 1024)) / elapsed
@@ -201,17 +227,18 @@ def flash_ap_package(ap_path: str, host: str = "0.0.0.0", port: int = ODIN_PORT,
                 aligned_window_size = ((window_bytes_to_send + CHUNK_SIZE - 1) // CHUNK_SIZE) * CHUNK_SIZE
 
                 # Cmd 102, Sub 0: RQT_XMIT_DATA_START (resets chunk seq counter)
-                send_control_packet(sock, CMD_FILE_TRANSFER, 0, expect_resp=True)
+                _, ack_status = send_control_packet(sock, CMD_FILE_TRANSFER, 0, expect_resp=True)
+                require_transfer_success(ack_status, "window start")
 
                 # Cmd 102, Sub 2: Announce aligned window size to device
-                send_control_packet(sock, CMD_FILE_TRANSFER, 2, data=[aligned_window_size], expect_resp=True)
+                _, ack_status = send_control_packet(
+                    sock, CMD_FILE_TRANSFER, 2, data=[aligned_window_size], expect_resp=True)
+                require_transfer_success(ack_status, "window size negotiation")
 
                 window_sent = 0
                 while window_sent < window_bytes_to_send:
                     to_read = min(CHUNK_SIZE, window_bytes_to_send - window_sent)
-                    chunk = stream.read(to_read)
-                    if not chunk:
-                        break
+                    chunk = read_image_chunk(stream, to_read, filename)
                     actual_len = len(chunk)
 
                     # NetOdin always transmits full CHUNK_SIZE (128 KB) blocks, zero-padding the last block
@@ -223,8 +250,9 @@ def flash_ap_package(ap_path: str, host: str = "0.0.0.0", port: int = ODIN_PORT,
                     # Each chunk is acknowledged with an 8-byte status packet: <seq:status>, e.g. <0:0>
                     ack = recv_exact(sock, 8)
                     ack_seq, ack_status = struct.unpack("<II", ack)
-                    if ack_status != 0 and (ack_status & 0x80000000):
-                        raise IOError(f"Chunk transfer rejected by device at offset {file_bytes_sent + window_sent}! ACK: <{ack_seq}:{ack_status:#x}>")
+                    require_transfer_success(
+                        ack_status,
+                        f"data chunk at offset {file_bytes_sent + window_sent} (ACK seq {ack_seq})")
 
                     window_sent += actual_len
                     format_progress(filename, file_bytes_sent + window_sent, file_size, t_start)
@@ -237,8 +265,7 @@ def flash_ap_package(ap_path: str, host: str = "0.0.0.0", port: int = ODIN_PORT,
                 # [0, window_bytes_to_send, 0, 0, part_id, is_file_complete, 0, 0]
                 cmd_data = [0, window_bytes_to_send, 0, 0, part_id, is_file_complete, 0, 0]
                 ack_cmd, ack_status = send_control_packet(sock, CMD_FILE_TRANSFER, 3, data=cmd_data, expect_resp=True)
-                if ack_status != 0 and (ack_status & 0x80000000):
-                    raise IOError(f"eMMC Write error for {filename} (Status: 0x{ack_status:08X})")
+                require_transfer_success(ack_status, f"eMMC commit for {filename}")
 
             sys.stdout.write("\n")
             print(f"  [+] {filename}: write acknowledged by device (NO read-back verification).")
