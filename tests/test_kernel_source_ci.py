@@ -93,7 +93,7 @@ class ToolchainTests(unittest.TestCase):
     def test_source_probe_has_exact_sha_and_no_write_to_remote(self):
         content = (ROOT / "build/r800_aosp_source_probe.sh").read_text()
         self.assertIn("BASE=50db73fc799f20a7120a8b5f653b16cc123d856f", content)
-        self.assertIn("https://android.googlesource.com/kernel/exynos", content)
+        self.assertIn("https://github.com/xanderlent/COMBINED_android-kernel-exynos.git", content)
         self.assertIn("git -C \"$SOURCE\" -c protocol.version=2 fetch", content)
         self.assertIn("--source-tree \"$SOURCE\"", content)
         self.assertNotIn("git push", content)
