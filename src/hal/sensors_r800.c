@@ -351,6 +351,7 @@ static int ctx_len, ctx_discard;
 #define HR_BG_MIN_NS (60LL * 1000000000)
 #define HR_SETTLE_NS (10LL * 1000000000)
 #define HR_BURST_NS (45LL * 1000000000)
+#define HR_RETRY_NS (5LL * 1000000000)
 #define HR_MAX_PERIOD_NS (1800LL * 1000000000)
 /* The hub's HR algorithm reports once a second and gives nothing at all when
    asked for faster: Play Services' samples ask for "fastest" (0 -> 1 ms) */
@@ -359,6 +360,7 @@ static int hr_active;          /* Android has the HR sensor enabled */
 static int64_t hr_req_ns;      /* requested sampling period, unclamped */
 static int hr_bg;              /* burst mode */
 static int64_t hr_burst_start; /* 0: no burst running */
+static int64_t hr_stop_retry; /* failed shutdown: retry instead of busy-loop */
 static int64_t hr_next;        /* burst mode: next burst start */
 static int hr_bursts, hr_skipped; /* stats for the log */
 
@@ -493,18 +495,21 @@ static void wake_poll(void)
 static int64_t now_ns(void);
 
 /* caller holds lock: the hub's HR on or off (its poll delay at most 1 s) */
-static void hr_hub(int on)
+static int hr_hub(int on)
 {
 	if (hub[H_HR].enabled == on)
-		return;
+		return 0;
 	int previous = hub[H_HR].enabled;
-	if (on && write_sysfs(hub[H_HR].delay_node, HR_HUB_PERIOD_NS))
-		return;
+	int r = on ? write_sysfs(hub[H_HR].delay_node, HR_HUB_PERIOD_NS) : 0;
+	if (r)
+		return r;
 	hub[H_HR].enabled = on;
-	if (apply_enable_mask()) {
+	r = apply_enable_mask();
+	if (r) {
 		hub[H_HR].enabled = previous;
-		LOGE("HR hub transition failed");
+		LOGE("HR hub transition failed: %d", r);
 	}
+	return r;
 }
 
 /* keep the AP up for the length of a burst (needs group wakelock; best effort) */
@@ -525,46 +530,53 @@ static int64_t hr_period(void)
 /* caller holds lock: start a burst, or skip this one while off the wrist */
 static void hr_burst_begin(int64_t now)
 {
-	if (offbody_state < 0.5f) {
+	if (!offbody_known || offbody_state < 0.5f) {
 		hr_skipped++;
 		hr_next = now + hr_period();
 		return;
 	}
+	hr_wakelock(1);
+	if (hr_hub(1)) {
+		hr_wakelock(0);
+		hr_next = now + HR_RETRY_NS;
+		return;
+	}
 	hr_burst_start = now;
 	hr_bursts++;
-	hr_wakelock(1);
-	hr_hub(1);
 }
 
-/* caller holds lock: stop the running burst; the next starts a period after it */
-static void hr_burst_end(void)
+/* Stop failures retain the burst and wakelock for a bounded retry cadence. */
+static int hr_burst_end(void)
 {
-	hr_hub(0);
+	if (hr_hub(0)) {
+		hr_stop_retry = now_ns() + HR_RETRY_NS;
+		return -EIO;
+	}
 	hr_wakelock(0);
 	hr_next = hr_burst_start + hr_period();
-	hr_burst_start = 0;
+	hr_burst_start = hr_stop_retry = 0;
+	return 0;
 }
 
 /* caller holds lock: apply hr_active / hr_req_ns */
-static void hr_update(int64_t now)
+static int hr_update(int64_t now)
 {
 	int bg = hr_active && hr_req_ns >= HR_BG_MIN_NS;
-	if (!bg && hr_burst_start) {
-		hr_wakelock(0);
-		hr_burst_start = 0;
-	}
-	if (!hr_active) {
+	int r;
+	if (!bg) {
+		r = hr_hub(!!hr_active);
+		if (r)
+			return r;
+		if (hr_burst_start)
+			hr_wakelock(0);
+		hr_burst_start = hr_stop_retry = 0;
 		hr_bg = 0;
-		hr_hub(0);
-	} else if (!bg) {
-		hr_bg = 0;
-		hr_hub(1);
 	} else if (!hr_bg) {
-		/* into burst mode: a burst right away when newly enabled, a period
-		   later when a continuous client (which just measured) has left */
 		int was_on = hub[H_HR].enabled;
+		r = hr_hub(0);
+		if (r)
+			return r;
 		hr_bg = 1;
-		hr_hub(0);
 		if (was_on)
 			hr_next = now + hr_period();
 		else
@@ -572,28 +584,33 @@ static void hr_update(int64_t now)
 	}
 	LOGI("hr: %s, period %lld s", !hr_active ? "off" : hr_bg ? "bursts" : "continuous",
 	     (long long)(hr_req_ns / 1000000000));
+	return 0;
 }
 
-/* caller holds lock: burst timers, called after every poll() wake-up */
 static void hr_tick(int64_t now)
 {
 	if (!hr_bg)
 		return;
+	if (hr_stop_retry) {
+		if (now >= hr_stop_retry)
+			hr_burst_end();
+		return;
+	}
 	if (hr_burst_start && now >= hr_burst_start + HR_BURST_NS) {
-		LOGI("hr burst %d: no reading in %lld s", hr_bursts,
-		     (long long)(HR_BURST_NS / 1000000000));
+		LOGI("hr burst %d: timeout", hr_bursts);
 		hr_burst_end();
 	} else if (!hr_burst_start && now >= hr_next) {
 		hr_burst_begin(now);
 	}
 }
 
-/* caller holds lock: poll() timeout for the burst timers, -1 for none */
 static int hr_timeout_ms(int64_t now)
 {
 	if (!hr_bg)
 		return -1;
-	int64_t t = (hr_burst_start ? hr_burst_start + HR_BURST_NS : hr_next) - now;
+	int64_t target = hr_stop_retry ? hr_stop_retry :
+		hr_burst_start ? hr_burst_start + HR_BURST_NS : hr_next;
+	int64_t t = target - now;
 	return t <= 0 ? 0 : (int)(t / 1000000) + 1;
 }
 
@@ -620,12 +637,15 @@ static int dev_activate(struct sensors_poll_device_t *dev, int handle, int enabl
 	}
 	if (handle == H_HR) {
 		pthread_mutex_lock(&lock);
+		int previous = hr_active;
 		hr_active = !!enabled;
-		hr_update(now_ns());
+		int r = hr_update(now_ns());
+		if (r)
+			hr_active = previous;
 		pthread_mutex_unlock(&lock);
 		wake_poll();
-		LOGI("activate %d = %d", handle, enabled);
-		return 0;
+		LOGI("activate %d = %d (%d)", handle, enabled, r);
+		return r;
 	}
 	pthread_mutex_lock(&lock);
 	int previous = hub[handle].enabled;
@@ -661,12 +681,14 @@ static int dev_set_delay(struct sensors_poll_device_t *dev, int handle, int64_t 
 	if (handle == H_HR) {
 		/* the hub's HR always runs at 1 s; slower requests mean bursts */
 		pthread_mutex_lock(&lock);
-		int changed = hr_req_ns != req;
+		int64_t previous = hr_req_ns;
 		hr_req_ns = req;
 		hub[handle].period_ns = HR_HUB_PERIOD_NS;
 		int r = hub[handle].enabled ? write_sysfs(hub[handle].delay_node, hub[handle].period_ns) : 0;
-		if (hr_active && changed)
-			hr_update(now_ns());
+		if (!r && hr_active && previous != req)
+			r = hr_update(now_ns());
+		if (r)
+			hr_req_ns = previous;
 		pthread_mutex_unlock(&lock);
 		wake_poll();
 		return r;
@@ -881,6 +903,8 @@ static void ctx_line(const char *line, sensors_event_t *data, int count, int *n_
 		offbody_known = 1;
 		offbody_state = st;
 		offbody_report = 0;
+		if (st < 0.5f && hr_bg && hr_burst_start && !hr_stop_retry)
+			hr_burst_end();
 		if (changed && ctx_enabled[H_OFFBODY])
 			ctx_event(&data[(*n_out)++], H_OFFBODY, st);
 	} else if (kind == 'P') {
@@ -1055,7 +1079,7 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 						   which also ends the burst */
 						if (s->handle == H_HR && hr_bg) {
 							int64_t t = now_ns();
-							on = hr_burst_start && s->v[0] > 1 &&
+							on = hr_burst_start && !hr_stop_retry && s->v[0] > 1 &&
 							     t - hr_burst_start >= HR_SETTLE_NS;
 							if (on) {
 								LOGI("hr burst %d: %d bpm after %lld s (%d skipped off-wrist)",
