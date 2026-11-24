@@ -168,18 +168,20 @@ static int64_t now_ns(void)
     return t.tv_sec * 1000000000LL + t.tv_nsec;
 }
 
-static void apply_mixer(const struct mix_setting *s, size_t n)
+static int apply_mixer(const struct mix_setting *s, size_t n)
 {
+    int status = 0;
     struct mixer *m = mixer_open(CARD);
     if (!m) {
         LOGE("mixer_open(%d) failed", CARD);
-        return;
+        return -EIO;
     }
     for (size_t i = 0; i < n; i++) {
         struct mixer_ctl *c = mixer_get_ctl_by_name(m, s[i].name);
         int r;
         if (!c) {
             LOGE("no mixer control '%s'", s[i].name);
+            status = -EIO;
             continue;
         }
         if (s[i].str)
@@ -189,10 +191,13 @@ static void apply_mixer(const struct mix_setting *s, size_t n)
             for (unsigned k = 0; k < mixer_ctl_get_num_values(c) && !r; k++)
                 r = mixer_ctl_set_value(c, k, s[i].val);
         }
-        if (r)
+        if (r) {
             LOGE("set '%s' failed: %d", s[i].name, r);
+            status = -EIO;
+        }
     }
     mixer_close(m);
+    return status;
 }
 
 /* ---- output stream ---- */
@@ -658,7 +663,8 @@ static int hfp_start(struct r800_audio_device *adev)
     if (adev->in)
         in_do_standby(adev->in);
     adev->hfp_active = true;   /* reserve routing until start or rollback */
-    apply_mixer(route, sizeof(route) / sizeof(route[0]));
+    if (apply_mixer(route, sizeof(route) / sizeof(route[0])))
+        goto fail;
 
     /* Tizen's pcm_config_bt_companion_call_*: 48 kHz stereo, 960 x 4,
        started right away and never stopped on underrun */
@@ -756,8 +762,8 @@ static const char *kv_get(const char *kv, const char *key, char *val, size_t len
         if (!strncmp(p, key, kl) && p[kl] == '=') {
             const char *v = p + kl + 1, *e = strchr(v, ';');
             size_t n = e ? (size_t)(e - v) : strlen(v);
-            if (n >= len)
-                n = len - 1;
+            if (!len || n >= len)
+                return NULL;
             memcpy(val, v, n);
             val[n] = 0;
             return val;
