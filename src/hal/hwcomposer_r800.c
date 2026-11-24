@@ -11,6 +11,7 @@
  * Loaded by android.hardware.graphics.composer@2.1-impl via hw_get_module("hwcomposer")
  * (ro.hardware = r800) and wrapped by its HWC2On1Adapter.
  */
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -425,6 +426,10 @@ static int fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 			LOGW("gralloc lock failed (%d), keeping last frame (%lu)", err, lockfail);
 		return -EIO;
 	}
+	if ((uintptr_t)src & (sizeof(uint32_t) - 1)) {
+		h->gralloc->unlock(h->gralloc, buf);
+		return -EINVAL;
+	}
 	uint8_t *dst = h->fb_mem + (size_t)back * ht * h->fix.line_length;
 	/* swap_rb describes the RGBA source; BGRA needs the opposite swap. */
 	if ((h->swap_rb != (fmt == HAL_PIXEL_FORMAT_BGRA_8888)) && bpp == 4) {
@@ -611,13 +616,12 @@ static int validate_displays(struct r800_hwc *h, size_t n, hwc_display_contents_
  * screen) and there are at most 3 of them, prepare() marks them all
  * HWC_OVERLAY and set() hands each to its own window, bottom layer first.
  * Anything else falls back to GPU composition for the whole frame.
- * vendor.hwc.r800.overlay=0 turns it off.
+ * vendor.hwc.r800.overlay=1 explicitly enables it.
  *
  * Pixel format: the Exynos private handle has "... format, width, height,
- * stride ..." as consecutive ints (handle_stride() already relies on
- * width/height/stride). The format guess is checked once on the client
- * target, which is always RGBA_8888; if it does not read 1 there, overlays
- * stay off (fmt_verified = -1).
+ * stride ..." as consecutive ints. The tuple is checked for ambiguity,
+ * supported format and padded plane capacity on every submission.
+ * This remains a donor-layout heuristic, not a verified gralloc ABI.
  */
 static int ovl_enabled(struct r800_hwc *h)
 {
@@ -864,6 +868,11 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 
 		if (!c)
 			continue;
+		/* Virtual displays are not rendered by this HAL; own their input fence. */
+		if (d == HWC_DISPLAY_VIRTUAL && c->outbufAcquireFenceFd >= 0) {
+			close(c->outbufAcquireFenceFd);
+			c->outbufAcquireFenceFd = -1;
+		}
 		if (d == 0 && h->ovl_n > 0) {
 			/* prepare() marked these layers HWC_OVERLAY: nothing was composed
 			 * into the FB target. On failure the previous frame stays up. */
