@@ -46,7 +46,11 @@ fi
 # 30 s scroll had 10.7% of SysUI frames >16 ms with overlays vs 6.7% with
 # GPU composition (p99 150 vs 73 ms), although overlays halve SF/GPU work.
 # Suspect: the GPU fallback for animated/scaled layers. Opt in: android/OVERLAY.
-[ -f /oem/r800dev/android/OVERLAY ] || /system/bin/setprop vendor.hwc.r800.overlay 0
+if [ -f /oem/r800dev/android/OVERLAY ]; then
+    /system/bin/setprop vendor.hwc.r800.overlay 1
+else
+    /system/bin/setprop vendor.hwc.r800.overlay 0
+fi
 # Full SLEEP (MIF down) needs pd-is, pd-vts and pd-dispaud off, as in Tizen
 # (kernel #97+: Tizen's PD SMC argument, decon keeps disp-rst-prev in
 # ambient). With android/SLEEP the domains go off in the last syscore step;
