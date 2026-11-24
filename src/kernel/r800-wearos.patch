@@ -26990,10 +26990,9 @@ index c69626aa8..f75dd5c7a 100644
  	/* CPSR & VIDEO MODE & HPERIOD can be set only when shadow enable on */
  	/* shadow enable */
 diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev/exynos/dpu30/decon_core.c
-index fcb2ca536..c7025ea0c 100644
 --- a/drivers/video/fbdev/exynos/dpu30/decon_core.c
 +++ b/drivers/video/fbdev/exynos/dpu30/decon_core.c
-@@ -81,6 +81,25 @@ int dpu_fence_log_level = 6;
+@@ -81,6 +81,25 @@
  module_param(dpu_fence_log_level, int, 0644);
  int dpu_dma_buf_log_level = 6;
  module_param(dpu_dma_buf_log_level, int, 0644);
@@ -27019,7 +27018,7 @@ index fcb2ca536..c7025ea0c 100644
  int decon_systrace_enable;
  unsigned int decon_trivial;
  
-@@ -561,6 +580,15 @@ static int _decon_enable(struct decon_device *decon, enum decon_state state)
+@@ -561,6 +580,15 @@
  		}
  	}
  
@@ -27035,7 +27034,7 @@ index fcb2ca536..c7025ea0c 100644
  	ret = decon_set_out_sd_state(decon, state);
  	if (ret < 0) {
  		decon_err("%s decon-%d failed to set subdev %s state\n",
-@@ -568,8 +596,10 @@ static int _decon_enable(struct decon_device *decon, enum decon_state state)
+@@ -568,8 +596,10 @@
  		goto err;
  	}
  
@@ -27048,7 +27047,7 @@ index fcb2ca536..c7025ea0c 100644
  
  	decon_to_psr_info(decon, &psr);
  
-@@ -809,7 +839,17 @@ static int _decon_disable(struct decon_device *decon, enum decon_state state)
+@@ -809,7 +839,17 @@
  		dev_warn(decon->dev, "pm_relax");
  	}
  
@@ -27067,7 +27066,7 @@ index fcb2ca536..c7025ea0c 100644
  		if (decon->res.pinctrl && decon->res.hw_te_off) {
  			if (pinctrl_select_state(decon->res.pinctrl,
  						decon->res.hw_te_off)) {
-@@ -1004,8 +1044,41 @@ int decon_create_power_state_sysfs(struct decon_device *decon)
+@@ -1004,8 +1044,41 @@
  	return ret;
  }
  
@@ -27109,18 +27108,88 @@ index fcb2ca536..c7025ea0c 100644
  	sysfs_notify(&decon->dev->kobj, NULL, "decon_power_state");
  	sysfs_notify(&decon->dev->kobj, NULL, "idle_state");
  }
-@@ -1206,6 +1279,10 @@ static int decon_blank(int blank_mode, struct fb_info *info)
+@@ -1127,10 +1200,8 @@
+ 	return ret;
+ }
+ 
+-static void decon_displayon(struct work_struct *work)
++static int r800_decon_displayon_checked(struct decon_device *decon)
+ {
+-	struct decon_device *decon =
+-		container_of(work, struct decon_device, displayon_work);
+ 	int ret;
+ 	mutex_lock(&decon->display_lock);
+ #if defined(CONFIG_EXYNOS_READ_ESD_SOLUTION)
+@@ -1138,12 +1209,12 @@
+ #endif
+ 	atomic_set(&decon->displayon_requested, 0);
+ 	DPU_EVENT_LOG(DPU_EVT_UNBLANK, &decon->sd, ktime_set(0, 0));
+-	lcd_status_notifier(LCD_ON);
+ 	ret = decon_update_pwr_state(decon, DISP_PWR_NORMAL);
+ 	if (ret) {
+ 		decon_err("failed to enable decon\n");
+ 		goto displayon_exit;
+ 	}
++	lcd_status_notifier(LCD_ON);
+ #if defined(CONFIG_EXYNOS_READ_ESD_SOLUTION)
+ 	if (decon->esd.thread)
+ 		wake_up_process(decon->esd.thread);
+@@ -1153,8 +1224,17 @@
+ 	mutex_unlock(&decon->esd.lock);
+ #endif
+ 	mutex_unlock(&decon->display_lock);
++	return ret;
+ }
+ 
++static void decon_displayon(struct work_struct *work)
++{
++	struct decon_device *decon =
++		container_of(work, struct decon_device, displayon_work);
++
++	r800_decon_displayon_checked(decon);
++}
++
+ static int decon_displayoff(struct decon_device *decon)
+ {
+ 	int ret;
+@@ -1201,11 +1281,16 @@
+ 
+ 	if (decon->state == DECON_STATE_INVALID) {
+ 		decon_info("Display invalid, not processing blank event\n");
+-		return 0;
++		return -ENODEV;
+ 	}
  	decon_hiber_block_exit(decon);
  	switch (blank_mode) {
  	case FB_BLANK_POWERDOWN:
 +		if (r800_keep_panel_on && decon->dt.out_type == DECON_OUT_DSI) {
-+			decon_info("r800: POWERDOWN ignored, panel kept on\n");
++			decon_info("r800: POWERDOWN denied, panel kept on\n");
++			ret = -EOPNOTSUPP;
 +			break;
 +		}
  		ret = decon_displayoff(decon);
  		atomic_set(&decon->ttw_allowed, 1);
  		if (ret)
-@@ -1949,6 +2026,10 @@ static int __decon_update_regs(struct decon_device *decon, struct decon_reg_data
+@@ -1214,8 +1299,8 @@
+ 	case FB_BLANK_UNBLANK:
+ 		atomic_set(&decon->ttw_allowed, 0);
+ 		cancel_delayed_work_sync(&decon->displayoff_work);
+-		queue_work(decon->displayon_wqueue, &decon->displayon_work);
+ 		flush_work(&decon->displayon_work);
++		ret = r800_decon_displayon_checked(decon);
+ 		break;
+ 	case FB_BLANK_NORMAL:
+ 	case FB_BLANK_VSYNC_SUSPEND:
+@@ -1290,6 +1375,8 @@
+ 
+ 	decon_deactivate_vsync(decon);
+ 
++	if (ret < 0)
++		return ret;
+ 	if (timeout && ret == 0) {
+ 		if (decon->d.eint_pend) {
+ 			decon_err("decon%d wait for vsync timeout(p:0x%x)\n",
+@@ -1949,6 +2036,10 @@
  			has_cursor_win = true;
  		}
  		/* set decon registers for each window */
@@ -27131,7 +27200,7 @@ index fcb2ca536..c7025ea0c 100644
  		decon_reg_set_window_control(decon->id, i, &regs->win_regs[i],
  						regs->win_regs[i].winmap_state);
  
-@@ -3397,8 +3478,10 @@ int decon_release(struct fb_info *info, int user)
+@@ -3397,8 +3488,10 @@
  	if (decon->dt.out_type == DECON_OUT_DSI) {
  		decon_hiber_block_exit(decon);
  		/* Unused DECON state is DECON_STATE_INIT */
@@ -27143,7 +27212,7 @@ index fcb2ca536..c7025ea0c 100644
  		decon_hiber_unblock(decon);
  	}
  
-@@ -3853,6 +3936,22 @@ static int decon_acquire_window(struct decon_device *decon, int idx)
+@@ -3853,6 +3946,22 @@
  		win->videomode.vsync_len = lcd_info->vsa;
  		win->videomode.xres = lcd_info->xres;
  		win->videomode.yres = lcd_info->yres;
@@ -27220,10 +27289,9 @@ index 58519b004..1f093fd63 100644
  
  	return 0;
 diff --git a/drivers/video/fbdev/exynos/dpu30/dsim_drv.c b/drivers/video/fbdev/exynos/dpu30/dsim_drv.c
-index 598b7531f..57d4ffc77 100644
 --- a/drivers/video/fbdev/exynos/dpu30/dsim_drv.c
 +++ b/drivers/video/fbdev/exynos/dpu30/dsim_drv.c
-@@ -231,6 +231,9 @@ static bool dsim_is_writable_pl_fifo_status(struct dsim_device *dsim, u32 word_c
+@@ -231,6 +231,9 @@
  		return false;
  }
  
@@ -27233,7 +27301,7 @@ index 598b7531f..57d4ffc77 100644
  static bool dsim_is_fifo_empty_status(struct dsim_device *dsim)
  {
  	if (dsim_reg_header_fifo_is_empty(dsim->id) && dsim_reg_payload_fifo_is_empty(dsim->id)) {
-@@ -259,6 +262,16 @@ int dsim_check_ph_threshold(struct dsim_device *dsim, u32 cmd_cnt)
+@@ -259,6 +262,16 @@
  	return cnt;
  }
  
@@ -27250,7 +27318,7 @@ index 598b7531f..57d4ffc77 100644
  int dsim_check_linecount(struct dsim_device *dsim)
  {
  	int cnt = 5000;
-@@ -275,6 +288,11 @@ int dsim_check_linecount(struct dsim_device *dsim)
+@@ -275,6 +288,11 @@
  			udelay(10);
  			cnt--;
  		} while (cnt);
@@ -27262,7 +27330,131 @@ index 598b7531f..57d4ffc77 100644
  	}
  	return cnt;
  }
-@@ -1004,8 +1022,17 @@ static int _dsim_enable(struct dsim_device *dsim, enum dsim_state state)
+@@ -436,14 +454,16 @@
+ 		/* set packet go ready*/
+ 		dsim_reg_set_packetgo_ready(dsim->id);
+ 
+-		do {
++		/* Reset the bounded wait for each packet batch. */
++		for (cnt = 5000; cnt > 0; cnt--) {
+ 			if (dsim_is_fifo_empty_status(dsim))
+ 				break;
+ 			udelay(10);
+-		} while (cnt--);
++		}
+ 		if (!cnt) {
+-			dsim_err("DSIM command set fail, cmd_cnt : %d\n", cmd_cnt);
+-			ret = -EINVAL;
++			dsim_err("DSIM command set timeout, cmd_cnt : %d\n", cmd_cnt);
++			ret = -ETIMEDOUT;
++			dsim_reg_enable_packetgo(dsim->id, false);
+ 			goto err_exit;
+ 		}
+ 	}
+@@ -549,17 +569,17 @@
+ 
+ 	dsim_reg_enable_packetgo(dsim->id, false);
+ 
+-	if (wait_empty) {
+-		do {
++	if (wait_empty && !ret) {
++		for (; cnt > 0; cnt--) {
+ 			if (dsim_is_fifo_empty_status(dsim))
+ 				break;
+ 			udelay(10);
+-		} while (cnt--);
+-
++		}
+ 		if (!cnt) {
+-			dsim_err("ID(%d): DSIM command(%lx) fail\n", id, d0);
+-			ret = -EINVAL;
++			dsim_err("ID(%d): DSIM command(%lx) timeout\n", id, d0);
++			ret = -ETIMEDOUT;
+ 		}
++		del_timer(&dsim->cmd_timer);
+ 	}
+ 
+ err_exit:
+@@ -578,6 +598,8 @@
+ 	struct decon_device *decon = get_decon_drvdata(0);
+ 	struct dsim_regs regs;
+ 
++	if (!buf || !cnt)
++		return -EINVAL;
+ 	decon_hiber_block_exit(decon);
+ 
+ 	if (IS_DSIM_OFF_STATE(dsim)) {
+@@ -595,14 +617,16 @@
+ 	ret = dsim_write_data(dsim,
+ 			MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE, cnt, 0, false);
+ 	if (ret < 0)
+-		dsim_err("fail to write MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE command.\n");
++		goto unblock;
+ 
+ 	/* Read request */
+ 	ret = dsim_write_data(dsim, id, addr, 0, true);
+ 	if (ret < 0)
+-		dsim_err("fail to write 0x%02x command.\n", id);
++		goto unblock;
+ 
+-	dsim_wait_for_cmd_done(dsim);
++	ret = dsim_wait_for_cmd_done(dsim);
++	if (ret < 0)
++		goto unblock;
+ 
+ 	if (!wait_for_completion_timeout(&dsim->rd_comp, MIPI_RD_TIMEOUT)) {
+ 		dsim_err("MIPI DSIM read Timeout!\n");
+@@ -617,7 +641,8 @@
+ 		} else
+ 			dsim_err("datalane status is %d\n", dsim_reg_get_datalane_status(dsim->id));
+ 
+-		return -ETIMEDOUT;
++		ret = -ETIMEDOUT;
++		goto unblock;
+ 	}
+ 
+ 	mutex_lock(&dsim->cmd_lock);
+@@ -641,12 +666,20 @@
+ 		case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_1BYTE:
+ 		case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_1BYTE:
+ 			dsim_dbg("1byte Short Packet was received from LCD\n");
++			if (cnt < 1) {
++				ret = -EMSGSIZE;
++				goto exit;
++			}
+ 			buf[0] = (rx_fifo >> 8) & 0xff;
+ 			rx_size = 1;
+ 			break;
+ 		case MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_2BYTE:
+ 		case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_2BYTE:
+ 			dsim_dbg("2bytes Short Packet was received from LCD\n");
++			if (cnt < 2) {
++				ret = -EMSGSIZE;
++				goto exit;
++			}
+ 			for (i = 0; i < 2; i++)
+ 				buf[i] = (rx_fifo >> (8 + i * 8)) & 0xff;
+ 			rx_size = 2;
+@@ -655,6 +688,10 @@
+ 		case MIPI_DSI_RX_GENERIC_LONG_READ_RESPONSE:
+ 			dsim_dbg("Long Packet was received from LCD module.\n");
+ 			rx_size = (rx_fifo & 0x00ffff00) >> 8;
++			if (rx_size > cnt) {
++				ret = -EMSGSIZE;
++				goto exit;
++			}
+ 			dsim_dbg("rx fifo : %8x, response : %x, rx_size : %d\n",
+ 					rx_fifo, rx_fifo & 0xff, rx_size);
+ 			/* Read data from RX packet payload */
+@@ -688,6 +725,7 @@
+ 	}
+ exit:
+ 	mutex_unlock(&dsim->cmd_lock);
++unblock:
+ 	decon_hiber_unblock(decon);
+ 
+ 	return ret;
+@@ -1004,8 +1042,17 @@
  		panel_ctrl = true;
  	else
  		panel_ctrl = false;
@@ -27280,7 +27472,7 @@ index 598b7531f..57d4ffc77 100644
  
  	dsim->state = state;
  	enable_irq(dsim->res.irq);
-@@ -1039,8 +1066,11 @@ static int dsim_enable(struct dsim_device *dsim)
+@@ -1039,8 +1086,11 @@
  	if (prev_state == DSIM_STATE_DOZE ||
  			prev_state == DSIM_STATE_DOZE_SUSPEND)
  		dsim_call_panel_ops(dsim, EXYNOS_PANEL_IOC_WAKE, NULL);
@@ -27293,7 +27485,7 @@ index 598b7531f..57d4ffc77 100644
  
  	dsim_info("dsim-%d %s - (state:%s -> %s)\n", dsim->id, __func__,
  			dsim_state_names[prev_state],
-@@ -1148,6 +1178,9 @@ static int dsim_disable(struct dsim_device *dsim)
+@@ -1148,6 +1198,9 @@
  				dsim->id, dsim_state_names[next_state], ret);
  		goto out;
  	}
@@ -27303,7 +27495,43 @@ index 598b7531f..57d4ffc77 100644
  	dsim_info("dsim-%d %s - (state:%s -> %s)\n", dsim->id, __func__,
  			dsim_state_names[prev_state],
  			dsim_state_names[dsim->state]);
-@@ -2203,13 +2236,14 @@ static int dsim_init_resources(struct dsim_device *dsim, struct platform_device
+@@ -1488,10 +1541,10 @@
+ 
+ 	if (on)
+ 		ret = dsim_write_data(dsim, MIPI_DSI_DCS_SHORT_WRITE,
+-			MIPI_DCS_SET_DISPLAY_ON, 0, false);
++			MIPI_DCS_SET_DISPLAY_ON, 0, true);
+ 	else
+ 		ret = dsim_write_data(dsim, MIPI_DSI_DCS_SHORT_WRITE,
+-			MIPI_DCS_SET_DISPLAY_OFF, 0, false);
++			MIPI_DCS_SET_DISPLAY_OFF, 0, true);
+ 	if (ret < 0)
+ 		dsim_err("Failed to write test data!\n");
+ 	else
+@@ -1554,19 +1607,19 @@
+ 		break;
+ 	case 2:
+ 		ret = dsim_cmd_sysfs_write(dsim, true);
+-		dsim_info("Dsim write command, display on!!\n");
+ 		if (ret)
+ 			return ret;
++		dsim_info("Dsim display-on command FIFO drained\n");
+ 		break;
+ 	case 3:
+ 		ret = dsim_cmd_sysfs_write(dsim, false);
+-		dsim_info("Dsim write command, display off!!\n");
+ 		if (ret)
+ 			return ret;
++		dsim_info("Dsim display-off command FIFO drained\n");
+ 		break;
+ 	default :
+ 		dsim_info("unsupportable command\n");
+-		break;
++		return -EINVAL;
+ 	}
+ 
+ 	return count;
+@@ -2203,13 +2256,14 @@
  	}
  
  	dsim->res.irq = res->start;
