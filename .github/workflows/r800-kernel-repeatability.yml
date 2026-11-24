@@ -1,0 +1,147 @@
+name: SM-R800 kernel Image two-run SHA-256 comparison (NON-RELEASE)
+
+on:
+  push:
+    branches:
+      - "development/r800-kernel-repeatability-20261125"
+    paths:
+      - ".github/workflows/r800-kernel-repeatability.yml"
+      - "build/r800_reproducibility_audit.py"
+      - "build/r800_kernel_compile_smoke.sh"
+      - "build/r800_aosp_source_probe.sh"
+      - "build/r800_initramfs_compile_smoke.sh"
+      - "build/r800_initramfs_spec.py"
+      - "build/r800_embedded_initramfs_config.py"
+      - "build/r800_cpio_audit.py"
+      - "tests/test_reproducibility_audit.py"
+      - "src/initramfs/init-readonly.c"
+      - "src/kernel/r800.config"
+      - "src/kernel/r800-wearos.patch"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r800-kernel-two-run-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  two-identical-input-builds:
+    name: "Independent Linux Image compile: ${{ matrix.replica }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [a, b]
+    env:
+      R800_REPLICA: ${{ matrix.replica }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gate source tree and build evidence comparator
+        run: |
+          python3 -m unittest discover -s tests -p 'test_reproducibility_audit.py' -v
+          python3 -m unittest discover -s tests -p 'test_readonly_init.py' -v
+          python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
+          python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
+
+      - name: Get exactly pinned Exynos kernel source and verify patch
+        run: |
+          sh build/r800_aosp_source_probe.sh \
+            "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/r800-source" \
+            "$RUNNER_TEMP/r800-source.json"
+
+      - name: Expand isolated kernel checkout to build full Image
+        run: |
+          git -C "$RUNNER_TEMP/r800-source" sparse-checkout disable
+          test "$(git -C "$RUNNER_TEMP/r800-source" rev-parse HEAD)" = \
+            "50db73fc799f20a7120a8b5f653b16cc123d856f"
+          test -z "$(git -C "$RUNNER_TEMP/r800-source" status --porcelain)"
+
+      - name: Record exact runtime container identity
+        run: |
+          docker pull alpine:3.21
+          echo "R800_CONTAINER_IMAGE_ID=$(docker image inspect alpine:3.21 --format '{{.Id}}')" >> "$GITHUB_ENV"
+
+      - name: Build separate read-only /init and full kernel Image (no firmware)
+        run: |
+          docker run --rm --pull=never \
+            -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_SHA \
+            -e R800_CONTAINER_IMAGE_ID -e R800_REPLICA \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/r800-source:/source" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache \
+                clang19=19.1.4-r0 lld=19.1.4-r0 llvm19=19.1.4-r1 \
+                git make bash bc bison flex perl python3 openssl-dev \
+                elfutils-dev build-base linux-headers coreutils findutils
+              git config --global --add safe.directory /source
+              sh /repo/build/r800_initramfs_compile_smoke.sh \
+                /repo /scratch/r800-embedded-initramfs
+              R800_SMOKE_INITRAMFS_LIST=/scratch/r800-embedded-initramfs/initramfs.list \
+                sh /repo/build/r800_kernel_compile_smoke.sh \
+                /source /repo /scratch/r800-embedded-kernel
+              python3 /repo/build/r800_reproducibility_audit.py \
+                --output /scratch/r800-image-repeatability.json emit \
+                --image /scratch/r800-embedded-kernel/arch/arm64/boot/Image \
+                --config /scratch/r800-embedded-kernel/.config \
+                --patch /repo/src/kernel/r800-wearos.patch \
+                --init-evidence /scratch/r800-embedded-initramfs/initramfs-evidence.json \
+                --cpio-evidence /scratch/r800-embedded-kernel/embedded-cpio-audit.json \
+                --source /source \
+                --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+                --galwear-commit "$GITHUB_SHA" \
+                --container-image-id "$R800_CONTAINER_IMAGE_ID" \
+                --runner-replica "$R800_REPLICA"
+            '
+
+      - name: Upload JSON evidence only (never compiled Image, ELF or CPIO)
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-image-evidence-${{ matrix.replica }}
+          path: ${{ runner.temp }}/r800-image-repeatability.json
+          if-no-files-found: error
+          retention-days: 7
+
+  compare-images:
+    needs: two-identical-input-builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retrieve exactly two JSON evidence files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: r800-image-evidence-*
+          path: ${{ runner.temp }}/r800-two-builds
+          merge-multiple: false
+      - name: Compare Image, CPIO, init, compiler, configuration and container hashes
+        run: |
+          python3 build/r800_reproducibility_audit.py \
+            --output "$RUNNER_TEMP/r800-two-image-comparison.json" compare \
+            --first "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-a/r800-image-repeatability.json" \
+            --second "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "r800-two-image-comparison.json").read_text())
+          assert report["status"] == "TWO_RUN_HASH_MATCH"
+          assert report["two_run_byte_identity_observed"] is True
+          assert report["safe_to_flash"] is False
+          assert report["general_reproducibility_proven"] is False
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("Two independent kernel Image + embedded CPIO build SHA-256 matches.\n")
+              f.write("NON-RELEASE only; physical boot and secure-boot are unverified.\n")
+          PY
+      - name: Upload comparison JSON only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-kernel-two-run-comparison
+          path: ${{ runner.temp }}/r800-two-image-comparison.json
+          if-no-files-found: warn
+          retention-days: 7
