@@ -1,0 +1,84 @@
+name: SM-R800 kernel Image smoke build (non-release)
+
+on:
+  push:
+    branches:
+      - "development/r800-kernel-source-ci-20261124"
+    paths:
+      - ".github/workflows/r800-kernel-compile-smoke.yml"
+      - "build/r800_kernel_compile_smoke.sh"
+      - "build/r800_aosp_source_probe.sh"
+      - "tests/test_kernel_compile_recipe.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel-image-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compile recipe only
+        run: |
+          sh -n build/r800_kernel_compile_smoke.sh
+          python3 -m unittest discover -s tests -p 'test_kernel_compile_recipe.py' -v
+
+      - name: Fetch exact public kernel base and verify patch before any writes
+        run: |
+          sh build/r800_aosp_source_probe.sh \
+            "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/combined-exynos-src" \
+            "$RUNNER_TEMP/r800-source-preflight.json"
+
+      - name: Expand scratch source tree for compilation
+        run: |
+          git -C "$RUNNER_TEMP/combined-exynos-src" sparse-checkout disable
+          test "$(git -C "$RUNNER_TEMP/combined-exynos-src" rev-parse HEAD)" = \
+            "50db73fc799f20a7120a8b5f653b16cc123d856f"
+          git -C "$RUNNER_TEMP/combined-exynos-src" status --porcelain
+
+      - name: Compile Image with Alpine clang 19.1.4 (NO embedded initramfs)
+        run: |
+          docker run --rm --pull=always \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/combined-exynos-src:/source" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache \
+                clang19=19.1.4-r0 lld=19.1.4-r0 llvm19=19.1.4-r1 \
+                git make bash bc bison flex perl python3 openssl-dev \
+                elfutils-dev build-base linux-headers coreutils findutils
+              git config --global --add safe.directory /source
+              sh /repo/build/r800_kernel_compile_smoke.sh \
+                /source /repo /scratch/compiled-kernel
+            '
+
+      - name: Record evidence only, never upload compiled Image
+        if: always()
+        run: |
+          {
+            echo "source_base=50db73fc799f20a7120a8b5f653b16cc123d856f"
+            echo "build_kind=smoke_non_release"
+            echo "embedded_initramfs=disabled_in_temporary_config"
+            echo "device_contacted=false"
+            echo "image_published=false"
+            if [ -s "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image" ]; then
+              sha256sum "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image"
+            else
+              echo "image_available=false"
+            fi
+          } > "$RUNNER_TEMP/r800-smoke-evidence.txt"
+
+      - name: Upload non-firmware diagnostic reports only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-kernel-smoke-evidence-only
+          path: |
+            ${{ runner.temp }}/r800-source-preflight.json
+            ${{ runner.temp }}/r800-smoke-evidence.txt
+          if-no-files-found: warn
+          retention-days: 7
