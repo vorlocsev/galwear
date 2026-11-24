@@ -35,10 +35,16 @@ git -C "$SOURCE" apply "$REPO/src/kernel/r800-wearos.patch"
 mkdir -p "$OUT"
 cp "$REPO/src/kernel/r800.config" "$OUT/.config"
 
-# This source's R800 config references /root/initramfs/list.txt, absent from
-# the fork. A CI smoke compile cannot reproduce the release image. Disable
-# embedded initramfs ONLY in the temporary build config; never edit source.
-python3 - "$OUT/.config" <<'PY'
+# Only the temporary O= config is ever changed. By default this remains
+# the previously validated Image-only smoke build. Embedding experimental
+# AArch64 /init is an explicit separate, validated CI mode.
+if [ -n "${R800_SMOKE_INITRAMFS_LIST:-}" ]; then
+    python3 "$REPO/build/r800_embedded_initramfs_config.py" \
+        --config "$OUT/.config" \
+        --list "$R800_SMOKE_INITRAMFS_LIST" \
+        --report "$OUT/embedded-initramfs-gate.json"
+else
+    python3 - "$OUT/.config" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1])
@@ -48,6 +54,7 @@ if s.count(old) != 1:
     raise SystemExit("Unexpected kernel initramfs source; refusing smoke build")
 p.write_text(s.replace(old, 'CONFIG_INITRAMFS_SOURCE=""'))
 PY
+fi
 
 export KBUILD_BUILD_USER=galwear-ci
 export KBUILD_BUILD_HOST=github-actions
@@ -69,11 +76,27 @@ export CLANG_TRIPLE=aarch64-linux-gnu-
 export CROSS_COMPILE=aarch64-linux-gnu-
 
 make -C "$SOURCE" O="$OUT" olddefconfig
+if [ -n "${R800_SMOKE_INITRAMFS_LIST:-}" ]; then
+    # olddefconfig can silently correct invalid options. Confirm the exact
+    # validated file is still selected before any kernel compilation.
+    grep -Fqx "CONFIG_INITRAMFS_SOURCE=\"$R800_SMOKE_INITRAMFS_LIST\"" "$OUT/.config" || {
+        echo "Kernel olddefconfig did not preserve embedded initramfs source"; exit 2;
+    }
+fi
 make -C "$SOURCE" O="$OUT" -j2 Image
 test -s "$OUT/arch/arm64/boot/Image" || {
     echo "Kernel Image missing from smoke build"; exit 2;
 }
 
 echo "PASS: kernel Image compiled in isolated smoke environment"
-echo "NOTE: initramfs disabled in temporary config; image is NOT a flashable release"
+if [ -n "${R800_SMOKE_INITRAMFS_LIST:-}" ]; then
+    echo "NOTE: experimental initramfs embedded. /init NOT boot-tested; Image is NOT flashable"
+    # Linux 4.19 creates a gen_init_cpio archive when embedding user input.
+    # The exact archive filename is compression-dependent; require evidence
+    # of generated initramfs data, not merely a Kconfig path.
+    find "$OUT/usr" -maxdepth 1 -type f -name 'initramfs_data.cpio*' |
+        grep -q . || { echo "Embedded cpio build artifact not generated"; exit 2; }
+else
+    echo "NOTE: initramfs disabled in temporary config; image is NOT a flashable release"
+fi
 sha256sum "$OUT/arch/arm64/boot/Image"
