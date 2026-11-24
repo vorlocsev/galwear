@@ -18,6 +18,8 @@
  *
  *   r800boost [-t ms] <eventN> [eventN ...]   (run as root from android-helper.sh)
  */
+#include <errno.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
@@ -32,6 +34,10 @@
 #define BOOST_MS 1000
 #define GPU_BOOST "667"
 #define MAX_DEV  8
+#define MAX_BOOST_MS 5000
+static volatile sig_atomic_t stopping;
+
+static void stop(int sig) { (void)sig; stopping = 1; }
 
 static int write_str(const char *path, const char *s)
 {
@@ -55,8 +61,44 @@ static int read_str(const char *path, char *buf, size_t len)
 	if (n <= 0)
 		return -1;
 	buf[n] = 0;
-	buf[strcspn(buf, " \n")] = 0;
+	if ((size_t)n == len - 1 || memchr(buf, '\0', n))
+		return -1;
+	buf[strcspn(buf, "\n")] = 0;
 	return 0;
+}
+
+/* Kernel readback is either "-1" or "effective / requested".
+ * Restore only our own request, not a newer setting from another owner. */
+static int gpu_requested(const char *s)
+{
+	int effective, requested;
+	char extra;
+	if (!strcmp(s, "-1"))
+		return 0;
+	if (sscanf(s, "%d / %d %c", &effective, &requested, &extra) != 2 ||
+	    effective <= 0 || requested < 0)
+		return -1;
+	return requested;
+}
+
+static int restore_if_owned(const char *path, const char *expected, const char *previous)
+{
+	char current[32];
+	if (read_str(path, current, sizeof(current)))
+		return -1;
+	if (strcmp(current, expected))
+		return 0;
+	return write_str(path, previous);
+}
+
+static int restore_gpu(void)
+{
+	char state[32];
+	if (read_str(GPU "dvfs_min_lock", state, sizeof(state)))
+		return -1;
+	if (gpu_requested(state) != 667)
+		return 0;
+	return write_str(GPU "dvfs_min_lock", "0");
 }
 
 static long long now_ms(void)
@@ -72,6 +114,11 @@ int main(int argc, char **argv)
 	char max_f[32], min_f[32];
 	char gpu_lock[32] = "";
 	int n = 0, boosted = 0, i, gpu = 0, boost_ms = BOOST_MS;
+	int cpu_owned = 0, gpu_owned = 0, failed = 0;
+	struct sigaction sa = { .sa_handler = stop };
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGTERM, &sa, NULL) || sigaction(SIGINT, &sa, NULL) || sigaction(SIGHUP, &sa, NULL))
+		return 1;
 	long long until = 0;
 
 	if (read_str(POLICY "cpuinfo_max_freq", max_f, sizeof(max_f)) ||
@@ -86,8 +133,10 @@ int main(int argc, char **argv)
 		int fd;
 		if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
 			boost_ms = atoi(argv[++i]);
-			if (boost_ms < 50)
-				boost_ms = 50;
+			if (boost_ms < 50 || boost_ms > MAX_BOOST_MS) {
+				fprintf(stderr, "invalid boost duration (50..5000 ms)\n");
+				return 1;
+			}
 			continue;
 		}
 		fd = open(argv[i], O_RDONLY | O_CLOEXEC | O_NONBLOCK);
@@ -104,31 +153,76 @@ int main(int argc, char **argv)
 	fprintf(stderr, "r800boost: %d devices, boost %s kHz, rest %s kHz, %d ms, gpu %s\n",
 		n, max_f, min_f, boost_ms, gpu ? GPU_BOOST " MHz" : "left alone");
 
-	for (;;) {
-		int timeout = -1, r;
+	while (!stopping) {
+		int timeout = -1, r, activity = 0;
 		if (boosted) {
 			long long left = until - now_ms();
 			timeout = left > 0 ? (int)left : 0;
 		}
 		r = poll(pfd, n, timeout);
+		if (r < 0) {
+			if (errno == EINTR)
+				continue;
+			failed = 1;
+			break;
+		}
 		if (r > 0) {
 			struct input_event ev[16];
-			for (i = 0; i < n; i++)
-				if (pfd[i].revents & POLLIN)
-					while (read(pfd[i].fd, ev, sizeof(ev)) > 0)
-						;
+			for (i = 0; i < n; i++) {
+				if (pfd[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+					failed = 1;
+					break;
+				}
+				if (pfd[i].revents & POLLIN) {
+					for (int budget = 16; budget > 0; budget--) {
+						ssize_t bytes = read(pfd[i].fd, ev, sizeof(ev));
+						if (bytes < 0 && (errno == EAGAIN || errno == EINTR))
+							break;
+						if (bytes <= 0 || bytes % sizeof(ev)) {
+							failed = 1;
+							break;
+						}
+						for (size_t j = 0; j < (size_t)bytes / sizeof(ev[0]); j++)
+							if (ev[j].type == EV_KEY || ev[j].type == EV_ABS)
+								activity = 1;
+					}
+				}
+			}
+			if (failed || stopping)
+				break;
+		}
+		if (activity) {
 			if (!boosted) {
-				write_str(POLICY "scaling_min_freq", max_f);
-				if (gpu)
-					write_str(GPU "dvfs_min_lock", GPU_BOOST);
+				char state[32];
+				if (!read_str(POLICY "scaling_min_freq", state, sizeof(state)) &&
+				    !strcmp(state, min_f) && strcmp(min_f, max_f))
+					cpu_owned = !write_str(POLICY "scaling_min_freq", max_f);
+				if (gpu && !read_str(GPU "dvfs_min_lock", state, sizeof(state)) &&
+				    gpu_requested(state) == 0 && !strcmp(state, "-1"))
+					gpu_owned = !write_str(GPU "dvfs_min_lock", GPU_BOOST);
 				boosted = 1;
 			}
 			until = now_ms() + boost_ms;
-		} else if (r == 0 && boosted) {
-			write_str(POLICY "scaling_min_freq", min_f);
-			if (gpu)
-				write_str(GPU "dvfs_min_lock", "0");   /* 0 = unlock */
+		}
+		if (boosted && now_ms() >= until) {
+			if (cpu_owned && restore_if_owned(POLICY "scaling_min_freq", max_f, min_f)) {
+				failed = 1;
+				break;
+			}
+			cpu_owned = 0;
+			if (gpu_owned && restore_gpu()) {
+				failed = 1;
+				break;
+			}
+			gpu_owned = 0;
 			boosted = 0;
 		}
 	}
+	if (cpu_owned && restore_if_owned(POLICY "scaling_min_freq", max_f, min_f))
+		failed = 1;
+	if (gpu_owned && restore_gpu())
+		failed = 1;
+	for (i = 0; i < n; i++)
+		close(pfd[i].fd);
+	return failed ? 1 : 0;
 }
