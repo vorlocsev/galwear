@@ -4274,8 +4274,8 @@ index 000000000..ab0e5b77b
 +static int bbd_resume(void)
 +{
 +#ifdef CONFIG_SENSORS_SSP
-+	/* Call SSP resume */
-+	if (pssp_driver->driver.pm && pssp_driver->driver.pm->suspend)
++	/* Only call resume when the resume callback exists. */
++	if (pssp_driver && pssp_driver->driver.pm && pssp_driver->driver.pm->resume)
 +		pssp_driver->driver.pm->resume(&dummy_spi.dev);
 +#endif
 +#ifdef DEBUG_1HZ_STAT
