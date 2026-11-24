@@ -1,0 +1,30 @@
+name: SM-R800 two-run reproducibility evidence validation (offline)
+
+on:
+  push:
+    branches:
+      - "development/r800-reproducibility-audit-20261125"
+    paths:
+      - "build/r800_reproducibility_audit.py"
+      - "tests/test_reproducibility_audit.py"
+      - ".github/workflows/r800-reproducibility-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence-format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python 3 syntax and 17 synthetic comparator tests
+        run: |
+          python3 -m py_compile build/r800_reproducibility_audit.py tests/test_reproducibility_audit.py
+          python3 -m unittest discover -s tests -p 'test_reproducibility_audit.py' -v
+      - name: No compiled firmware released
+        run: |
+          test ! -e images/R800-WearOS.tar.md5
+          test ! -e images/vendor.img
+          test ! -e images/samsung/COMBINATION-FT40_R800XXU1ARI2_noCM.tar.md5
