@@ -20,6 +20,7 @@ on:
       - "src/kernel/r800.config"
       - "src/kernel/r800-wearos.patch"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
