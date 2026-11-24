@@ -2,7 +2,7 @@ name: SM-R800 integrated regression and HAL link (NON-RELEASE)
 on:
   push:
     branches:
-      - development/r800-hwc-fence-safety-20261125
+      - development/r800-decon-abi-20261125
   workflow_dispatch:
     inputs:
       kernel_repeatability:
@@ -53,6 +53,14 @@ jobs:
           git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
           git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
           git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
+      - name: Verify pinned kernel DECON layout on ARM32 and ARM64
+        run: |
+          git init "$RUNNER_TEMP/decon-source"
+          git -C "$RUNNER_TEMP/decon-source" remote add origin https://github.com/xanderlent/COMBINED_android-kernel-exynos.git
+          git -C "$RUNNER_TEMP/decon-source" fetch --depth=1 --filter=blob:none origin 50db73fc799f20a7120a8b5f653b16cc123d856f
+          test "$(git -C "$RUNNER_TEMP/decon-source" rev-parse FETCH_HEAD)" = 50db73fc799f20a7120a8b5f653b16cc123d856f
+          git -C "$RUNNER_TEMP/decon-source" show FETCH_HEAD:drivers/video/fbdev/exynos/dpu30/decon.h > "$RUNNER_TEMP/decon.h"
+          python3 build/r800_decon_abi_check.py --kernel-header "$RUNNER_TEMP/decon.h" --mirror src/hal/r800_decon_abi.h --ndk "$ANDROID_HOME/ndk/27.2.12479018" --scratch "$RUNNER_TEMP/decon-abi"
       - name: Compile and link all four HALs
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
