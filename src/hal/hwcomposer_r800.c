@@ -289,14 +289,25 @@ static void fence_scan(void)
 		     k[fd].signaled);
 }
 
-static void wait_fence(int fd)
+/* Consume exactly one acquire fence. Never access the buffer unless
+ * the fence is signaled; errors (including EINTR) drop this frame. */
+static int wait_fence(int fd)
 {
-	if (fd < 0)
-		return;
+	if (fd == -1)
+		return 0;
+	if (fd < -1)
+		return -EINVAL;
 	struct pollfd p = { .fd = fd, .events = POLLIN };
-	if (poll(&p, 1, 1000) == 0)
-		LOGW("acquire fence %d timed out", fd);
+	int r = poll(&p, 1, 1000);
+	int saved = errno;
 	close(fd);
+	if (r < 0)
+		return -saved;
+	if (r == 0)
+		return -ETIMEDOUT;
+	if (!(p.revents & POLLIN) || (p.revents & (POLLERR | POLLHUP | POLLNVAL)))
+		return -EIO;
+	return 0;
 }
 
 /* ---- framebuffer ---- */
@@ -312,6 +323,14 @@ static int fb_open(struct r800_hwc *h)
 	if (ioctl(h->fb_fd, FBIOGET_FSCREENINFO, &h->fix) || ioctl(h->fb_fd, FBIOGET_VSCREENINFO, &h->var)) {
 		LOGE("FBIOGET_*SCREENINFO: %s", strerror(errno));
 		return -errno;
+	}
+	/* CPU copy supports only the existing 32bpp framebuffer geometry. */
+	if (!h->var.xres || !h->var.yres || h->var.bits_per_pixel != 32 ||
+	    h->var.xres_virtual < h->var.xres || h->var.yres_virtual < h->var.yres ||
+	    (uint64_t)h->var.xres * 4 > h->fix.line_length ||
+	    (uint64_t)h->var.yres * h->fix.line_length > h->fix.smem_len) {
+		LOGE("unsupported framebuffer geometry");
+		return -EINVAL;
 	}
 	h->fb_mem = mmap(NULL, h->fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, h->fb_fd, 0);
 	if (h->fb_mem == MAP_FAILED) {
@@ -351,27 +370,27 @@ static void fb_fill(struct r800_hwc *h, uint32_t col)
 	ioctl(h->fb_fd, FBIOPAN_DISPLAY, &h->var);
 }
 
-static void fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
+static int fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 {
 	const unsigned int w = h->var.xres, ht = h->var.yres, bpp = h->var.bits_per_pixel / 8;
-	const unsigned int halves = (h->var.yres_virtual >= 2 * ht &&
-				     h->fix.smem_len >= 2 * ht * h->fix.line_length) ? 2 : 1;
+	const unsigned int halves = ((uint64_t)h->var.yres_virtual >= 2ULL * ht &&
+				     (uint64_t)h->fix.smem_len >= 2ULL * ht * h->fix.line_length) ? 2 : 1;
 	const unsigned int back = halves == 2 ? !h->front : 0;
 	void *src = NULL;
 	unsigned int y;
 	int stride, err, matched;
 
 	if (!h->fb_mem)
-		return;
+		return -EIO;
 	/* On any failure keep the previous frame on screen (the old debug colour
 	 * fills showed up as a white screen whenever gralloc ran out of memory). */
 	if (!h->gralloc || !buf)
-		return;
+		return -EIO;
 	if (!handle_ok(buf)) {        /* not a buffer (e.g. a color): keep the last frame */
 		static unsigned long bad;
 		if (bad++ < 5 || (bad % 600) == 0)
 			LOGW("skip %s: bad handle %p (%lu)", is_target ? "target" : "fallback", (void *)buf, bad);
-		return;
+		return -EIO;
 	}
 	stride = handle_stride(h, buf, (int)w, (int)ht, &matched);
 	{
@@ -387,15 +406,17 @@ static void fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 			if (skipped++ < 5 || (skipped % 600) == 0)
 				LOGW("skip %s buffer: %zu bytes < %zu needed (stride %d), skipped %lu",
 				     is_target ? "target" : "fallback", have, need, stride, skipped);
-			return;
+			return -EIO;
 		}
 	}
 	err = h->gralloc->lock(h->gralloc, buf, GRALLOC_USAGE_SW_READ_OFTEN, 0, 0, w, ht, &src);
 	if (err || !src) {
+		if (!err)
+			h->gralloc->unlock(h->gralloc, buf);
 		static unsigned long lockfail;
 		if (lockfail++ < 5 || (lockfail % 600) == 0)
 			LOGW("gralloc lock failed (%d), keeping last frame (%lu)", err, lockfail);
-		return;
+		return -EIO;
 	}
 	uint8_t *dst = h->fb_mem + (size_t)back * ht * h->fix.line_length;
 	if (h->swap_rb && bpp == 4) {
@@ -422,14 +443,20 @@ static void fb_present(struct r800_hwc *h, buffer_handle_t buf, int is_target)
 		for (y = 0; y < ht; y++)
 			memcpy(dst + (size_t)y * h->fix.line_length, (uint8_t *)src + (size_t)y * stride * bpp, w * bpp);
 	}
-	h->gralloc->unlock(h->gralloc, buf);
+	if (h->gralloc->unlock(h->gralloc, buf))
+		return -EIO;
 
-	h->var.yoffset = back * ht;
-	if (ioctl(h->fb_fd, FBIOPAN_DISPLAY, &h->var))
+	struct fb_var_screeninfo next = h->var;
+	next.yoffset = back * ht;
+	if (ioctl(h->fb_fd, FBIOPAN_DISPLAY, &next)) {
 		LOGW("FBIOPAN_DISPLAY: %s", strerror(errno));
+		return -EIO;
+	}
+	h->var.yoffset = next.yoffset;
 	h->front = back;
 	if (h->frames++ < 3 || (h->frames % 600) == 0)
 		LOGI("presented frame %lu (half %u)", h->frames, back);
+	return 0;
 }
 
 /* Returns 0 when DECON took the buffer; fills the layer's release fence and
@@ -444,8 +471,7 @@ static int wc_present(struct r800_hwc *h, hwc_layer_1_t *l, int *retire)
 	if (!l->handle || !handle_ok(l->handle) || nh->numFds < 1 || nh->data[0] < 0) {
 		static unsigned long bad;
 		if (l->handle && bad++ < 5)
-			LOGE("zero-copy: unusable handle %p (fds %d fd0 %d)", (void *)l->handle,
-			     l->handle ? nh->numFds : -1, l->handle && nh->numFds > 0 ? nh->data[0] : -1);
+			LOGE("zero-copy: unusable handle %p", (void *)l->handle);
 		return -1;
 	}
 	stride = handle_stride(h, l->handle, (int)w, (int)ht, &matched);
@@ -767,7 +793,6 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 
 	for (d = 0; d < n; d++) {
 		hwc_display_contents_1_t *c = displays[d];
-		buffer_handle_t fallback = NULL;
 		int retire = -1;
 
 		if (!c)
@@ -795,24 +820,23 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 				l->releaseFenceFd = -1;
 			}
 			c->retireFenceFd = retire;
+			if (ok)
+				presented = 1;
 			continue;
 		}
 		for (i = 0; i < c->numHwLayers; i++) {
 			hwc_layer_1_t *l = LAYER(c, i);
-			if (d == 0 && l->handle && l->compositionType != HWC_FRAMEBUFFER_TARGET &&
-			    !(i < 64 && (h->no_buffer >> i) & 1) && !(l->flags & HWC_SKIP_LAYER) &&
-			    handle_ok(l->handle))
-				fallback = l->handle;
 			l->releaseFenceFd = -1;
 			if (d == 0 && l->compositionType == HWC_FRAMEBUFFER_TARGET) {
 				if (!h->blanked && h->zerocopy && wc_present(h, l, &retire) == 0) {
 					presented = 1;
 					continue;
 				}
-				wait_fence(l->acquireFenceFd);
+				int ready = wait_fence(l->acquireFenceFd);
 				l->acquireFenceFd = -1;
-				if (!h->blanked) {
-					fb_present(h, l->handle, 1);
+				if (ready) {
+					LOGW("skip frame: acquire fence failed (%d)", ready);
+				} else if (!h->blanked && fb_present(h, l->handle, 1) == 0) {
 					presented = 1;
 				}
 			} else if (l->acquireFenceFd >= 0) {
@@ -820,20 +844,12 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 				l->acquireFenceFd = -1;
 			}
 		}
-		/* No explicit FB target: present the last layer that has a buffer. */
-		if (d == 0 && !presented && !h->blanked && fallback) {
-			hwc_layer_1_t *fl = NULL;
-			for (i = 0; i < c->numHwLayers; i++)
-				if (LAYER(c, i)->handle == fallback)
-					fl = LAYER(c, i);
-			if (!(h->zerocopy && fl && wc_present(h, fl, &retire) == 0))
-				fb_present(h, fallback, 0);
-			presented = 1;
-		}
+		/* No client target: do not access a layer whose fence was consumed. */
 		/* no usable layer: keep the last frame (was an orange debug fill) */
 		c->retireFenceFd = retire;
 	}
-	doze_presented(h);
+	if (presented)
+		doze_presented(h);
 	return 0;
 }
 
