@@ -116,5 +116,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   kernel:
-    if: github.event_name == 'workflow_dispatch' && inputs.kernel_repeatability
     uses: ./.github/workflows/r800-kernel-repeatability.yml
+    with:
+      single_build: ${{ github.event_name != 'workflow_dispatch' || !inputs.kernel_repeatability }}
