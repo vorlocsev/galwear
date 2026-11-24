@@ -232,6 +232,34 @@ class Stage10Tests(unittest.TestCase):
         with self.assertRaisesRegex(SafetyError, "Symlink in source inventory"):
             provenance.prebuild(self.dir)
 
+    def test_command_line_preflight_and_finalize_create_reports(self):
+        from contextlib import redirect_stdout
+        output = self.dir / "preflight-evidence.json"
+        finished = self.dir / "final-evidence.json"
+        with redirect_stdout(io.StringIO()):
+            result = provenance.main([
+                "preflight", "--release-tree", str(self.dir), "--report", str(output)])
+        self.assertEqual(result, 0)
+        self.assertTrue(output.exists())
+        with redirect_stdout(io.StringIO()):
+            result = provenance.main([
+                "finalize", "--release-tree", str(self.dir),
+                "--input-manifest", str(output), "--report", str(finished)])
+        self.assertEqual(result, 0)
+        text = finished.read_text(encoding="utf-8")
+        self.assertIn('"status": "RELEASE_OUTPUT_STRUCTURAL_PASS_ONLY"', text)
+        self.assertIn('"safe_to_flash": false', text)
+
+    def test_command_line_finalize_needs_snapshot(self):
+        from contextlib import redirect_stderr
+        output = self.dir / "none.json"
+        with redirect_stderr(io.StringIO()):
+            result = provenance.main([
+                "finalize", "--release-tree", str(self.dir),
+                "--report", str(output)])
+        self.assertEqual(result, 2)
+        self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
