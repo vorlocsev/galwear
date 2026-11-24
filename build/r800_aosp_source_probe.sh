@@ -48,7 +48,13 @@ ACTUAL=$(git -C "$SOURCE" rev-parse HEAD)
     exit 4
 }
 
-# Python preflight requires a clean HEAD and uses only git apply --check.
+# Print Git's own read-only patch diagnostics rather than hiding them in
+# the JSON preflight wrapper. No file is changed by --check.
+if ! git -C "$SOURCE" apply --check "$REPO/src/kernel/r800-wearos.patch"; then
+    echo "Exact pinned kernel patch context/mode mismatch (no changes applied)" >&2
+    exit 6
+fi
+# Python preflight also verifies pinned HEAD and the tree remained clean.
 python3 "$REPO/build/r800_kernel_preflight.py" \
     --repository "$REPO" \
     --source-tree "$SOURCE" \
