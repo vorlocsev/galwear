@@ -47,9 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install exact NDK release
+        id: ndk
         run: |
           sdkmanager --install "ndk;27.2.12479018"
       - name: Fetch tinyalsa header source by immutable commit
+        id: tinyalsa
         run: |
           git init "$RUNNER_TEMP/tinyalsa"
           git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
@@ -74,12 +76,22 @@ jobs:
           (Path(os.environ["RUNNER_TEMP"]) / "decon-abi.json").write_text(json.dumps(report) + "\n")
           PY
       - name: Check full kernel patch against pinned source
+        if: ${{ !cancelled() }}
         run: |
           sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/r800-patch-source" "$RUNNER_TEMP/r800-patch-check.json"
       - name: Compile and link all four HALs
+        if: ${{ !cancelled() && steps.ndk.outcome == 'success' && steps.tinyalsa.outcome == 'success' }}
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh build/r800_hal_link_smoke.sh "$GITHUB_WORKSPACE" "$ANDROID_HOME/ndk/27.2.12479018" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+      - name: Upload compiler diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-hal-compile-diagnostics
+          path: ${{ runner.temp }}/r800-hal/objects/hal-compile-diagnostics.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Collect mandatory JSON reports
         run: |
           mkdir "$RUNNER_TEMP/hal-evidence"
