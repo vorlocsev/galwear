@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
+#include <limits.h>
 #include <math.h>
 #include <poll.h>
 #include <pthread.h>
@@ -367,7 +368,8 @@ static int write_sysfs(const char *node, long long value)
 		return -errno;
 	}
 	int n = snprintf(buf, sizeof(buf), "%lld", value);
-	int r = write(fd, buf, n) == n ? 0 : -errno;
+	ssize_t written = write(fd, buf, n);
+	int r = written == n ? 0 : written < 0 ? -errno : -EIO;
 	if (r)
 		LOGE("write %s=%s: %s", path, buf, strerror(-r));
 	close(fd);
@@ -409,15 +411,42 @@ static void open_inputs(void)
  * writing just Android's sensors dropped bit 18 on every light-sensor toggle, the
  * hub then decided the watch was off the wrist and stopped wrist up/down.
  */
-static long long read_enable_mask(void)
+/* Strict decimal mask; never treat missing or malformed data as zero. */
+static int parse_enable_mask(const char *buf, long long *mask)
 {
-	char buf[32] = { 0 };
+	char *end;
+	if (*buf < '0' || *buf > '9')
+		return -EINVAL;
+	errno = 0;
+	long long value = strtoll(buf, &end, 10);
+	if (errno == ERANGE || value < 0)
+		return -ERANGE;
+	if (*end == '\n')
+		end++;
+	if (*end)
+		return -EINVAL;
+	*mask = value;
+	return 0;
+}
+
+static int read_enable_mask(long long *mask)
+{
+	char buf[32];
 	int fd = open(SSP_SYSFS "enable", O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
-		return 0;
-	(void)read(fd, buf, sizeof(buf) - 1);
+		return -errno;
+	ssize_t n;
+	do {
+		n = read(fd, buf, sizeof(buf) - 1);
+	} while (n < 0 && errno == EINTR);
+	int saved = errno;
 	close(fd);
-	return strtoll(buf, NULL, 10);
+	if (n < 0)
+		return -saved;
+	if (n == 0 || n == sizeof(buf) - 1 || memchr(buf, '\0', n))
+		return -EIO;
+	buf[n] = 0;
+	return parse_enable_mask(buf, mask);
 }
 
 static int apply_enable_mask(void)
@@ -428,8 +457,14 @@ static int apply_enable_mask(void)
 		if (hub[h].enabled)
 			want |= 1LL << hub[h].ssp_bit;
 	}
-	long long mask = (read_enable_mask() & ~ours) | want;
-	return write_sysfs("enable", mask);
+	long long current;
+	int r = read_enable_mask(&current);
+	if (r) {
+		LOGE("SSP enable mask read failed: %d; refusing write", r);
+		return r;
+	}
+	long long mask = (current & ~ours) | want;
+	return mask == current ? 0 : write_sysfs("enable", mask);
 }
 
 static int valid(int handle)
@@ -458,10 +493,14 @@ static void hr_hub(int on)
 {
 	if (hub[H_HR].enabled == on)
 		return;
+	int previous = hub[H_HR].enabled;
+	if (on && write_sysfs(hub[H_HR].delay_node, HR_HUB_PERIOD_NS))
+		return;
 	hub[H_HR].enabled = on;
-	if (on)
-		write_sysfs(hub[H_HR].delay_node, HR_HUB_PERIOD_NS);
-	apply_enable_mask();
+	if (apply_enable_mask()) {
+		hub[H_HR].enabled = previous;
+		LOGE("HR hub transition failed");
+	}
 }
 
 /* keep the AP up for the length of a burst (needs group wakelock; best effort) */
@@ -585,10 +624,16 @@ static int dev_activate(struct sensors_poll_device_t *dev, int handle, int enabl
 		return 0;
 	}
 	pthread_mutex_lock(&lock);
-	hub[handle].enabled = !!enabled;
+	int previous = hub[handle].enabled;
+	int r = 0;
 	if (enabled && hub[handle].period_ns)
-		write_sysfs(hub[handle].delay_node, hub[handle].period_ns);
-	int r = apply_enable_mask();
+		r = write_sysfs(hub[handle].delay_node, hub[handle].period_ns);
+	if (!r) {
+		hub[handle].enabled = !!enabled;
+		r = apply_enable_mask();
+		if (r)
+			hub[handle].enabled = previous;
+	}
 	pthread_mutex_unlock(&lock);
 	LOGI("activate %d = %d (%d)", handle, enabled, r);
 	return r;
@@ -623,8 +668,9 @@ static int dev_set_delay(struct sensors_poll_device_t *dev, int handle, int64_t 
 		return r;
 	}
 	pthread_mutex_lock(&lock);
-	hub[handle].period_ns = ns;
 	int r = hub[handle].enabled ? write_sysfs(hub[handle].delay_node, ns) : 0;
+	if (!r)
+		hub[handle].period_ns = ns;
 	pthread_mutex_unlock(&lock);
 	return r;
 }
@@ -856,6 +902,8 @@ static void ctx_read(sensors_event_t *data, int count, int *n_out)
 static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, int count)
 {
 	(void)dev;
+	if (!data || count <= 0)
+		return -EINVAL;
 	struct pollfd pfd[H_COUNT + 2];
 	int idx[H_COUNT + 2];
 	int n_out = 0;
@@ -916,11 +964,15 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 				continue;
 			return -errno;
 		}
+		if (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL))
+			return -EIO;
 		if (pfd[0].revents & POLLIN) {
 			char buf[16];
 			(void)read(wake_pipe[0], buf, sizeof(buf));
 		}
 		for (int i = 1; i < n && n_out < count; i++) {
+			if (pfd[i].revents & (POLLERR | POLLHUP | POLLNVAL))
+				return n_out ? n_out : -EIO;
 			if (!(pfd[i].revents & POLLIN))
 				continue;
 			if (idx[i] == H_WRIST_TILT) {
@@ -928,11 +980,14 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 				continue;
 			}
 			struct hub_sensor *s = &hub[idx[i]];
-			struct input_event ie[32];
+			/* Read one record at a time so reaching caller capacity
+			 * never discards unread records from a larger read. */
+			struct input_event ie[1];
 			ssize_t r;
 			while (n_out < count && (r = read(s->fd, ie, sizeof(ie))) > 0) {
-				int k = r / sizeof(ie[0]);
-				for (int j = 0; j < k && n_out < count; j++) {
+				if (r != sizeof(ie))
+					return n_out ? n_out : -EIO;
+				for (int j = 0; j < 1; j++) {
 					if (ie[j].type == EV_REL) {
 						int c = ie[j].code;
 						if (c >= s->ts_code && c < s->ts_code + 4)
@@ -997,7 +1052,20 @@ static int open_sensors(const struct hw_module_t *module, const char *id, struct
 		open_inputs();
 		for (int h = H_ACCEL; h < H_COUNT; h++)
 			hub[h].enabled = 0;
-		apply_enable_mask();
+		int r = apply_enable_mask();
+		if (r) {
+			for (int h = H_ACCEL; h < H_COUNT; h++) {
+				if (hub[h].fd >= 0)
+					close(hub[h].fd);
+				hub[h].fd = -1;
+			}
+			close(wake_pipe[0]);
+			close(wake_pipe[1]);
+			wake_pipe[0] = wake_pipe[1] = -1;
+			pthread_mutex_unlock(&lock);
+			free(dev);
+			return r;
+		}
 	}
 	pthread_mutex_unlock(&lock);
 
