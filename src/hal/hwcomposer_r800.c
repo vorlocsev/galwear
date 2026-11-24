@@ -95,6 +95,7 @@ struct r800_hwc {
 	int blanked;
 	int power_mode;                    /* last confirmed HWC_POWER_MODE_* */
 	int power_uncertain;               /* failed transition: block presents until recovery */
+	int64_t power_retry_ns;            /* failed automatic resume backoff */
 	size_t layer_stride;                /* selected once at open */
 	int logged_handle;
 	unsigned long frames;
@@ -731,15 +732,19 @@ static int r800_prepare(hwc_composer_device_1_t *dev, size_t n, hwc_display_cont
 	struct r800_hwc *h = (struct r800_hwc *)dev;
 	size_t i;
 	int nl = 0, ok;
+	pthread_mutex_lock(&h->doze_lock);
 	h->ovl_n = 0;
 	if (validate_displays(h, n, displays)) {
 		LOGE("prepare: incompatible layer list (stride %zu)", h->layer_stride);
+		pthread_mutex_unlock(&h->doze_lock);
 		return -EINVAL;
 	}
-	if (n < 1 || !displays[0])
+	if (n < 1 || !displays[0]) {
+		pthread_mutex_unlock(&h->doze_lock);
 		return 0;
+	}
 	h->no_buffer = 0;
-	ok = ovl_enabled(h);
+	ok = !h->power_uncertain && ovl_enabled(h);
 	for (i = 0; i < displays[0]->numHwLayers; i++) {
 		hwc_layer_1_t *l = LAYER(displays[0], i);
 		if ((l->compositionType == HWC_BACKGROUND || l->compositionType == HWC_SIDEBAND) && i < 64)
@@ -759,6 +764,7 @@ static int r800_prepare(hwc_composer_device_1_t *dev, size_t n, hwc_display_cont
 	}
 	if (!h->ovl_n)
 		h->gpu_frames++;
+	pthread_mutex_unlock(&h->doze_lock);
 	return 0;
 }
 
@@ -1135,15 +1141,19 @@ static int doze_idle_ms(void)
 static int doze_resume(struct r800_hwc *h)
 {
 	if ((h->doze_susp || h->power_uncertain) && h->power_mode == HWC_POWER_MODE_DOZE) {
+		if (mono_ns() < h->power_retry_ns)
+			return -EAGAIN;
 		uint32_t pwr = R800_DISP_PWR_DOZE;
 		if (ioctl(h->fb_fd, R800_S3CFB_POWER_MODE, &pwr)) {
 			int r = -errno;
 			LOGE("doze resume: %s", strerror(-r));
 			h->power_uncertain = 1;
+			h->power_retry_ns = mono_ns() + 1000000000LL;
 			return r;
 		}
 		h->doze_susp = 0;
 		h->power_uncertain = 0;
+		h->power_retry_ns = 0;
 		h->last_present_ns = mono_ns();
 		pthread_cond_signal(&h->doze_cond);
 	}
@@ -1196,6 +1206,7 @@ static void *doze_idle_loop(void *arg)
 			if (ioctl(h->fb_fd, R800_S3CFB_POWER_MODE, &pwr)) {
 				LOGE("doze suspend: %s", strerror(errno));
 				h->power_uncertain = 1; /* next frame must explicitly resume */
+				h->power_retry_ns = mono_ns() + 1000000000LL;
 				continue;
 			}
 			h->doze_susp = 1;
@@ -1254,8 +1265,10 @@ static int r800_set_power_mode(hwc_composer_device_1_t *dev, int disp, int mode)
 		h->power_mode = mode;
 		h->last_present_ns = mono_ns();
 		h->power_uncertain = 0;
+		h->power_retry_ns = 0;
 	} else {
 		h->power_uncertain = 1;
+		h->power_retry_ns = mono_ns() + 1000000000LL;
 	}
 	pthread_cond_signal(&h->doze_cond);
 	pthread_mutex_unlock(&h->doze_lock);
