@@ -340,22 +340,25 @@ fi
     for i in $($B seq 1 120); do [ "$(/system/bin/getprop sys.boot_completed)" = 1 ] && break; $B sleep 1; done
     # boot got through: reset start.sh's Gemini priv-app failure counter
     [ "$(/system/bin/getprop sys.boot_completed)" = 1 ] && echo 0 > /oem/r800dev/android/gemini.tries
-    # DISPLAY POWER POLICY: real panel power-down is an independent,
-    # experimental opt-in. Retain the kernel's keep-panel-on default unless
-    # Android has actually completed boot and the marker is present.
-    if [ "$(/system/bin/getprop sys.boot_completed)" = 1 ]; then
-        if [ -f /oem/r800dev/android/PANEL_REALBLANK ]; then
-            if echo 0 > /sys/module/decon/parameters/r800_keep_panel_on 2>/dev/null; then
-                k "power: experimental real panel blank enabled"
-            else
-                k "power: real panel blank parameter unavailable"
-            fi
+    # Real blank requires both the kernel and HWC opt-in. Default DCS only.
+    /system/bin/setprop debug.r800.realblank 0
+    PANEL_GATE=/sys/module/decon/parameters/r800_keep_panel_on
+    if [ "$(/system/bin/getprop sys.boot_completed)" = 1 ] &&
+       [ -f /oem/r800dev/android/PANEL_REALBLANK ]; then
+        if printf '0\n' > "$PANEL_GATE" 2>/dev/null &&
+           [ "$($B cat "$PANEL_GATE" 2>/dev/null)" = 0 ] &&
+           /system/bin/setprop debug.r800.realblank 1 &&
+           [ "$(/system/bin/getprop debug.r800.realblank)" = 1 ]; then
+            k "power: experimental real panel blank enabled"
         else
-            echo 1 > /sys/module/decon/parameters/r800_keep_panel_on 2>/dev/null ||
-                k "power: keep-panel-on parameter unavailable"
+            /system/bin/setprop debug.r800.realblank 0
+            printf '1\n' > "$PANEL_GATE" 2>/dev/null ||
+                k "power: panel gate reset unavailable"
+            k "power: real panel blank opt-in failed"
         fi
     else
-        k "power: panel policy unchanged; Android boot not complete"
+        printf '1\n' > "$PANEL_GATE" 2>/dev/null ||
+            k "power: keep-panel-on parameter unavailable"
     fi
     # END DISPLAY POWER POLICY
     # storaged is left running (2026-11-19): with it stopped, system_server's
