@@ -2,7 +2,7 @@ name: SM-R800 integrated regression and HAL link (NON-RELEASE)
 on:
   push:
     branches:
-      - development/r800-decon-fence-ownership-20261125
+      - development/r800-decon-copyout-20261125
   workflow_dispatch:
     inputs:
       kernel_repeatability:
