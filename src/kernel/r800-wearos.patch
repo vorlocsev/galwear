@@ -27257,7 +27257,9 @@ index 000000000..154e995ab
 +	.set_light	= s6e36w3x01_set_light,
 +};
 diff --git a/include/dt-bindings/input/linux-event-codes.h b/include/dt-bindings/input/linux-event-codes.h
-index 693bbcd26..5bef201e9 120000
+old mode 120000
+new mode 100644
+index 693bbcd26..5bef201e9
 --- a/include/dt-bindings/input/linux-event-codes.h
 +++ b/include/dt-bindings/input/linux-event-codes.h
 @@ -1 +1,857 @@
