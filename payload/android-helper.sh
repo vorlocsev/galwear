@@ -30,7 +30,18 @@ $B mkdir -p /dev/block/bootdevice/by-name
 # wpcd holds its own wakelock on the charging pad), but the watch can hang
 # in it: 2026-11-16 it froze ~16 min into a sleep trial and needed a forced
 # restart. Opt in with android/SLEEP until that is fixed.
-[ -f /oem/r800dev/android/SLEEP ] || echo r800helper > /sys/power/wake_lock 2>/dev/null
+# System suspend and per-core CPU idle are separate power states.
+# Keep system suspend guarded by default; explicit SLEEP is experimental.
+SLEEPF=/oem/r800dev/android/SLEEP
+if [ -f "$SLEEPF" ]; then
+    k "power: full suspend enabled by SLEEP opt-in (unverified stability)"
+else
+    if echo r800helper > /sys/power/wake_lock 2>/dev/null; then
+        k "power: system suspend guarded"
+    else
+        k "power: WARNING: r800helper wake lock unavailable"
+    fi
+fi
 # Composer DECON overlays off by default (2026-11-19): A/B with the same
 # 30 s scroll had 10.7% of SysUI frames >16 ms with overlays vs 6.7% with
 # GPU composition (p99 150 vs 73 ms), although overlays halve SF/GPU work.
@@ -534,9 +545,18 @@ fi
         fi
         $B sleep 7200
       done ) > /dev/null 2>&1 &
-    # CPU power-down idle state is disabled by default in the cpuidle driver;
-    # with it (and SICD) both cores power down when idle.
-    for c in 0 1; do echo 0 > /sys/devices/system/cpu/cpu$c/cpuidle/state1/disable 2>/dev/null; done
+    # CPU deep-idle is independent of system suspend. Separate the flags so
+    # either mechanism can be tested on its own. Keep state1 off by default;
+    # opt in only with android/CPUIDLE_DEEP (may hang, may save battery).
+    for c in 0 1; do
+        IDLE=/sys/devices/system/cpu/cpu$c/cpuidle/state1/disable
+        [ -e "$IDLE" ] || continue
+        if [ -f /oem/r800dev/android/CPUIDLE_DEEP ]; then
+            echo 0 > "$IDLE" 2>/dev/null || k "power: state1 enable failed cpu$c"
+        else
+            echo 1 > "$IDLE" 2>/dev/null || k "power: state1 disable failed cpu$c"
+        fi
+    done
 
     # /data is only 190 MB: Play Store keeps re-downloading an update (35-57 MB a
     # try) that can never install, until writes fail with ENOSPC (overlays, prefs
