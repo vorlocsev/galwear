@@ -32,6 +32,9 @@ def fake_pit(overrides=None, omit=(), corrupt_magic=False):
     for index, (name, partition_id) in enumerate(entries.items()):
         begin = 28 + 132 * index
         struct.pack_into("<I", out, begin + 8, partition_id)
+        # Synthetic capacity: 8 MiB per partition, sequential sectors.
+        # Not derived from a real Samsung PIT.
+        struct.pack_into("<II", out, begin + 20, index * 16384, 16384)
         encoded = name.encode("ascii")
         out[begin + 68:begin + 68 + len(encoded)] = encoded
     return bytes(out)
