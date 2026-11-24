@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 import netodin
 import r800_geometry as geo
 from r800_safety import EXPECTED_IMAGES, SafetyError
-from test_installer_guard import fake_pit, synthetic_archive
+from test_installer_guard import fake_pit
+from test_recovery_audit import build_archives
 from test_netodin_protocol import SimulatedWatch, SimulatedServer
 
 
@@ -107,15 +108,15 @@ class HardwareFreePrewriteTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.path = Path(tmp.name) / "R800-WearOS.tar.md5"
-        synthetic_archive(self.path)
+        self.path, self.combination = build_archives(Path(tmp.name))
 
     def _attempt(self, pit):
         watch = SimulatedWatch(pit_data=pit)
         server = SimulatedServer(watch)
         with mock.patch.object(netodin.socket, "socket", return_value=server):
             with mock.patch.object(netodin, "format_progress"):
-                netodin.flash_ap_package(str(self.path), auto_reboot=False)
+                netodin.flash_ap_package(str(self.path), auto_reboot=False,
+                                         combination_path=str(self.combination))
         return watch
 
     def test_good_geometry_reaches_transfer_in_simulation(self):
@@ -127,7 +128,8 @@ class HardwareFreePrewriteTests(unittest.TestCase):
         watch = SimulatedWatch(pit_data=pit)
         with mock.patch.object(netodin.socket, "socket", return_value=SimulatedServer(watch)):
             with self.assertRaises(SafetyError):
-                netodin.flash_ap_package(str(self.path), auto_reboot=False)
+                netodin.flash_ap_package(str(self.path), auto_reboot=False,
+                                         combination_path=str(self.combination))
         self.assertEqual(watch.transfer_commands, [])
         self.assertEqual(watch.raw_blocks, 0)
 
@@ -136,7 +138,8 @@ class HardwareFreePrewriteTests(unittest.TestCase):
         watch = SimulatedWatch(pit_data=pit)
         with mock.patch.object(netodin.socket, "socket", return_value=SimulatedServer(watch)):
             with self.assertRaises(SafetyError):
-                netodin.flash_ap_package(str(self.path), auto_reboot=False)
+                netodin.flash_ap_package(str(self.path), auto_reboot=False,
+                                         combination_path=str(self.combination))
         self.assertEqual(watch.transfer_commands, [])
         self.assertEqual(watch.raw_blocks, 0)
 
