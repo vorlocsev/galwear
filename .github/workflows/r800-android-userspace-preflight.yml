@@ -1,0 +1,35 @@
+name: SM-R800 Android userspace static contract (NON-RELEASE)
+
+on:
+  push:
+    branches:
+      - development/r800-android-userspace-preflight-20261125
+    paths:
+      - .github/workflows/r800-android-userspace-preflight.yml
+      - build/r800_android_userspace_preflight.py
+      - tests/test_android_userspace_preflight.py
+      - src/kernel/r800.config
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-structure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synthetic ARM and AArch64 fixtures
+        run: python3 -m unittest discover -s tests -p 'test_android_userspace_preflight.py' -v
+      - name: Check actual repository Kconfig contract
+        run: |
+          PYTHONPATH=build python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import r800_android_userspace_preflight as audit
+          report = audit.config_check(Path("src/kernel/r800.config"))
+          print(json.dumps(report, indent=2))
+          assert not report["missing_or_wrong"]
+          print("STATIC_KCONFIG_PASS; no Android image or physical watch tested")
+          PY
