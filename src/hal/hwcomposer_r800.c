@@ -732,7 +732,7 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 	int present_ok;
 	pthread_mutex_lock(&h->doze_lock);
 	power_ret = doze_resume_locked(h);
-	present_ok = !power_ret && !h->blanked && !h->power_unknown;
+	present_ok = !power_ret && !h->blanked && !h->power_unknown && !h->doze_susp;
 
 	static int calls;
 	/* setprop debug.r800.dumplayers N: log the next N frames' layer lists */
@@ -1260,15 +1260,13 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 	h->base.getDisplayAttributes = r800_get_display_attributes;
 
 	if (fb_open(h)) {
+		h->power_unknown = 1;
 		LOGE("framebuffer unavailable (errno %d): frames will be dropped", errno);
 	} else {
 		LOGE("fb ok: %ux%u %ubpp smem=%u", h->var.xres, h->var.yres,
 		     h->var.bits_per_pixel, h->fix.smem_len);
 	}
 	h->gralloc = load_gralloc();
-	pthread_create(&h->vsync_thread, NULL, vsync_loop, h);
-	pthread_create(&h->idle_thread, NULL, doze_idle_loop, h);
-
 	if (h->fb_mem) {
 		/* The initramfs had fb0 open and released it at handover, which
 		 * powers the panel down; unblank + re-apply the mode to wake it.
@@ -1288,10 +1286,15 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 				LOGE("could not set debug.r800.hwc_woke");
 			}
 		} else {
+			/* Retain the last frame, but require an explicit power transition. */
+			h->power_unknown = 1;
 			LOGE("composer restart: DECON left as is (no mode re-apply/unblank)");
 		}
 		/* no bring-up paint: after a composer restart the last frame stays */
 	}
+	/* Publish startup state before the worker threads can read it. */
+	pthread_create(&h->vsync_thread, NULL, vsync_loop, h);
+	pthread_create(&h->idle_thread, NULL, doze_idle_loop, h);
 	*device = &h->base.common;
 	LOGI("opened (HWC 1.4, DECON overlays for <=3 plain layers, else client composition -> DECON zero-copy)");
 	return 0;
