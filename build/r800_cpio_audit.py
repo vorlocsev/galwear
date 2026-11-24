@@ -18,12 +18,12 @@ from r800_initramfs_spec import validate_init
 MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 MAX_ENTRY_COUNT = 64
 EXPECTED = {
-    "dev": 0o040000,
-    "dev/console": 0o020000,
-    "proc": 0o040000,
-    "sys": 0o040000,
-    "data": 0o040000,
-    "init": 0o100000,
+    "dev": (0o040000, 0o755),
+    "dev/console": (0o020000, 0o600),
+    "proc": (0o040000, 0o555),
+    "sys": (0o040000, 0o555),
+    "data": (0o040000, 0o755),
+    "init": (0o100000, 0o755),
 }
 
 
@@ -97,10 +97,15 @@ def inspect_cpio(archive: Path, init_binary: Path) -> dict:
             raise CpioError(f"Unexpected CPIO entry: {name!r}")
         if name in names:
             raise CpioError(f"Duplicate CPIO entry: {name}")
-        if mode & 0o170000 != EXPECTED[name]:
+        expected_type, expected_perms = EXPECTED[name]
+        if mode & 0o170000 != expected_type:
             raise CpioError(f"Wrong CPIO file type: {name}")
+        if mode & 0o7777 != expected_perms:
+            raise CpioError(f"Wrong CPIO permissions: {name}")
         if fields[2] or fields[3]:
             raise CpioError("Unexpected nonroot CPIO owner")
+        if name == "dev/console" and (fields[9], fields[10]) != (5, 1):
+            raise CpioError("Unexpected /dev/console device major/minor")
         if name == "init":
             if hashlib.sha256(content[data_pos:end]).hexdigest() != elf["sha256"]:
                 raise CpioError("Embedded /init differs from validated ELF")
