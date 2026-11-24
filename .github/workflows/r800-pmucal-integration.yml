@@ -1,8 +1,8 @@
-name: SM-R800 PMUCAL integration (NON-RELEASE)
+name: SM-R800 power subsystem integration (NON-RELEASE)
 on:
   push:
     branches:
-      - development/r800-pmucal-integration-20261125
+      - development/r800-power-integration-20261125
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,6 +23,19 @@ jobs:
       - name: Run complete offline regression, including exact C harnesses
         run: |
           python3 build/r800_integrated_regression.py --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/r800-integrated-regression.json"
+      - name: Require exact-head regression report
+        run: |
+          python3 - "$RUNNER_TEMP/r800-integrated-regression.json" <<'PY'
+          import hashlib, json, os, sys
+          from pathlib import Path
+          r = json.loads(Path(sys.argv[1]).read_text())
+          assert r["status"] == "PASS"
+          assert r["commit"] == os.environ["GITHUB_SHA"]
+          assert r["patch_sha256"] == hashlib.sha256(Path("src/kernel/r800-wearos.patch").read_bytes()).hexdigest()
+          assert len(r["required_power_modules"]) == 8 and not r["missing_power_modules"]
+          assert r["discovered"] == r["executed"] and r["executed"] > 0
+          assert r["safe_to_flash"] is False
+          PY
       - name: Publish exact-head JSON evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -52,6 +65,17 @@ jobs:
             "$RUNNER_TEMP/combined-exynos-src" \
             "$RUNNER_TEMP/r800-source-preflight.json"
 
+      - name: Verify source preflight matches current patch
+        run: |
+          python3 - "$RUNNER_TEMP/r800-source-preflight.json" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          r = json.loads(Path(sys.argv[1]).read_text())
+          assert r["source_audit"]["git_apply_check"] == "PASS"
+          assert r["expected_kernel_base"] == "50db73fc799f20a7120a8b5f653b16cc123d856f"
+          assert r["static_patch_audit"]["patch_sha256"] == hashlib.sha256(Path("src/kernel/r800-wearos.patch").read_bytes()).hexdigest()
+          assert r["safe_to_flash"] is False
+          PY
       - name: Expand scratch source tree for compilation
         run: |
           git -C "$RUNNER_TEMP/combined-exynos-src" sparse-checkout disable
@@ -60,6 +84,7 @@ jobs:
           git -C "$RUNNER_TEMP/combined-exynos-src" status --porcelain
 
       - name: Compile Image with Alpine clang 19.1.4 (NO embedded initramfs)
+        id: kernel_compile
         run: |
           docker run --rm --pull=always \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
@@ -83,6 +108,8 @@ jobs:
             echo "run_id=$GITHUB_RUN_ID"
             echo "run_attempt=$GITHUB_RUN_ATTEMPT"
             echo "safe_to_flash=false"
+            echo "compile_step_outcome=${{ steps.kernel_compile.outcome }}"
+            sha256sum src/kernel/r800-wearos.patch
             echo "source_base=50db73fc799f20a7120a8b5f653b16cc123d856f"
             echo "build_kind=smoke_non_release"
             echo "embedded_initramfs=disabled_in_temporary_config"
