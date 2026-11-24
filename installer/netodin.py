@@ -18,6 +18,7 @@ import argparse
 import r800_safety
 import r800_geometry
 import r800_recovery_audit
+import r800_recovery_readiness
 
 # Protocol Constants
 ODIN_PORT = 13579
@@ -270,6 +271,11 @@ def flash_ap_package(
         print("[*] Requesting live partition table (PIT)...")
         pit_data = receive_live_pit(sock)
         pit_map = r800_safety.parse_pit_strict(pit_data)
+        # Inspect every PIT entry, including protected factory entries with
+        # no flash filename. Reject target ID/geometry conflicts BEFORE 102.
+        factory_audit = r800_recovery_readiness.validate_factory_boundaries(pit_data)
+        print(f"  [+] Checked {factory_audit['entries_inspected']} PIT entries "
+              "for factory/target collisions (NOT a factory-backup proof)")
         # Entire transfer plan is validated before the first write request.
         geometry = r800_geometry.parse_pit_geometry(pit_data)
         transfer_plan = r800_geometry.plan_image_transfers(geometry, members)
