@@ -17,6 +17,7 @@ import time
 import argparse
 import r800_safety
 import r800_geometry
+import r800_recovery_audit
 
 # Protocol Constants
 ODIN_PORT = 13579
@@ -108,7 +109,14 @@ def format_progress(prefix: str, current: int, total: int, start_time: float):
     sys.stdout.flush()
 
 
-def flash_ap_package(ap_path: str, host: str = "0.0.0.0", port: int = ODIN_PORT, auto_reboot: bool = True):
+def flash_ap_package(
+    ap_path: str,
+    host: str = "0.0.0.0",
+    port: int = ODIN_PORT,
+    auto_reboot: bool = True,
+    *,
+    combination_path: str | None = None,
+):
     print("=" * 72)
     print("  NetOdin Python Flasher (Samsung Galaxy Watch SM-R800)")
     print("=" * 72)
@@ -117,9 +125,17 @@ def flash_ap_package(ap_path: str, host: str = "0.0.0.0", port: int = ODIN_PORT,
         print(f"[-] Error: File not found: {ap_path}")
         sys.exit(1)
 
-    # Do not open a listening socket until all local archive checks pass.
-    print("[*] Strict SM-R800 firmware preflight...")
-    r800_safety.preflight_file(ap_path)
+    # A package's MD5/filename/PIT checks alone do not guard the bootloader.
+    # Require and compare the combination reference before binding a socket,
+    # even when this function is called directly rather than through main().
+    if not combination_path:
+        raise r800_safety.SafetyError(
+            "A local SM-R800 combination reference is REQUIRED before any "
+            "flashing. Use --combination-reference or --preflight-only. "
+            "A match does not prove Samsung provenance or device safety.")
+    print("[*] Offline firmware/recovery reference check (no device connection yet)...")
+    r800_recovery_audit.audit_release(ap_path, combination_path)
+    print("[*] Strict SM-R800 firmware preflight passed (NOT flash-safety proof).")
 
     # 2. Inspect AP Tar file members (skip .pit table files from partition flash list)
     print(f"[*] Analyzing firmware package: {os.path.basename(ap_path)}")
@@ -336,6 +352,7 @@ def main():
     parser.add_argument("--reboot-only", action="store_true", help="Only handshake and reboot the watch; flash nothing")
     parser.add_argument("--preflight-only", action="store_true", help="Validate local archive; no network or writes")
     parser.add_argument("--confirm-r800", action="store_true", help="Explicitly accept risky SM-R800 live flashing")
+    parser.add_argument("--combination-reference", help="Local, independently obtained R800 combination .tar.md5; required before live flashing")
     parser.add_argument("--ap", required=False, help="Path to firmware package (.tar or .tar.md5)")
     parser.add_argument("--port", type=int, default=ODIN_PORT, help=f"TCP port to listen on (default: {ODIN_PORT})")
     parser.add_argument("--host", default="0.0.0.0", help="Host interface to bind (default: 0.0.0.0)")
@@ -348,13 +365,22 @@ def main():
     if not args.ap:
         parser.error("--ap is required unless --reboot-only is given")
     if args.preflight_only:
-        r800_safety.preflight_file(args.ap)
-        print("[PASS] Offline package checks only. Device compatibility NOT proven.")
+        if args.combination_reference:
+            r800_recovery_audit.audit_release(args.ap, args.combination_reference)
+            print("[PASS] Offline package+reference comparison. Device compatibility NOT proven.")
+        else:
+            r800_safety.preflight_file(args.ap)
+            print("[PASS] Offline package checks only. Bootloader/recovery NOT verified.")
         return
     if not args.confirm_r800:
-        parser.error("Live flashing requires --confirm-r800 after --preflight-only. "
+        parser.error("Live flashing requires --confirm-r800 after offline preflight. "
                      "Bootloader compatibility and physical recovery remain unverified.")
-    flash_ap_package(args.ap, host=args.host, port=args.port, auto_reboot=not args.no_reboot)
+    if not args.combination_reference:
+        parser.error("Live flashing also requires --combination-reference. "
+                     "Package-only validation does not protect recovery partitions.")
+    flash_ap_package(
+        args.ap, host=args.host, port=args.port, auto_reboot=not args.no_reboot,
+        combination_path=args.combination_reference)
 
 
 if __name__ == "__main__":
