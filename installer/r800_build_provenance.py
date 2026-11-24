@@ -117,6 +117,8 @@ def validate_payload(path: Path) -> dict[str, int]:
             if name in found:
                 raise SafetyError(f"Duplicate payload member: {name}")
             found.add(name)
+            if name == "r800dev" and member.isdir():
+                continue
             if not name.startswith("r800dev/"):
                 raise SafetyError(f"Unexpected payload root: {name}")
             relative = name[len("r800dev/"):]
