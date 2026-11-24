@@ -1,31 +1,34 @@
-# SM-R800 — integrated hardening (fork-only development)
+# SM-R800: объединённая ветка разработки (только форк)
 
-This branch belongs to **vorlocsev/galwear**. It consolidates the earlier safety-related fork branches and does not modify `main` or publish images, releases, or pull requests. All validation in GitHub Actions uses artificial PIT and TAR/NZIT fixtures. **There is no verified safe first-flash procedure for retail SM-R800.**
+Работа ведётся только в **vorlocsev/galwear**. Ветка объединяет ранее подготовленные исправления. `main` не изменяется, PR в исходный проект не создаются, релизы и прошивки не публикуются.
 
-## Implemented safeguards
+**Все испытания в GitHub Actions выполнены на синтетических данных. Безопасная процедура первой прошивки SM-R800 со штатным загрузчиком не подтверждена.**
 
-| Area | File(s) | What has been tested |
-| --- | --- | --- |
-| NetOdin package/PIT gate | `installer/netodin.py`, `installer/r800_safety.py` | Reject missing, corrupt or unexpected PIT and TAR entries; require explicit CLI flashing confirmation |
-| Transfer protocol | `installer/netodin.py` | Short image reads stop immediately; nonzero data/commit ACKs cause failure |
-| eMMC size bounds | `installer/r800_geometry.py` | Before the first write, reject images too large for the *assumed* capacity of the matching PIT entry |
-| Bootloader/recovery comparison | `installer/r800_recovery_audit.py` | Offline SHA-256 comparison against an independently provided combination archive; NZIT and EXYN structural checks |
-| Power-management experiment | `payload/android-helper.sh` | Independent flags `SLEEP` and `CPUIDLE_DEEP`; neither experimental deep mode is enabled by default |
-| Combined offline report | `installer/r800_preflight_report.py` | Local PIT/archive/optional combination inspection with JSON status and explicit unverified flags |
+## Реализованные проверки
 
-## Offline commands (safe — they never open a watch connection)
+| Компонент | Что проверяется |
+| --- | --- |
+| `installer/netodin.py` и `installer/r800_safety.py` | Строгая PIT без резервной карты, обязательная MD5 и белый список файлов |
+| NetOdin: передача | Ошибки чтения и ненулевые подтверждения прекращают передачу |
+| `installer/r800_geometry.py` | Вместимость разделов по предполагаемой геометрии PIT до первой команды записи |
+| `installer/r800_recovery_audit.py` | Совпадение загрузчика и recovery с указанным Samsung combination-архивом по SHA-256; структура NZIT и EXYN |
+| `payload/android-helper.sh` | Независимые флаги `SLEEP` и `CPUIDLE_DEEP`; оба экспериментальных режима отключены по умолчанию |
+| `installer/r800_preflight_report.py` | Единый локальный JSON-отчёт по прошивке, PIT и необязательному combination-архиву |
 
-From the repository root, once you have separately obtained the **correct** PIT file and release archive:
+## Безопасные офлайн-команды
+
+Команды читают только локальные файлы. Они не подключаются к часам.
 
 ```sh
 python3 installer/netodin.py --preflight-only --ap R800-WearOS.tar.md5
+
 python3 installer/r800_preflight_report.py \
   --package R800-WearOS.tar.md5 \
   --pit-file SM-R800.pit \
   --output r800-preflight-report.json
 ```
 
-For a separately supplied, trusted Samsung combination archive, add:
+При наличии отдельно полученного combination-архива:
 
 ```sh
 python3 installer/r800_preflight_report.py \
@@ -35,9 +38,9 @@ python3 installer/r800_preflight_report.py \
   --output r800-reference-comparison.json
 ```
 
-A passing comparison confirms only that local files match the *supplied* reference; it does not certify the provenance of that reference.
+Совпадение SHA-256 лишь показывает соответствие **переданному для сравнения** архиву. Оно не доказывает подлинность самого архива Samsung.
 
-## Development checks
+## Запуск тестов разработки
 
 ```sh
 python3 -m compileall -q installer tests
@@ -45,18 +48,19 @@ sh -n payload/android-helper.sh
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-These tests simulate 512-byte-sector PIT geometries, a minimal Odin socket peer, the firmware TAR/MD5 layout, recovery containers and CPU policy paths. The simulator is not an actual Samsung bootloader.
+Тесты используют вымышленные PIT, TAR/MD5, NZIT, имитацию TCP-обмена Odin и временные файлы вместо sysfs. Они не заменяют настоящую электронику часов.
 
-## Explicit blockers
+## Оставшиеся блокеры
 
-- No authenticated live PIT or retail/engineering S-Boot compatibility evidence is bundled.
-- Odin wireless PIT framing and commit semantics have not been confirmed against a real SM-R800 trace.
-- The 512-byte PIT sector interpretation is not independently verified on a real watch.
-- No reliable wired recovery procedure has been demonstrated as part of this branch.
-- Samsung and Google binary firmware images are not included; no full Wear OS build is claimed.
-- CPU deep idle / SoC suspend changes have no physical battery or stability measurements.
-- **Neither successful GitHub Actions nor a `STRUCTURAL_PASS_ONLY` report means flashing is safe.**
+- Отсутствует подтверждённая совместимость штатного и инженерного S-Boot.
+- Нет настоящего проверенного дампа PIT от конкретных SM-R800 и протокольной трассы wireless Odin.
+- Размер сектора PIT 512 байт остаётся предположением, требующим аппаратной проверки.
+- Восстановление через проводной интерфейс не прошло испытания.
+- Полная сборка с закрытыми бинарными компонентами Google/Samsung не выполнялась.
+- Изменения энергосбережения не проходили физических испытаний на зависания и автономность.
 
-## Scope
+**Статус `STRUCTURAL_PASS_ONLY` и зелёный GitHub CI не означают, что часы безопасно прошивать.**
 
-Stay within `vorlocsev/galwear` only. Do not open upstream PRs or update upstream issues, do not merge into `main`, and do not deploy to a watch without a separate decision and validated recovery path.
+## Ограничения проекта
+
+Все изменения — только в `vorlocsev/galwear`. Не создавать PR в исходный репозиторий, не изменять `main`, не публиковать прошивки и не записывать образы на часы без отдельного решения и проверенной процедуры восстановления.
