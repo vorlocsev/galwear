@@ -317,6 +317,15 @@ static const struct sensor_t sensor_list[] = {
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int wake_pipe[2] = { -1, -1 };
+static pthread_cond_t poll_idle = PTHREAD_COND_INITIALIZER;
+static sensors_poll_device_1_t *active_device;
+static int closing, polling; /* protected by lock */
+
+/* Caller holds lock. Reject stale devices and calls during close. */
+static int device_ready(const void *dev)
+{
+	return active_device && (const void *)active_device == dev && !closing;
+}
 /* pending flush-complete events (by handle), delivered from poll() */
 static int flush_pending[N_HANDLES];
 
@@ -486,10 +495,14 @@ static int is_enabled(int handle)
 	return handle < H_COUNT ? hub[handle].enabled : ctx_enabled[handle];
 }
 
+/* Caller holds lock: prevent a write to a closed/recycled FD. */
 static void wake_poll(void)
 {
 	char c = 'w';
-	(void)write(wake_pipe[1], &c, 1);
+	if (wake_pipe[1] >= 0) {
+		ssize_t r;
+		do { r = write(wake_pipe[1], &c, 1); } while (r < 0 && errno == EINTR);
+	}
 }
 
 static int64_t now_ns(void);
@@ -616,11 +629,14 @@ static int hr_timeout_ms(int64_t now)
 
 static int dev_activate(struct sensors_poll_device_t *dev, int handle, int enabled)
 {
-	(void)dev;
-	if (!valid(handle))
+		if (!valid(handle))
 		return -EINVAL;
 	if (handle >= H_COUNT) {
 		pthread_mutex_lock(&lock);
+		if (!device_ready(dev)) {
+			pthread_mutex_unlock(&lock);
+			return -ENODEV;
+		}
 		ctx_enabled[handle] = !!enabled;
 		/* on-change: deliver the current state right after activation */
 		if (handle == H_OFFBODY)
@@ -630,24 +646,32 @@ static int dev_activate(struct sensors_poll_device_t *dev, int handle, int enabl
 			step_report[handle] = 1;
 		if (handle == H_STEP_DETECTOR)
 			step_detect_pending = 0;
-		pthread_mutex_unlock(&lock);
 		wake_poll();
+		pthread_mutex_unlock(&lock);
 		LOGI("activate %d = %d (context)", handle, enabled);
 		return 0;
 	}
 	if (handle == H_HR) {
 		pthread_mutex_lock(&lock);
+		if (!device_ready(dev)) {
+			pthread_mutex_unlock(&lock);
+			return -ENODEV;
+		}
 		int previous = hr_active;
 		hr_active = !!enabled;
 		int r = hr_update(now_ns());
 		if (r)
 			hr_active = previous;
-		pthread_mutex_unlock(&lock);
 		wake_poll();
+		pthread_mutex_unlock(&lock);
 		LOGI("activate %d = %d (%d)", handle, enabled, r);
 		return r;
 	}
 	pthread_mutex_lock(&lock);
+		if (!device_ready(dev)) {
+			pthread_mutex_unlock(&lock);
+			return -ENODEV;
+		}
 	int previous = hub[handle].enabled;
 	int r = 0;
 	if (enabled && hub[handle].period_ns)
@@ -665,11 +689,14 @@ static int dev_activate(struct sensors_poll_device_t *dev, int handle, int enabl
 
 static int dev_set_delay(struct sensors_poll_device_t *dev, int handle, int64_t ns)
 {
-	(void)dev;
-	if (!valid(handle))
+		if (!valid(handle))
 		return -EINVAL;
-	if (handle >= H_COUNT)
-		return 0; /* event driven */
+	if (handle >= H_COUNT) {
+		pthread_mutex_lock(&lock);
+		int ready = device_ready(dev);
+		pthread_mutex_unlock(&lock);
+		return ready ? 0 : -ENODEV; /* event driven */
+	}
 	const struct sensor_t *s = &sensor_list[handle - 1];
 	int64_t req = ns;
 	if (s->minDelay > 0 && ns < (int64_t)s->minDelay * 1000)
@@ -681,6 +708,10 @@ static int dev_set_delay(struct sensors_poll_device_t *dev, int handle, int64_t 
 	if (handle == H_HR) {
 		/* the hub's HR always runs at 1 s; slower requests mean bursts */
 		pthread_mutex_lock(&lock);
+		if (!device_ready(dev)) {
+			pthread_mutex_unlock(&lock);
+			return -ENODEV;
+		}
 		int64_t previous = hr_req_ns;
 		hr_req_ns = req;
 		hub[handle].period_ns = HR_HUB_PERIOD_NS;
@@ -689,11 +720,15 @@ static int dev_set_delay(struct sensors_poll_device_t *dev, int handle, int64_t 
 			r = hr_update(now_ns());
 		if (r)
 			hr_req_ns = previous;
-		pthread_mutex_unlock(&lock);
 		wake_poll();
+		pthread_mutex_unlock(&lock);
 		return r;
 	}
 	pthread_mutex_lock(&lock);
+		if (!device_ready(dev)) {
+			pthread_mutex_unlock(&lock);
+			return -ENODEV;
+		}
 	int r = hub[handle].enabled ? write_sysfs(hub[handle].delay_node, ns) : 0;
 	if (!r)
 		hub[handle].period_ns = ns;
@@ -711,18 +746,22 @@ static int dev_batch(struct sensors_poll_device_1 *dev, int handle, int flags,
 
 static int dev_flush(struct sensors_poll_device_1 *dev, int handle)
 {
-	(void)dev;
-	if (!valid(handle))
+		if (!valid(handle))
 		return -EINVAL;
 	pthread_mutex_lock(&lock);
+		if (!device_ready(dev)) {
+			pthread_mutex_unlock(&lock);
+			return -ENODEV;
+		}
 	int enabled = is_enabled(handle);
-	if (enabled)
+	if (enabled && flush_pending[handle] < INT_MAX) {
 		flush_pending[handle]++;
+		wake_poll();
+		pthread_mutex_unlock(&lock);
+		return 0;
+	}
 	pthread_mutex_unlock(&lock);
-	if (!enabled)
-		return -EINVAL;
-	wake_poll();
-	return 0;
+	return enabled ? -EOVERFLOW : -EINVAL;
 }
 
 static int dev_inject(struct sensors_poll_device_1 *dev, const sensors_event_t *data)
@@ -971,9 +1010,8 @@ static int discard_overrun(struct hub_sensor *s, const struct input_event *ev)
 	return 1;
 }
 
-static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, int count)
+static int poll_events(sensors_event_t *data, int count)
 {
-	(void)dev;
 	if (!data || count <= 0)
 		return -EINVAL;
 	struct pollfd pfd[H_COUNT + 2];
@@ -983,6 +1021,10 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 	for (;;) {
 		/* flush-complete events first */
 		pthread_mutex_lock(&lock);
+		if (closing) {
+			pthread_mutex_unlock(&lock);
+			return -ENODEV;
+		}
 		if (offbody_report && ctx_enabled[H_OFFBODY] && n_out < count) {
 			ctx_event(&data[n_out++], H_OFFBODY, offbody_state);
 			offbody_report = 0;
@@ -1028,13 +1070,18 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 		if (ht >= 0 && (tmo < 0 || ht < tmo))
 			tmo = ht;
 		int pr = poll(pfd, n, tmo);
+		int poll_errno = errno;
 		pthread_mutex_lock(&lock);
+		if (closing) {
+			pthread_mutex_unlock(&lock);
+			return -ENODEV;
+		}
 		hr_tick(now_ns());
 		pthread_mutex_unlock(&lock);
 		if (pr < 0) {
-			if (errno == EINTR)
+			if (poll_errno == EINTR)
 				continue;
-			return -errno;
+			return -poll_errno;
 		}
 		if (pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL))
 			return -EIO;
@@ -1055,8 +1102,9 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 			/* Read one record at a time so reaching caller capacity
 			 * never discards unread records from a larger read. */
 			struct input_event ie[1];
-			ssize_t r;
-			while (n_out < count && (r = read(s->fd, ie, sizeof(ie))) > 0) {
+			ssize_t r = -1;
+			int budget = 256;
+			while (n_out < count && budget-- > 0 && (r = read(s->fd, ie, sizeof(ie))) > 0) {
 				if (r != sizeof(ie))
 					return n_out ? n_out : -EIO;
 				for (int j = 0; j < 1; j++) {
@@ -1097,7 +1145,7 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 					}
 				}
 			}
-			if (n_out < count && (r == 0 ||
+			if (budget >= 0 && n_out < count && (r == 0 ||
 			    (r < 0 && errno != EAGAIN && errno != EINTR)))
 				return n_out ? n_out : -EIO;
 		}
@@ -1106,20 +1154,102 @@ static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, in
 	}
 }
 
+static int dev_poll(struct sensors_poll_device_t *dev, sensors_event_t *data, int count)
+{
+	pthread_mutex_lock(&lock);
+	if (!device_ready(dev) || polling) {
+		int r = device_ready(dev) ? -EBUSY : -ENODEV;
+		pthread_mutex_unlock(&lock);
+		return r;
+	}
+	polling = 1;
+	pthread_mutex_unlock(&lock);
+	int r = poll_events(data, count);
+	pthread_mutex_lock(&lock);
+	polling = 0;
+	pthread_cond_broadcast(&poll_idle);
+	pthread_mutex_unlock(&lock);
+	return r;
+}
+
+/* Close only after the poll owner has exited. Caller holds lock. */
+static void close_fd(int *fd)
+{
+	if (*fd >= 0)
+		close(*fd);
+	*fd = -1;
+}
+
 static int dev_close(struct hw_device_t *dev)
 {
+	pthread_mutex_lock(&lock);
+	if (!device_ready(dev)) {
+		pthread_mutex_unlock(&lock);
+		return -ENODEV;
+	}
+	closing = 1;
+	wake_poll();
+	while (polling)
+		pthread_cond_wait(&poll_idle, &lock);
+
+	int previous[H_COUNT];
+	for (int h = H_ACCEL; h < H_COUNT; h++) {
+		previous[h] = hub[h].enabled;
+		hub[h].enabled = 0;
+	}
+	int r = apply_enable_mask();
+	if (r) {
+		/* Do not pretend a failed SSP disable succeeded. Retain the
+		 * device and descriptors so close can be retried. */
+		for (int h = H_ACCEL; h < H_COUNT; h++)
+			hub[h].enabled = previous[h];
+		closing = 0;
+		pthread_mutex_unlock(&lock);
+		return r;
+	}
+	if (hr_burst_start)
+		hr_wakelock(0);
+	hr_active = hr_bg = hr_bursts = hr_skipped = 0;
+	hr_req_ns = hr_burst_start = hr_stop_retry = hr_next = 0;
+	for (int h = H_ACCEL; h < H_COUNT; h++) {
+		close_fd(&hub[h].fd);
+		hub[h].period_ns = 0;
+		hub[h].dropped = 0;
+		memset(hub[h].v, 0, sizeof(hub[h].v));
+		memset(hub[h].ts, 0, sizeof(hub[h].ts));
+	}
+	close_fd(&ctx_fd);
+	close_fd(&ctx_wfd);
+	close_fd(&wake_pipe[0]);
+	close_fd(&wake_pipe[1]);
+	ctx_len = ctx_discard = 0;
+	offbody_known = offbody_report = 0;
+	offbody_state = 1.0f;
+	step_detect_pending = 0;
+	memset(ctx_enabled, 0, sizeof(ctx_enabled));
+	memset(step_report, 0, sizeof(step_report));
+	memset(flush_pending, 0, sizeof(flush_pending));
+	/* Preserve process-lifetime monotonic step accounting on reopen. */
+	active_device = NULL;
+	closing = 0;
+	pthread_mutex_unlock(&lock);
 	free(dev);
 	return 0;
 }
 
 static int open_sensors(const struct hw_module_t *module, const char *id, struct hw_device_t **device)
 {
-	if (strcmp(id, SENSORS_HARDWARE_POLL))
+	if (!device || !id || strcmp(id, SENSORS_HARDWARE_POLL))
 		return -EINVAL;
 	sensors_poll_device_1_t *dev = calloc(1, sizeof(*dev));
 	if (!dev)
 		return -ENOMEM;
 	pthread_mutex_lock(&lock);
+	if (active_device || closing) {
+		pthread_mutex_unlock(&lock);
+		free(dev);
+		return -EBUSY;
+	}
 	if (wake_pipe[0] < 0) {
 		if (pipe2(wake_pipe, O_NONBLOCK | O_CLOEXEC) < 0) {
 			pthread_mutex_unlock(&lock);
@@ -1144,6 +1274,7 @@ static int open_sensors(const struct hw_module_t *module, const char *id, struct
 			return r;
 		}
 	}
+	active_device = dev;
 	pthread_mutex_unlock(&lock);
 
 	dev->common.tag = HARDWARE_DEVICE_TAG;
