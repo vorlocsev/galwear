@@ -320,6 +320,9 @@ static int wake_pipe[2] = { -1, -1 };
 static pthread_cond_t poll_idle = PTHREAD_COND_INITIALIZER;
 static sensors_poll_device_1_t *active_device;
 static int closing, polling; /* protected by lock */
+#define INPUT_RETRY_NS 5000000000LL
+static int64_t input_retry_at;
+static int input_restore_pending;
 
 /* Caller holds lock. Reject stale devices and calls during close. */
 static int device_ready(const void *dev)
@@ -391,15 +394,17 @@ static int write_sysfs(const char *node, long long value)
 	return r;
 }
 
-static void open_inputs(void)
+static int open_inputs(void)
 {
 	char path[32], name[64];
+	int found = 0;
 	for (int i = 0; i < 64; i++) {
 		snprintf(path, sizeof(path), "/dev/input/event%d", i);
 		int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 		if (fd < 0)
 			continue;
-		if (ioctl(fd, EVIOCGNAME(sizeof(name)), name) < 0) {
+		memset(name, 0, sizeof(name));
+		if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) < 0) {
 			close(fd);
 			continue;
 		}
@@ -407,16 +412,17 @@ static void open_inputs(void)
 		for (int h = H_ACCEL; h < H_COUNT; h++) {
 			if (hub[h].fd < 0 && !strcmp(name, hub[h].input_name)) {
 				hub[h].fd = fd;
+				hub[h].dropped = 1; /* wait for a complete new frame */
 				used = 1;
+				found++;
 				LOGI("%s -> %s", hub[h].input_name, path);
+				break;
 			}
 		}
 		if (!used)
 			close(fd);
 	}
-	for (int h = H_ACCEL; h < H_COUNT; h++)
-		if (hub[h].fd < 0)
-			LOGE("no input device %s", hub[h].input_name);
+	return found;
 }
 
 /* caller holds lock */
@@ -480,6 +486,56 @@ static int apply_enable_mask(void)
 	}
 	long long mask = (current & ~ours) | want;
 	return mask == current ? 0 : write_sysfs("enable", mask);
+}
+
+/* Only the poll owner or open/close under lock may change input FDs. */
+static void input_lost(struct hub_sensor *s)
+{
+	if (s->fd >= 0)
+		close(s->fd);
+	s->fd = -1;
+	memset(s->v, 0, sizeof(s->v));
+	memset(s->ts, 0, sizeof(s->ts));
+	s->dropped = 1;
+	input_restore_pending = 1;
+}
+
+static int inputs_missing(void)
+{
+	for (int h = H_ACCEL; h < H_COUNT; h++)
+		if (hub[h].fd < 0)
+			return 1;
+	return 0;
+}
+
+/* Caller holds lock. Restore configured sampling before enabling SSP.
+ * On failure keep retrying at a fixed cadence; never replace an unread mask. */
+static int recover_inputs(int64_t now)
+{
+	if (!inputs_missing() && !input_restore_pending)
+		return -1;
+	if (now >= input_retry_at) {
+		input_retry_at = now + INPUT_RETRY_NS;
+		if (inputs_missing() && open_inputs())
+			input_restore_pending = 1;
+		if (input_restore_pending) {
+			int r = 0;
+			for (int h = H_ACCEL; h < H_COUNT && !r; h++) {
+				if (hub[h].enabled && hub[h].fd >= 0 && hub[h].period_ns > 0)
+					r = write_sysfs(hub[h].delay_node, hub[h].period_ns);
+			}
+			if (!r)
+				r = apply_enable_mask();
+			if (!r)
+				input_restore_pending = 0;
+			else
+				LOGE("SSP restore deferred: %d", r);
+		}
+	}
+	if (!inputs_missing() && !input_restore_pending)
+		return -1;
+	int64_t left = input_retry_at - now;
+	return left <= 0 ? 0 : (int)((left + 999999) / 1000000);
 }
 
 static int valid(int handle)
@@ -1025,6 +1081,7 @@ static int poll_events(sensors_event_t *data, int count)
 			pthread_mutex_unlock(&lock);
 			return -ENODEV;
 		}
+		int recover_tmo = recover_inputs(now_ns());
 		if (offbody_report && ctx_enabled[H_OFFBODY] && n_out < count) {
 			ctx_event(&data[n_out++], H_OFFBODY, offbody_state);
 			offbody_report = 0;
@@ -1067,6 +1124,8 @@ static int poll_events(sensors_event_t *data, int count)
 		pthread_mutex_lock(&lock);
 		int ht = hr_timeout_ms(now_ns());
 		pthread_mutex_unlock(&lock);
+		if (recover_tmo >= 0 && (tmo < 0 || recover_tmo < tmo))
+			tmo = recover_tmo;
 		if (ht >= 0 && (tmo < 0 || ht < tmo))
 			tmo = ht;
 		int pr = poll(pfd, n, tmo);
@@ -1090,8 +1149,20 @@ static int poll_events(sensors_event_t *data, int count)
 			(void)read(wake_pipe[0], buf, sizeof(buf));
 		}
 		for (int i = 1; i < n && n_out < count; i++) {
-			if (pfd[i].revents & (POLLERR | POLLHUP | POLLNVAL))
-				return n_out ? n_out : -EIO;
+			if (pfd[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				if (idx[i] == H_WRIST_TILT) {
+					if (ctx_fd >= 0) close(ctx_fd);
+					if (ctx_wfd >= 0) close(ctx_wfd);
+					ctx_fd = ctx_wfd = -1;
+					ctx_len = ctx_discard = 0;
+					pthread_mutex_lock(&lock);
+					offbody_known = offbody_report = 0;
+					pthread_mutex_unlock(&lock);
+				} else {
+					input_lost(&hub[idx[i]]);
+				}
+				continue;
+			}
 			if (!(pfd[i].revents & POLLIN))
 				continue;
 			if (idx[i] == H_WRIST_TILT) {
@@ -1105,8 +1176,10 @@ static int poll_events(sensors_event_t *data, int count)
 			ssize_t r = -1;
 			int budget = 256;
 			while (n_out < count && budget-- > 0 && (r = read(s->fd, ie, sizeof(ie))) > 0) {
-				if (r != sizeof(ie))
-					return n_out ? n_out : -EIO;
+				if (r != sizeof(ie)) {
+					input_lost(s);
+					break;
+				}
 				for (int j = 0; j < 1; j++) {
 					if (discard_overrun(s, &ie[j]))
 						continue;
@@ -1145,9 +1218,9 @@ static int poll_events(sensors_event_t *data, int count)
 					}
 				}
 			}
-			if (budget >= 0 && n_out < count && (r == 0 ||
+			if (s->fd >= 0 && budget >= 0 && n_out < count && (r == 0 ||
 			    (r < 0 && errno != EAGAIN && errno != EINTR)))
-				return n_out ? n_out : -EIO;
+				input_lost(s);
 		}
 		if (n_out)
 			return n_out;
@@ -1223,6 +1296,8 @@ static int dev_close(struct hw_device_t *dev)
 	close_fd(&wake_pipe[0]);
 	close_fd(&wake_pipe[1]);
 	ctx_len = ctx_discard = 0;
+	input_retry_at = 0;
+	input_restore_pending = 0;
 	offbody_known = offbody_report = 0;
 	offbody_state = 1.0f;
 	step_detect_pending = 0;
@@ -1274,6 +1349,8 @@ static int open_sensors(const struct hw_module_t *module, const char *id, struct
 			return r;
 		}
 	}
+	input_retry_at = 0;
+	input_restore_pending = 0;
 	active_device = dev;
 	pthread_mutex_unlock(&lock);
 
