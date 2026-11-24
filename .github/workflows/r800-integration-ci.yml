@@ -1,0 +1,61 @@
+name: SM-R800 integrated regression and HAL compile (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-integration-ci-20261125
+  workflow_dispatch:
+    inputs:
+      kernel_repeatability:
+        description: "Also run the two independent read-only-init kernel builds"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: r800-integrated-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify checkout is exact triggering commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Run all offline regression suites
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Check shell syntax and kernel patch format
+        run: |
+          for f in payload/android-helper.sh payload/start.sh payload/r800-display-watchdog.sh build/mkpayload-release.sh build/r800_hal_compile_smoke.sh; do
+            sh -n "$f"
+          done
+          git apply --numstat src/kernel/r800-wearos.patch >/dev/null
+  hal-compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install exact NDK release
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+      - name: Fetch tinyalsa header source by immutable commit
+        run: |
+          git init "$RUNNER_TEMP/tinyalsa"
+          git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
+          git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
+          git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
+      - name: Compile all four HALs
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$ANDROID_HOME/ndk/27.2.12479018" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+      - name: Upload JSON evidence only
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-hal-compile-evidence
+          path: ${{ runner.temp }}/r800-hal/hal-compile.json
+          if-no-files-found: error
+          retention-days: 7
+  kernel:
+    if: github.event_name == 'workflow_dispatch' && inputs.kernel_repeatability
+    uses: ./.github/workflows/r800-kernel-repeatability.yml
