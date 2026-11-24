@@ -12,6 +12,7 @@ on:
       - "src/initramfs/init.c"
       - "src/initramfs/init-readonly.c"
       - "tests/test_readonly_init.py"
+      - "build/r800_readonly_init_qemu_smoke.sh"
   workflow_dispatch:
 
 permissions:
@@ -46,8 +47,11 @@ jobs:
             alpine:3.21 sh -eu -c '
               apk add --no-cache clang19=19.1.4-r0 \
                 lld=19.1.4-r0 llvm19=19.1.4-r1 python3
+                coreutils qemu-aarch64
               sh /repo/build/r800_initramfs_compile_smoke.sh \
                 /repo /scratch/r800-repeatability-init
+              sh /repo/build/r800_readonly_init_qemu_smoke.sh \
+                /scratch/r800-repeatability-init/init /scratch/r800-qemu-smoke
             '
       - name: Record only hashes, no executable
         run: |
