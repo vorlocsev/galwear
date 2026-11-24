@@ -104,7 +104,7 @@ class PITWireFaults(unittest.TestCase):
     def test_pit_transfer_timeout_refused(self):
         class TimeoutPeer(SimulatedWatch):
             def recv(self, length):
-                if self.pit_offset > 500 and not self.response:
+                if self.pit_offset > 500:
                     raise socket.timeout("synthetic interruption")
                 return super().recv(length)
         peer = TimeoutPeer()
