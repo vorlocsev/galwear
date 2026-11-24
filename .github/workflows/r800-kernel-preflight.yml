@@ -1,0 +1,38 @@
+name: SM-R800 kernel patch/source preflight (read-only)
+
+on:
+  push:
+    branches:
+      - "development/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel-patch-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax for existing kernel build helpers
+        run: |
+          sh -n build/kbuild-native.sh
+          sh -n build/mk_kernel_patch.sh
+          sh -n build/mkboot.sh
+          sh -n src/initramfs/build.sh
+      - name: Verify unified diff parses (not applying it)
+        run: git apply --numstat src/kernel/r800-wearos.patch > /dev/null
+      - name: Compile preflight and synthetic tests
+        run: python3 -m py_compile build/r800_kernel_preflight.py tests/test_kernel_preflight.py
+      - name: Audit kernel patch/config without external source
+        run: python3 build/r800_kernel_preflight.py --report kernel-preflight.json
+      - name: Test pinned base and read-only git apply checks on disposable fixtures
+        run: python3 -m unittest discover -s tests -p 'test_kernel_preflight.py' -v
+      - name: Archive synthetic-only kernel report
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-kernel-static-preflight
+          path: kernel-preflight.json
+          if-no-files-found: error
+          retention-days: 14
