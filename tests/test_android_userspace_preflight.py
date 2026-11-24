@@ -24,6 +24,16 @@ def elf64(machine=183, interp=None):
     return data
 
 
+def elf32():
+    data = bytearray(128)
+    data[:7] = b"\x7fELF\x01\x01\x01"
+    struct.pack_into("<HH", data, 16, 2, 40)
+    struct.pack_into("<II", data, 24, 0x10000, 52)
+    struct.pack_into("<HH", data, 42, 32, 1)
+    struct.pack_into("<IIIIIIII", data, 52, 1, 0, 0x10000, 0, 128, 128, 5, 4096)
+    return data
+
+
 class UserspaceTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -34,7 +44,7 @@ class UserspaceTests(unittest.TestCase):
         self.config.write_text("".join(f"{k}={v}\n" for k, v in audit.REQUIRED_CONFIG.items()))
         for name in ("init", "system/bin/servicemanager", "system/bin/hwservicemanager",
                      "vendor/bin/vndservicemanager", "system/bin/app_process32"):
-            self.put(name, elf64())
+            self.put(name, elf32() if name.endswith("app_process32") else elf64())
         for name in ("system/etc/init", "vendor/etc/init"):
             (self.root / name).mkdir(parents=True)
 
