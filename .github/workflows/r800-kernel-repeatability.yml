@@ -1,12 +1,14 @@
-name: SM-R800 kernel Image two-run SHA-256 comparison (NON-RELEASE)
+name: SM-R800 kernel Image and APK input audit (NON-RELEASE)
 
 on:
   push:
     branches:
-      - "development/r800-kernel-repeatability-20261125"
+      - "development/r800-build-input-audit-20261125"
     paths:
       - ".github/workflows/r800-kernel-repeatability.yml"
       - "build/r800_reproducibility_audit.py"
+      - "build/r800_apk_inventory.py"
+      - "tests/test_apk_inventory.py"
       - "build/r800_kernel_compile_smoke.sh"
       - "build/r800_aosp_source_probe.sh"
       - "build/r800_initramfs_compile_smoke.sh"
@@ -41,6 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Gate source tree and build evidence comparator
         run: |
+          python3 -m unittest discover -s tests -p 'test_apk_inventory.py' -v
           python3 -m unittest discover -s tests -p 'test_reproducibility_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_readonly_init.py' -v
           python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
@@ -78,6 +81,11 @@ jobs:
                 clang19=19.1.4-r0 lld=19.1.4-r0 llvm19=19.1.4-r1 \
                 git make bash bc bison flex perl python3 openssl-dev \
                 elfutils-dev build-base linux-headers coreutils findutils
+              apk info -v > /scratch/apk-before.txt
+              python3 /repo/build/r800_apk_inventory.py \
+                --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+                --attempt "$GITHUB_RUN_ATTEMPT" --output /scratch/r800-apk-inventory.json \
+                snapshot --installed /scratch/apk-before.txt --replica "$R800_REPLICA"
               git config --global --add safe.directory /source
               sh /repo/build/r800_initramfs_compile_smoke.sh \
                 /repo /scratch/r800-embedded-initramfs
@@ -96,13 +104,21 @@ jobs:
                 --galwear-commit "$GITHUB_SHA" \
                 --container-image-id "$R800_CONTAINER_IMAGE_ID" \
                 --runner-replica "$R800_REPLICA"
+              apk info -v > /scratch/apk-after.txt
+              python3 /repo/build/r800_apk_inventory.py \
+                --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+                --attempt "$GITHUB_RUN_ATTEMPT" --output /scratch/apk-after.json \
+                snapshot --installed /scratch/apk-after.txt --replica "$R800_REPLICA"
+              cmp /scratch/r800-apk-inventory.json /scratch/apk-after.json
             '
 
       - name: Upload JSON evidence only (never compiled Image, ELF or CPIO)
         uses: actions/upload-artifact@v4
         with:
           name: r800-image-evidence-${{ matrix.replica }}
-          path: ${{ runner.temp }}/r800-image-repeatability.json
+          path: |
+            ${{ runner.temp }}/r800-image-repeatability.json
+            ${{ runner.temp }}/r800-apk-inventory.json
           if-no-files-found: error
           retention-days: 7
 
@@ -118,6 +134,15 @@ jobs:
           pattern: r800-image-evidence-*
           path: ${{ runner.temp }}/r800-two-builds
           merge-multiple: false
+      - name: Compare installed APK versions and bind evidence to this exact run
+        run: |
+          python3 build/r800_apk_inventory.py \
+            --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+            --attempt "$GITHUB_RUN_ATTEMPT" --output "$RUNNER_TEMP/r800-apk-comparison.json" compare \
+            --first "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-a/r800-apk-inventory.json" \
+            --second "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-apk-inventory.json" \
+            --image-a "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-a/r800-image-repeatability.json" \
+            --image-b "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json"
       - name: Compare Image, CPIO, init, compiler, configuration and container hashes
         run: |
           python3 build/r800_reproducibility_audit.py \
@@ -145,6 +170,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: r800-kernel-two-run-comparison
-          path: ${{ runner.temp }}/r800-two-image-comparison.json
+          path: |
+            ${{ runner.temp }}/r800-two-image-comparison.json
+            ${{ runner.temp }}/r800-apk-comparison.json
           if-no-files-found: warn
           retention-days: 7
