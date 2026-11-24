@@ -12,6 +12,7 @@ from r800_android_userspace_preflight import guest_path, read_regular
 MAX_XML = 1024 * 1024
 MAX_FILES = 256
 MAX_HAL = 2048
+MAX_ENTRIES = 4096
 PARTITIONS = ("system", "system_ext", "product", "vendor", "odm")
 PACKAGE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 IFACE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -59,6 +60,7 @@ def parse_document(data, source):
     if side not in ("device", "framework"):
         raise ValueError("Unknown VINTF document type")
     hals, unsupported = [], []
+    entry_count = 0
     for hal in root.findall("hal"):
         if len(hals) >= MAX_HAL:
             raise ValueError("Too many HAL declarations")
@@ -102,6 +104,9 @@ def parse_document(data, source):
             entries.append((None, None, ranges))
         if any(not use for _, _, use in entries):
             unsupported.append({"name": name, "reason": "missing explicit version"})
+        entry_count += len(entries)
+        if entry_count > MAX_ENTRIES:
+            raise ValueError("Too many interface instances")
         hals.append({"name": name, "format": fmt, "optional": hal.get("optional") == "true",
                      "entries": [{"interface": i, "instance": n, "ranges": v}
                                  for i, n, v in entries]})
@@ -171,6 +176,9 @@ def audit(root):
             documents.append(parse_document(read_regular(guest_path(root, path), MAX_XML), path))
         except (OSError, ValueError, ET.ParseError) as exc:
             errors.append(path + ": " + str(exc))
+    if sum(len(h["entries"]) for d in documents for h in d["hals"]) > MAX_ENTRIES:
+        errors.append("Total VINTF entry limit exceeded; comparison omitted")
+        documents = []
     manifests = [d for d in documents if d["kind"] == "manifest"]
     matrices = [d for d in documents if d["kind"] == "compatibility-matrix"]
     comparisons = []
