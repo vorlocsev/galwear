@@ -26210,39 +26210,141 @@ index 7cf98b1a2..53760321f 100644
  {
  	return platform_driver_unregister(&exynos_pd_driver);
 diff --git a/drivers/soc/samsung/exynos-pm.c b/drivers/soc/samsung/exynos-pm.c
-index 1f6e1efa4..5c4997ba8 100644
 --- a/drivers/soc/samsung/exynos-pm.c
 +++ b/drivers/soc/samsung/exynos-pm.c
-@@ -37,6 +37,11 @@
+@@ -37,6 +37,9 @@
  #define EXYNOS_PMU_EINT_WAKEUP_MASK	0x060C
  #define BOOT_CPU			0
  #define CPU_INFORM4			0x0870
-+/* SM-R800 debug: suspend progress marker in PMU INFORM5 (survives reset,
-+ * printed by S-Boot): 1 = entering firmware sleep, 2 = back from firmware,
-+ * 3 = syscore resume done. */
++/* Experimental R800 PMU progress marker; not proof of successful resume. */
 +#define R800_INFORM5			0x0814
 +#define R800_MARK(n)			exynos_pmu_write(R800_INFORM5, 0xAA000000 | (n))
  
  extern u32 exynos_eint_to_pin_num(int eint);
  #define EXYNOS_EINT_PEND(b, x)      ((b) + 0xA00 + (((x) >> 3) * 4))
-@@ -298,6 +303,7 @@ static void exynos_pm_syscore_resume(void)
+@@ -61,6 +64,8 @@
+ 	unsigned int num_gic;			/* Total number of GIC sources */
+ 	bool is_early_wakeup;
+ 	bool is_usbl2_suspend;
++	unsigned int prepared_mode;
++	bool prepared;
+ 	unsigned int suspend_mode_idx;		/* power mode to be used in suspend scenario */
+ 	unsigned int suspend_psci_idx;		/* psci index to be used in suspend scenario */
+ 	u8 num_extra_stat;			/* Total number of extra wakeup_stat */
+@@ -263,6 +268,11 @@
  
+ static int exynos_pm_syscore_suspend(void)
+ {
++	int ret;
++
++	/* syscore resume may run even when suspend_ops->enter never ran. */
++	pm_info->is_early_wakeup = true;
++	pm_info->prepared = false;
+ #if 0 
+ 	if (!exynos_check_cp_status()) {
+ 		pr_info("%s %s: sleep canceled by CP reset \n",
+@@ -276,31 +286,40 @@
+ 			pm_info->is_usbl2_suspend = pm_info->usb_is_connect();
+ 	}
+ 
+-	if (pm_info->is_usbl2_suspend || pm_dbg->test_usbl2_suspend) {
+-		exynos_prepare_sys_powerdown(pm_info->usbl2_suspend_mode_idx);
+-		pr_info("%s %s: Enter Suspend scenario. usbl2_mode_idx = %d)\n",
+-				EXYNOS_PM_PREFIX,__func__, pm_info->usbl2_suspend_mode_idx);
+-	} else {
+-		exynos_prepare_sys_powerdown(pm_info->suspend_mode_idx);
+-		pr_info("%s %s: Enter Suspend scenario. suspend_mode_idx = %d)\n",
+-				EXYNOS_PM_PREFIX,__func__, pm_info->suspend_mode_idx);
+-	}
++	pm_info->prepared_mode = (pm_info->is_usbl2_suspend || pm_dbg->test_usbl2_suspend) ?
++		pm_info->usbl2_suspend_mode_idx : pm_info->suspend_mode_idx;
++	if (pm_info->prepared_mode >= NUM_SYS_POWERDOWN)
++		return -EINVAL;
+ 
++	ret = exynos_prepare_sys_powerdown(pm_info->prepared_mode);
++	if (ret) {
++		/* The failing syscore callback is not resumed by the core.
++		 * CAL may have saved state and partially applied the enter sequence.
++		 * Attempt the existing early-wakeup recovery locally. */
++		pr_err("%s prepare failed: mode=%u ret=%d\n",
++			EXYNOS_PM_PREFIX, pm_info->prepared_mode, ret);
++		R800_MARK(0x10);
++		exynos_wakeup_sys_powerdown(pm_info->prepared_mode, true);
++		return ret < 0 ? ret : -EIO;
++	}
++	pm_info->prepared = true;
++	pr_info("%s prepared suspend mode %u\n",
++		EXYNOS_PM_PREFIX, pm_info->prepared_mode);
+ 	return 0;
+ }
+ 
+ static void exynos_pm_syscore_resume(void)
+ {
+-	if (pm_info->is_usbl2_suspend || pm_dbg->test_usbl2_suspend)
+-		exynos_wakeup_sys_powerdown(pm_info->usbl2_suspend_mode_idx, pm_info->is_early_wakeup);
+-	else
+-		exynos_wakeup_sys_powerdown(pm_info->suspend_mode_idx, pm_info->is_early_wakeup);
++	if (!pm_info->prepared)
++		return;
+ 
++	exynos_wakeup_sys_powerdown(pm_info->prepared_mode, pm_info->is_early_wakeup);
++	pm_info->prepared = false;
  	exynos_show_wakeup_reason(pm_info->is_early_wakeup);
  
-+	R800_MARK(3);
- 	if (!pm_info->is_early_wakeup)
- 		pr_debug("%s %s: post sleep, preparing to return\n",
- 						EXYNOS_PM_PREFIX, __func__);
-@@ -328,7 +334,9 @@ static int exynos_pm_enter(suspend_state_t state)
+-	if (!pm_info->is_early_wakeup)
+-		pr_debug("%s %s: post sleep, preparing to return\n",
+-						EXYNOS_PM_PREFIX, __func__);
++	/* This marker means the PMU recovery call returned, not that every
++	 * domain and driver has resumed successfully. */
++	R800_MARK(3 | (pm_info->is_early_wakeup ? 0x100 : 0));
+ }
+ 
+ static struct syscore_ops exynos_pm_syscore_ops = {
+@@ -313,7 +332,11 @@
+ 	unsigned int psci_index;
+ 	unsigned int prev_mif = 0, post_mif = 0;
+ 	unsigned int prev_req, off_count;
++	int ret;
+ 
++	if (!pm_info->prepared)
++		return -EINVAL;
++
+ 	psci_index = pm_info->suspend_psci_idx;
+ 
+ 	/* Send an IPI if test_early_wakeup flag is set */
+@@ -328,7 +351,12 @@
  	/* This will also act as our return point when
  	 * we resume as it saves its own register state and restores it
  	 * during the resume. */
+-	pm_info->is_early_wakeup = (bool)arm_cpuidle_suspend(psci_index);
 +	R800_MARK(1);
- 	pm_info->is_early_wakeup = (bool)arm_cpuidle_suspend(psci_index);
++	ret = arm_cpuidle_suspend(psci_index);
++	pm_info->is_early_wakeup = ret != 0;
 +	R800_MARK(2 | (pm_info->is_early_wakeup ? 0x100 : 0));
++	if (ret)
++		pr_err("%s PSCI suspend returned %d\n", EXYNOS_PM_PREFIX, ret);
  
  	pr_info("%s: is_early_wakeup : %d\n", EXYNOS_PM_PREFIX, pm_info->is_early_wakeup);
  	if (pm_info->is_early_wakeup)
+@@ -339,6 +367,9 @@
+ 	exynos_pmu_read(CPU_INFORM4, &off_count);
+ 	pr_info("%s: post mif_count %d	%d\n",EXYNOS_PM_PREFIX, post_mif,off_count);
+ 
++	if (ret)
++		return ret < 0 ? ret : -EBUSY;
++
+ 	if (post_mif == prev_mif) {
+ 		pr_info("%s: MIF blocked. MIF request Mster was  0x%x\n", EXYNOS_PM_PREFIX, prev_req);
+ 		return -EBUSY;
+@@ -347,7 +378,7 @@
+ 		pr_info("%s: MIF down. cur_count: %d, acc_count: %d\n",
+ 				EXYNOS_PM_PREFIX, post_mif - prev_mif, post_mif);
+ 
+-	return pm_info->is_early_wakeup;
++	return 0;
+ }
+ 
+ static const struct platform_suspend_ops exynos_pm_ops = {
 diff --git a/drivers/soc/samsung/exynos-powermode.c b/drivers/soc/samsung/exynos-powermode.c
 index f1778003f..99b6216d9 100644
 --- a/drivers/soc/samsung/exynos-powermode.c
