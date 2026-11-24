@@ -9,15 +9,19 @@
 # they are marked intent-to-add (git add -N) first. Only those paths are reset
 # afterwards: a bare `git reset --` resets the whole index and drops the
 # intent-to-add entries of earlier new files (detent, motor, bt-power).
-set -e
+set -eu
+[ "$#" -eq 2 ] || { echo "usage: $0 <kernel source tree> <output patch>"; exit 2; }
 KT=$1
 OUT=$2
+[ -d "$KT/.git" ] || { echo "not a git kernel source tree"; exit 2; }
 BASE=50db73fc799f20a7120a8b5f653b16cc123d856f
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 NEW_DIRS="drivers/sensorhub drivers/gps include/linux/sensor include/linux/ssp_platformdata.h"
 
 cd "$KT"
-old=$(grep '^diff --git' "$REPO/kernel/r800-wearos.patch" | awk '{print $3}' | sed 's|^a/||')
+[ "$(git rev-parse HEAD)" = "$BASE" ] || {
+  echo "kernel SHA differs from pinned base; patch generation refused"; exit 2; }
+old=$(grep '^diff --git' "$REPO/src/kernel/r800-wearos.patch" | awk '{print $3}' | sed 's|^a/||')
 old=$(printf '%s
 ' $old $EXTRA | sort -u)
 new=$(git ls-files -o --exclude-standard $NEW_DIRS)
