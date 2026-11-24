@@ -16,7 +16,12 @@ mkdir -p $P/bin $P/hwc
 # Android images, overlays, Gemini, props, blank /data. Per-watch state and the
 # developer-only flags (DEV, STAY, gemini.tries) are left out.
 cp -a $SRC/android $P/
-rm -f $P/android/DEV $P/android/STAY $P/android/gemini.tries $P/android/userdata.img
+# Do not inherit watch-specific state or experimental kernel power flags.
+# These markers are *opt-in* runtime overrides; shipping them in a release
+# bypasses the conservative suspend/CPU-idle defaults.
+for marker in DEV STAY SLEEP CPUIDLE_DEEP OVERLAY gemini.tries userdata.img RESET_DATA; do
+    rm -f "$P/android/$marker"
+done
 # Factory-reset-protection block: per-watch state (Android writes the owner's
 # account hash there). Ship it blank; Android formats it on first boot.
 dd if=/dev/zero of=$P/android/persistent.img bs=1M count=1 2> /dev/null
