@@ -11,11 +11,15 @@ import r800_qemu_system_init as a
 from test_initramfs_recipe import fake_aarch64_elf
 
 START = b"[    1.234] Run /init as init process\r\n"
+BEATS = a.HEARTBEAT_PREFIX + b"00000001\n" + a.HEARTBEAT_PREFIX + b"00000002\n"
 
 
 class SystemBootTests(unittest.TestCase):
     def test_expected_console(self):
-        report = a.inspect_console(START + a.EXPECTED, True)
+        report = a.inspect_console(START + a.EXPECTED + BEATS, True)
+        self.assertEqual(report["heartbeat_count"], 2)
+        self.assertTrue(report["guest_progress_after_marker_verified"])
+        self.assertFalse(report["guest_alive_at_timeout_proven"])
         self.assertTrue(report["kernel_launched_init"])
 
     def test_early_exit_rejected(self):
@@ -37,6 +41,20 @@ class SystemBootTests(unittest.TestCase):
     def test_missing_marker_rejected(self):
         with self.assertRaisesRegex(ValueError, "marker"):
             a.inspect_console(START, True)
+
+    def test_missing_heartbeats_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Insufficient"):
+            a.inspect_console(START + a.EXPECTED, True)
+
+    def test_invalid_heartbeat_sequence_rejected(self):
+        for bad in (b"00000001", b"00000003"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "sequence"):
+                    a.inspect_console(START + a.EXPECTED + BEATS.replace(b"00000002", bad), True)
+
+    def test_heartbeat_before_marker_rejected(self):
+        with self.assertRaisesRegex(ValueError, "before startup"):
+            a.inspect_console(START + BEATS + a.EXPECTED + BEATS, True)
 
     def test_cpio_contains_exact_init(self):
         with tempfile.TemporaryDirectory() as d:
