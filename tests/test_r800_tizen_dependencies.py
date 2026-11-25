@@ -109,5 +109,43 @@ class TizenDependencyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"Unexpected"):
             interpreter(data)
 
+    def test_hard_float_rejected(self):
+        data=fixture("arm")
+        struct.pack_into("<I",data,36,0x05000400)
+        self.put(self.target,data)
+        self.assertTrue(any("Hard-float" in p["reason"] for p in audit(self.root,[self.target])["problems"]))
+
+    def test_et_exec_provider_rejected_even_if_already_visited(self):
+        self.put(self.target,fixture("arm",needed=["libx.so"]))
+        data=fixture("arm")
+        struct.pack_into("<H",data,16,2)
+        self.put("/usr/lib/libx.so",data)
+        report=audit(self.root,["/usr/lib/libx.so",self.target])
+        self.assertIn("INVALID_DYNAMIC_PROVIDER",[p["reason"] for p in report["problems"]])
+
+    def test_soname_mismatch(self):
+        self.put(self.target,fixture("arm",needed=["libx.so"]))
+        self.put("/usr/lib/libx.so",fixture("arm",sonames=["libother.so"]))
+        self.assertIn("SONAME_MISMATCH",[p["reason"] for p in audit(self.root,[self.target])["problems"]])
+
+    def test_unbound_version_need(self):
+        data=version_fixture("arm",need="VER_1")
+        # Replace DT_NEEDED with an otherwise ignored dynamic tag;
+        # keep the version requirement for libx.so intact.
+        struct.pack_into("<iI",data,240,21,0)
+        self.put(self.target,data)
+        self.assertIn("UNBOUND_VERSION_NEED",[p["reason"] for p in audit(self.root,[self.target])["problems"]])
+
+    def test_executable_shared_library_allowed(self):
+        self.put(self.target,fixture("arm",needed=["libx.so"]))
+        data=fixture("arm",sonames=["libx.so"])
+        path=b"/lib/ld-linux.so.3\\0"
+        struct.pack_into("<H",data,44,3)
+        struct.pack_into("<8I",data,116,3,160,0,0,len(path),len(path),4,1)
+        data[160:160+len(path)]=path
+        self.put("/usr/lib/libx.so",data)
+        self.put("/usr/lib/ld-linux.so.3",fixture("arm"))
+        self.assertEqual(audit(self.root,[self.target])["problems"],[])
+
 if __name__=="__main__":
     unittest.main()
