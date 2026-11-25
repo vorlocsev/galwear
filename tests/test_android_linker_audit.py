@@ -146,6 +146,45 @@ def gnu_fixture(abi="arm64", both=False, malformed=None):
     return data
 
 
+def classified_symbol_fixture(abi="arm64", binding=1, visibility=0, section=0,
+                              version_kind=None, version_hidden=False):
+    data = symbol_fixture(abi)
+    wide = abi == "arm64"
+    ent = 24 if wide else 16
+    if wide:
+        struct.pack_into("<IBBHQQ", data, 600 + ent, 1, binding << 4 | 2,
+                         visibility, section, 0, 0)
+    else:
+        struct.pack_into("<IIIBBH", data, 600 + ent, 1, 0, 0,
+                         binding << 4 | 2, visibility, section)
+    if version_kind:
+        strings = b"\0symbol\0libx.so\0VER_1\0"
+        data[400:400 + len(strings)] = strings
+        tags = [(5, 0x1000 + 400), (10, len(strings)),
+                (audit.DT_SYMTAB, 0x1000 + 600), (audit.DT_SYMENT, ent),
+                (audit.DT_HASH, 0x1000 + 800), (audit.DT_VERSYM, 0x1000 + 900)]
+        if version_kind == "need":
+            tags += [(1, 8), (audit.DT_VERNEED, 0x1000 + 700),
+                     (audit.DT_VERNEEDNUM, 1)]
+            struct.pack_into("<HHIII", data, 700, 1, 1, 8, 16, 0)
+            struct.pack_into("<IHHII", data, 716, 0, 0, 2, 16, 0)
+        else:
+            tags += [(audit.DT_VERDEF, 0x1000 + 700), (audit.DT_VERDEFNUM, 1)]
+            struct.pack_into("<HHHHIII", data, 700, 1, 0, 2, 1, 0, 20, 0)
+            struct.pack_into("<II", data, 720, 16, 0)
+        tags.append((0, 0))
+        fmt = "<qQ" if wide else "<iI"
+        size = len(tags) * struct.calcsize(fmt)
+        for i, pair in enumerate(tags):
+            struct.pack_into(fmt, data, 224 + i * struct.calcsize(fmt), *pair)
+        if wide:
+            struct.pack_into("<QQ", data, 152, size, size)
+        else:
+            struct.pack_into("<II", data, 100, size, size)
+        struct.pack_into("<HH", data, 900, 0, 2 | (0x8000 if version_hidden else 0))
+    return data
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -384,6 +423,51 @@ class LinkerTests(unittest.TestCase):
     def test_gnu_truncated_header(self):
         with self.assertRaisesRegex(ValueError, "file-backed"):
             audit.inspect(gnu_fixture(malformed="truncated"))
+
+    def test_global_import_and_export_both_abis(self):
+        for abi in ("arm", "arm64"):
+            with self.subTest(abi=abi):
+                imported = audit.inspect(classified_symbol_fixture(abi))
+                self.assertEqual(imported["symbol_imports"][0]["name"], "symbol")
+                self.assertFalse(imported["symbol_imports"][0]["weak"])
+                exported = audit.inspect(classified_symbol_fixture(abi, section=1))
+                self.assertEqual(exported["symbol_exports"][0]["name"], "symbol")
+                self.assertEqual(exported["symbol_imports"], [])
+
+    def test_weak_import_and_export(self):
+        for section, key in ((0, "symbol_imports"), (1, "symbol_exports")):
+            self.assertTrue(audit.inspect(classified_symbol_fixture(
+                binding=2, section=section))[key][0]["weak"])
+
+    def test_local_hidden_and_internal_not_exported(self):
+        for binding, visibility in ((0, 0), (1, 1), (1, 2)):
+            info = audit.inspect(classified_symbol_fixture(
+                binding=binding, visibility=visibility, section=1))
+            self.assertEqual(info["symbol_exports"], [])
+
+    def test_protected_definition_exported(self):
+        info = audit.inspect(classified_symbol_fixture(visibility=3, section=1))
+        self.assertEqual(info["symbol_exports"][0]["visibility"], 3)
+
+    def test_versioned_import(self):
+        info = audit.inspect(classified_symbol_fixture(version_kind="need"))
+        record = info["symbol_imports"][0]
+        self.assertEqual(record["version"], "VER_1")
+        self.assertEqual(record["version_library"], "libx.so")
+
+    def test_nondefault_versioned_export(self):
+        info = audit.inspect(classified_symbol_fixture(
+            section=1, version_kind="define", version_hidden=True))
+        record = info["symbol_exports"][0]
+        self.assertEqual(record["version"], "VER_1")
+        self.assertTrue(record["version_hidden"])
+
+    def test_nonstandard_symbol_requires_review(self):
+        self.put("init", classified_symbol_fixture(binding=10, section=1))
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["unsupported_symbol_objects"], ["/init"])
+        self.assertFalse(out["symbol_resolution_verified"])
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
