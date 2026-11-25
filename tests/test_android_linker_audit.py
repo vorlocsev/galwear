@@ -1634,6 +1634,73 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["art_precompiled"]["dex2oat_executed"])
         self.assertFalse(out["safe_to_flash"])
 
+    def put_art_executable(self, path, abi="arm"):
+        raw = fixture(abi)
+        # Preflight checks executable entry and filesystem execute permission.
+        struct.pack_into("<Q" if abi == "arm64" else "<I", raw, 24, 0x1000)
+        self.put(path, raw)
+        (self.root / path.lstrip("/")).chmod(0o755)
+
+    def art_launch_fixture(self, mode="zygote32", abi="arm"):
+        self.put("system/build.prop", ("ro.zygote=" + mode + "\n").encode())
+        self.put("init.rc", b"service zygote /system/bin/app_process32 -Xzygote /system/bin --zygote --start-system-server\n")
+        self.put_art_executable("system/bin/app_process32", abi)
+        self.put_art_executable("system/bin/dex2oat32")
+        for suffix, head in (("art", b"art\n085\0"), ("oat", b"oat\n183\0"), ("vdex", b"vdex021\0")):
+            self.put("system/framework/arm/boot." + suffix, head)
+
+    def inspect_art_launch(self):
+        return audit.r800_art_launch.audit(self.root, audit.r800_init_inventory.audit(self.root),
+                                           audit.r800_art_precompiled.audit(self.root))
+
+    def test_art_launch_zygote32_static_prerequisites(self):
+        self.art_launch_fixture()
+        out = self.inspect_art_launch()
+        self.assertEqual(out["status"], "STATIC_LAUNCH_INVENTORY_ONLY")
+        self.assertEqual(out["expected_abis"], ["arm"])
+        self.assertFalse(out["zygote_started"])
+        self.assertFalse(out["dex2oat_executed"])
+
+    def test_art_launch_zygote_abi_mismatch(self):
+        self.art_launch_fixture(abi="arm64")
+        out = self.inspect_art_launch()
+        self.assertTrue(any("ro.zygote ABI mismatch" in e for e in out["errors"]))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_art_launch_dual_mode_missing_secondary(self):
+        self.art_launch_fixture(mode="zygote32_64")
+        out = self.inspect_art_launch()
+        self.assertIn("Missing inspected service: zygote_secondary", out["errors"])
+        self.assertEqual(out["missing_boot_image_candidates"], ["arm64"])
+
+    def test_art_launch_conflicting_properties(self):
+        self.art_launch_fixture()
+        self.put("vendor/build.prop", b"ro.zygote=zygote64\n")
+        out = self.inspect_art_launch()
+        self.assertIsNone(out["zygote_mode"])
+        self.assertFalse(out["property_precedence_verified"])
+
+    def test_art_launch_compiler_abi_mismatch(self):
+        self.art_launch_fixture()
+        self.put_art_executable("system/bin/dex2oat32", "arm64")
+        out = self.inspect_art_launch()
+        self.assertIsNone(out["dex2oat"]["/system/bin/dex2oat32"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_art_launch_missing_zygote_arguments(self):
+        self.art_launch_fixture()
+        self.put("init.rc", b"service zygote /system/bin/app_process32\n")
+        out = self.inspect_art_launch()
+        self.assertIn("zygote: --zygote missing", out["errors"])
+        self.assertIn("zygote: system-server argument missing", out["errors"])
+
+    def test_art_launch_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["art_launch"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["art_launch"]["system_server_started"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
