@@ -12,7 +12,7 @@ import time
 
 from r800_cpio_audit import inspect_cpio, MAX_ARCHIVE_BYTES
 from r800_initramfs_spec import validate_init
-from r800_qemu_user_init import EXPECTED
+from r800_qemu_user_init import EXPECTED, HEARTBEAT_PREFIX, inspect_heartbeats
 
 SCHEMA = "galwear-r800-generic-arm64-system-v1"
 MAX_KERNEL = 128 * 1024 * 1024
@@ -58,9 +58,15 @@ def inspect_console(log: bytes, timed_out: bool) -> dict:
     if any(b"Kernel panic" in line or b"Attempted to kill init" in line
            or b"Failed to execute /init" in line for line in lines):
         raise ValueError("Kernel panic or init execution failure")
+    if any(line.startswith(HEARTBEAT_PREFIX) for line in lines[:idx]):
+        raise ValueError("Heartbeat before startup marker")
+    count = inspect_heartbeats([line for line in lines[idx + 1:]
+                                if line.startswith(HEARTBEAT_PREFIX)])
     return {"kernel_launched_init": True, "console_marker_exact": True,
+            "heartbeat_count": count, "heartbeat_sequence_verified": True,
             "qemu_process_alive_until_host_timeout": True,
-            "guest_progress_after_marker_verified": False}
+            "guest_progress_after_marker_verified": True,
+            "guest_alive_at_timeout_proven": False}
 
 
 def kernel_bytes(path: Path) -> bytes:
