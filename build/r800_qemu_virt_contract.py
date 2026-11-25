@@ -24,12 +24,23 @@ PROPERTY_FORBIDDEN = ("SECURITY_SELINUX_BOOTPARAM", "SECURITY_SELINUX_DISABLE", 
                       "NETDEVICES", "IPV6", "PACKET", "NETFILTER", "WIRELESS", "BT", "VSOCKETS", "NET_9P", "CAN", "NFC")
 
 
+BLOCK_REQUIRED = ("BLOCK", "BLK_DEV", "VIRTIO_MENU", "VIRTIO", "VIRTIO_MMIO", "VIRTIO_BLK",
+                  "EXT4_FS", "EXT4_FS_SECURITY")
+BLOCK_FORBIDDEN = ("PCI", "VIRTIO_PCI", "VIRTIO_BLK_SCSI", "VIRTIO_NET", "BLK_DEV_LOOP",
+                   "BLK_DEV_RAM", "BLK_DEV_MD", "BLK_DEV_DM", "ATA", "NVME_CORE",
+                   "VIRTIO_MMIO_CMDLINE_DEVICES")
+NO_BLOCK_TRANSPORT = ("VIRTIO_BLK", "VIRTIO_MMIO", "EXT4_FS")
+
+
 def inspect(text: str, source: str, profile: str = "minimal") -> dict:
-    if profile not in ("minimal", "property"):
+    if profile not in ("minimal", "property", "block"):
         raise ValueError("Unknown virt profile")
-    required = REQUIRED + (PROPERTY_REQUIRED if profile == "property" else ())
+    required = REQUIRED + (PROPERTY_REQUIRED if profile != "minimal" else ())
+    if profile == "block":
+        required += BLOCK_REQUIRED
     forbidden = (tuple(key for key in FORBIDDEN if key != "NET") + PROPERTY_FORBIDDEN
-                 if profile == "property" else FORBIDDEN + ("SECURITY_SELINUX",))
+                 if profile != "minimal" else FORBIDDEN + ("SECURITY_SELINUX",))
+    forbidden += BLOCK_FORBIDDEN if profile == "block" else NO_BLOCK_TRANSPORT
     config = parse(text)
     for key in required:
         if config.get("CONFIG_" + key) != "y":
@@ -45,12 +56,12 @@ def inspect(text: str, source: str, profile: str = "minimal") -> dict:
         raise ValueError("Embedded list changed")
     if config.get("CONFIG_CMDLINE") != '""':
         raise ValueError("Unexpected built-in command line")
-    if profile == "property" and config.get("CONFIG_DEFAULT_SECURITY") != '"selinux"':
+    if profile != "minimal" and config.get("CONFIG_DEFAULT_SECURITY") != '"selinux"':
         raise ValueError("Expected SELinux default security module")
     return {"status": "VIRT_CONFIG_STATIC_ONLY", "profile": profile, "required": list(required),
             "disabled": list(forbidden), "selinux_policy_loaded": False, "property_service_started": False, "nr_cpus": 2,
             "config_sha256": hashlib.sha256(text.encode()).hexdigest(),
-            "r800_hardware_config": False, "safe_to_flash": False}
+            "virtio_block_profile": profile == "block", "r800_hardware_config": False, "safe_to_flash": False}
 
 
 def main() -> int:
@@ -58,7 +69,7 @@ def main() -> int:
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--list", type=Path, required=True)
     p.add_argument("--report", type=Path, required=True)
-    p.add_argument("--profile", choices=("minimal", "property"), default="minimal")
+    p.add_argument("--profile", choices=("minimal", "property", "block"), default="minimal")
     a = p.parse_args()
     try:
         if not a.list.is_absolute() or a.list.name != "initramfs.list":
