@@ -21,6 +21,10 @@ cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
     -fsanitize=undefined -fno-sanitize-recover=all \
     tests/test_r800_gps_hal_lifecycle.c -o "$TMP/test-hal-lifecycle"
 timeout 30s "$TMP/test-hal-lifecycle"
+cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
+    -fsanitize=undefined -fno-sanitize-recover=all \
+    tests/test_r800_gps_hal_peer.c -o "$TMP/test-hal-peer"
+timeout 45s "$TMP/test-hal-peer"
 python3 -m unittest discover -s tests -p 'test_r800_gps_link_gate.py' -v
 python3 -m unittest discover -s tests -p 'test_r800_extract_ext4.py' -v
 python3 -m unittest discover -s tests -p 'test_android_linker_audit.py' -v

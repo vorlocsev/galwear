@@ -143,6 +143,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int sock = -1;
 static int sock_failed; /* protected by lock; only reader closes published fd */
 static int want_on;          /* framework asked for a session */
+static unsigned long session_epoch; /* under lock; reader owns satellite reset */
 /* All lifecycle state below is protected by lock. The reader owns callback
  * delivery and the published fd. The framework may create detached threads. */
 static int running, starting, reader_alive, reader_id_valid, cleaning;
@@ -353,6 +354,7 @@ static void reader(void *arg)
 {
 	char buf[256];
 	struct gps_frame frame = {{0}, 0};
+    unsigned long seen_epoch = 0;
 	(void)arg;
 
 	pthread_mutex_lock(&lock);
@@ -390,6 +392,7 @@ static void reader(void *arg)
             }
             sock = fd;
 			sock_failed = 0;
+            seen_epoch = session_epoch;
 			if (want_on)
 				send_line("START\n");
 			pthread_mutex_unlock(&lock);
@@ -407,9 +410,15 @@ static void reader(void *arg)
 				goto disconnected;
 			if (state == 1) {
                 int deliver;
+                unsigned long epoch;
                 pthread_mutex_lock(&lock);
+                epoch = session_epoch;
                 deliver = running && (want_on || !strncmp(frame.line,"STATUS ",7));
                 pthread_mutex_unlock(&lock);
+                if (seen_epoch != epoch) {
+                    reset_sv();
+                    seen_epoch = epoch;
+                }
                 if (deliver)
                     handle_line(frame.line);
 				frame.used = 0;
@@ -499,6 +508,7 @@ static int gps_start(void)
     }
     if (!want_on) {
         want_on = 1;
+        ++session_epoch;
         send_line("START\n"); /* reader replays wanted state after reconnect */
     }
     pthread_mutex_unlock(&lock);
@@ -510,6 +520,7 @@ static int gps_stop(void)
     pthread_mutex_lock(&lock);
     if (want_on) {
         want_on = 0;
+        ++session_epoch;
         send_line("STOP\n");
     }
     pthread_mutex_unlock(&lock);

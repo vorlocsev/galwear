@@ -20,3 +20,12 @@ a successfully returned callback thread violates the assumed thread contract.
 Satellite GSV/GSA validation is a separate follow-up.
 
 safe_to_flash=false
+
+## Synthetic bridge integration
+
+The host peer fixture checks outgoing START/STOP/TIME/LOC, fragmented FIX,
+NMEA checksums, GPS/SBAS reports, incomplete GSV, session epoch resets,
+reconnect and malformed-frame shutdown. It drives the actual Android HAL
+reader via a temporary local socket. The Tizen bridge and donor libraries
+are not executed. No wire session acknowledgement or generation ID exists;
+frames already in flight cannot be attributed unambiguously to a session.
