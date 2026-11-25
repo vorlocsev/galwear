@@ -117,6 +117,21 @@ def inspect_console(log, disks, allow_label_probe=False, allow_service=False):
 
 
 def run(a, *, expected_inventory=None, extra_entries=(), label_parser=None, transition=False, service=False):
+    policy,disks = inventory(a, transition=transition, service=service)
+    if expected_inventory is not None and (policy,disks) != expected_inventory:
+        raise ValueError("Disk inventory changed since label audit")
+    return run_disks(a, policy, disks, extra_entries=extra_entries, label_parser=label_parser,
+                     transition=transition, service=service)
+
+
+def run_disks(a, policy, disks, *, extra_entries=(), label_parser=None,
+              transition=False, service=False, synthetic=False):
+    if synthetic and (policy is not None or extra_entries or label_parser is not None or transition or service):
+        raise ValueError("Synthetic disk mode cannot load Android policy or execute Android")
+    if not disks or len(disks)>6 or len({d["name"] for d in disks}) != len(disks):
+        raise ValueError("Invalid disk list")
+    for d in disks:
+        verify_image(d["path"],d["name"],d["sha256"],d["bytes"])
     kernel_sha = verify_baseline(a.baseline,a.kernel)
     cfg = read_bounded_json(a.config_evidence)
     if (cfg.get("status") != "VIRT_CONFIG_STATIC_ONLY" or cfg.get("profile") != "block"
@@ -125,9 +140,6 @@ def run(a, *, expected_inventory=None, extra_entries=(), label_parser=None, tran
         raise ValueError("Matching separate block profile required")
     if (transition or service) and label_parser is None:
         raise ValueError("Transition requires dedicated acceptance parser")
-    policy,disks = inventory(a, transition=transition, service=service)
-    if expected_inventory is not None and (policy,disks) != expected_inventory:
-        raise ValueError("Disk inventory changed since label audit")
     init = validate_init(a.init)
     spec = read_bounded_json(a.compile_evidence)
     if spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != init:
@@ -171,7 +183,8 @@ def run(a, *, expected_inventory=None, extra_entries=(), label_parser=None, tran
         verify_image(d["path"],d["name"],d["sha256"],d["bytes"])
     console = log.read_bytes()
     evidence = inspect_console(console,disks,allow_label_probe=label_parser is not None,allow_service=service)
-    status = "VIRT_ANDROID_READONLY_BLOCK_MOUNTS_ONLY"
+    status = ("VIRT_SYNTHETIC_READONLY_BLOCK_MOUNTS_ONLY" if synthetic else
+              "VIRT_ANDROID_READONLY_BLOCK_MOUNTS_ONLY")
     if label_parser is not None:
         evidence.update(label_parser(console,disks))
         status = ("VIRT_GALWEAR_EXT4_PROPERTY_SERVICE_ONLY" if service else
@@ -180,7 +193,7 @@ def run(a, *, expected_inventory=None, extra_entries=(), label_parser=None, tran
     return {**observed,**evidence,
             "status":status,
             "generic_kernel_sha256":kernel_sha,"config_sha256":cfg["config_sha256"],
-            "policy_sha256":policy,"archive_sha256":sha(archive),"init_sha256":init["sha256"],
+            "synthetic_disk_fixture":synthetic,"policy_sha256":policy,"archive_sha256":sha(archive),"init_sha256":init["sha256"],
             "disks":[{**d,"path":str(d["path"])} for d in disks],
             "disk_hashes_unchanged":True,"exynos9110_emulated":False,
             "device_contacted":False,"safe_to_flash":False}
