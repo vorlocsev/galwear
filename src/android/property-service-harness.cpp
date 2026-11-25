@@ -12,6 +12,8 @@
 
 #include "property_service.h"
 
+extern "C" int __system_property_add(const char*, unsigned int, const char*, unsigned int);
+
 int main(int argc, char** argv) {
     if (argc != 2 || strcmp(argv[1], "--virt-property-service") || getpid() != 1)
         return 2;
@@ -25,6 +27,12 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     android::base::InitLogging(argv, &android::base::StderrLogger);
     android::init::PropertyInit();
+    // Seed the negative control via the writer-owned property area before clients run.
+    // This is not evidence of a socket transaction by init.
+    constexpr char denied[] = "debug.galwear.denied";
+    if (__system_property_find(denied) ||
+        __system_property_add(denied, sizeof(denied) - 1, "seeded", 6) != 0)
+        return 7;
     int init_socket = -1;
     android::init::StartPropertyService(&init_socket);
     if (init_socket < 0 || lstat("/dev/socket/property_service", &st) ||
