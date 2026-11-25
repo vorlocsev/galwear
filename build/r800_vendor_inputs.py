@@ -14,6 +14,7 @@ MAX_IMAGE = 4 * 1024**3
 MAX_LIBRARY = 64 * 1024**2
 OVERLAY = ("etc/init/init.r800.rc", "etc/fstab.r800", "ueventd.rc",
            "etc/vintf/manifest.xml", "audio/audio_policy_configuration.xml",
+           "sensors/android.hardware.sensors@1.0-service.rc",
            "hwcomposer.r800.so", "lights.r800.so", "audio.primary.r800.so",
            "gps.r800.so", "sensors.r800.so")
 
