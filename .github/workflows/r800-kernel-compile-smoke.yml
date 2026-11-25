@@ -16,6 +16,8 @@ on:
       - "tests/test_nzit_layout_audit.py"
       - "src/dt/r800.dts"
       - "build/r800_embedded_dtb.py"
+      - "build/r800_minimal_boot_contract.py"
+      - "tests/test_minimal_boot_contract.py"
       - "build/r800_dtb_memory_audit.py"
       - "tests/test_embedded_dtb.py"
       - "build/r800_initramfs_compile_smoke.sh"
@@ -55,6 +57,7 @@ jobs:
           sh -n build/r800_kernel_compile_smoke.sh
           python3 -m unittest discover -s tests -p 'test_kernel_compile_recipe.py' -v
           python3 -m unittest discover -s tests -p 'test_nzit_layout_audit.py' -v
+          python3 -m unittest discover -s tests -p 'test_minimal_boot_contract.py' -v
           python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
           python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
           sh -n build/r800_initramfs_compile_smoke.sh
@@ -193,8 +196,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends device-tree-compiler
           python3 -m unittest discover -s tests -p 'test_embedded_dtb.py' -v
           if [ "$EMBED_INIT" = true ]; then
-            python3 build/r800_embedded_dtb.py --source src/dt/r800.dts --out-dir "$RUNNER_TEMP/r800-embedded-dtb" 2>"$RUNNER_TEMP/r800-layout-dtc.txt"
+            python3 build/r800_embedded_dtb.py --minimal-bootargs --source src/dt/r800.dts --out-dir "$RUNNER_TEMP/r800-embedded-dtb" 2>"$RUNNER_TEMP/r800-layout-dtc.txt"
             dtb="$RUNNER_TEMP/r800-embedded-dtb/embedded-only.dtb"
+            python3 build/r800_minimal_boot_contract.py --dtb "$dtb" --config "$RUNNER_TEMP/compiled-kernel/.config" --report "$RUNNER_TEMP/r800-minimal-boot-contract.json"
           else
             dtb="$RUNNER_TEMP/r800-layout.dtb"
             dtc -I dts -O dtb -S 133120 -o "$dtb" src/dt/r800.dts 2>"$RUNNER_TEMP/r800-layout-dtc.txt"
@@ -269,5 +273,6 @@ jobs:
             ${{ runner.temp }}/r800-nzit-layout.json
             ${{ runner.temp }}/r800-layout-dtc.txt
             ${{ runner.temp }}/r800-embedded-dtb/embedded-dtb-evidence.json
+            ${{ runner.temp }}/r800-minimal-boot-contract.json
           if-no-files-found: warn
           retention-days: 7
