@@ -18,6 +18,8 @@
  * Built against the Tizen rootfs glibc (armv7 soft-float) with no Tizen headers
  * or C runtime: the few libc calls are declared here and _start is our own.
  */
+#include "gps_frame.h"
+
 typedef unsigned int size_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -406,8 +408,9 @@ static int serve(void)
 	printf("listening on %s\n", SOCK_PATH);
 	fflush(0);
 	for (;;) {
-		char buf[512];
-		int have = 0, on = 0;
+		char buf[256];
+		struct gps_frame frame = {{0}, 0};
+		int on = 0;
 		int c = accept(ls, 0, 0);
 		if (c < 0)
 			continue;
@@ -417,19 +420,16 @@ static int serve(void)
 		printf("client connected\n");
 		fflush(0);
 		for (;;) {
-			long n = read(c, buf + have, sizeof(buf) - 1 - have);
-			char *s, *nl;
+			long n = read(c, buf, sizeof(buf));
 			if (n <= 0)
 				break;
-			/* Embedded NUL must not hide commands or truncate a frame. */
-			for (long j = 0; j < n; j++)
-				if (buf[have + j] == 0)
+			for (long j = 0; j < n; j++) {
+				int state = gps_frame_byte(&frame, (unsigned char)buf[j]);
+				char *s = frame.line;
+				if (state < 0)
 					goto disconnected;
-			have += n;
-			buf[have] = 0;
-			s = buf;
-			while ((nl = strchr(s, '\n'))) {
-				*nl = 0;
+				if (state == 0)
+					continue;
 				if (!strcmp(s, "START") && !on) {
 					on = session(1) == 0;
 				} else if (!strcmp(s, "STOP") && on) {
@@ -451,14 +451,8 @@ static int serve(void)
 					       (double)acc, r);
 					fflush(0);
 				}
-				s = nl + 1;
+				frame.used = 0;
 			}
-			have = 0;
-			while (*s)
-				buf[have++] = *s++;
-			/* Never reinterpret the tail of an oversized line as a command. */
-			if (have >= (int)sizeof(buf) - 1)
-				break;
 		}
 disconnected:
 		pthread_mutex_lock(mtx);
