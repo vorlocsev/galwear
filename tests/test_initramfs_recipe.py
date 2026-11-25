@@ -25,7 +25,7 @@ def fake_aarch64_elf(*, machine=183, interpreter=False,
     struct.pack_into("<Q", binary, 24, 0x400100)
     struct.pack_into("<Q", binary, 32, 64)
     struct.pack_into("<HH", binary, 54, 56, 2 if interpreter else 1)
-    struct.pack_into("<I", binary, 64, 1)
+    struct.pack_into("<II", binary, 64, 1, 5)  # PT_LOAD, PF_R | PF_X
     struct.pack_into("<QQ", binary, 64 + 8, 192, 0x400100)
     struct.pack_into("<QQ", binary, 64 + 32, 128 if bad_segment else 32, 32)
     if interpreter:
