@@ -14,6 +14,66 @@ START = b"[    1.234] Run /init as init process\r\n"
 BEATS = a.HEARTBEAT_PREFIX + b"00000001\n" + a.HEARTBEAT_PREFIX + b"00000002\n"
 
 
+PLATFORM = (
+    b"[    0.000000] Machine model: linux,dummy-virt\n"
+    b"[    0.000000] GICv3: CPU0: found redistributor 0 region 0:0x080a0000\n"
+    b"[    0.000000] arch_timer: cp15 timer(s) running at 62.50MHz (virt).\n"
+    b"[    0.000000] Memory: 483000K/524288K available (kernel code, reserved)\n"
+    b"[    0.100000] GICv3: CPU1: found redistributor 1 region 0:0x080c0000\n"
+    b"[    0.110000] SMP: Total of 2 processors activated.\n"
+    b"[    0.200000] printk: console [ttyAMA0] enabled\n"
+)
+
+
+class PlatformTests(unittest.TestCase):
+    def test_complete_early_platform(self):
+        result = a.inspect_platform(PLATFORM + START + a.EXPECTED + BEATS)
+        self.assertEqual(result["smp_online_cpus"], 2)
+        self.assertEqual(result["gicv3_redistributor_cpus"], [0, 1])
+        self.assertEqual(result["arm_timer_mhz_reported"], 62.5)
+        self.assertEqual(result["kernel_memory_total_kib"], 524288)
+        self.assertTrue(result["pl011_console_enabled"])
+        self.assertFalse(result["physical_hardware_verified"])
+
+    def test_each_missing_platform_marker_rejected(self):
+        for line in PLATFORM.splitlines(keepends=True):
+            with self.subTest(line=line):
+                with self.assertRaises(ValueError):
+                    a.inspect_platform(PLATFORM.replace(line, b"") + START)
+
+    def test_wrong_machine_rejected(self):
+        with self.assertRaisesRegex(ValueError, "machine model"):
+            a.inspect_platform(PLATFORM.replace(b"linux,dummy-virt", b"GALILEO-LARGE-BT") + START)
+
+    def test_single_cpu_rejected(self):
+        with self.assertRaisesRegex(ValueError, "SMP online"):
+            a.inspect_platform(PLATFORM.replace(b"2 processors", b"1 processors") + START)
+
+    def test_duplicate_redistributor_rejected(self):
+        with self.assertRaisesRegex(ValueError, "redistributor"):
+            a.inspect_platform(PLATFORM.replace(b"CPU1:", b"CPU0:") + START)
+
+    def test_zero_timer_rejected(self):
+        with self.assertRaisesRegex(ValueError, "timer frequency"):
+            a.inspect_platform(PLATFORM.replace(b"62.50MHz", b"0.00MHz") + START)
+
+    def test_invalid_memory_total_rejected(self):
+        with self.assertRaisesRegex(ValueError, "memory total"):
+            a.inspect_platform(PLATFORM.replace(b"524288K", b"786432K") + START)
+
+    def test_invalid_available_memory_rejected(self):
+        with self.assertRaisesRegex(ValueError, "available memory"):
+            a.inspect_platform(PLATFORM.replace(b"483000K", b"100K") + START)
+
+    def test_late_platform_evidence_rejected(self):
+        with self.assertRaisesRegex(ValueError, "machine model"):
+            a.inspect_platform(START + PLATFORM)
+
+    def test_duplicate_smp_summary_rejected(self):
+        with self.assertRaisesRegex(ValueError, "SMP online"):
+            a.inspect_platform(PLATFORM + b"SMP: Total of 2 processors activated.\n" + START)
+
+
 class SystemBootTests(unittest.TestCase):
     def test_expected_console(self):
         report = a.inspect_console(START + a.EXPECTED + BEATS, True)
