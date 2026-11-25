@@ -15,6 +15,9 @@ on:
       - "build/r800_nzit_layout_audit.py"
       - "tests/test_nzit_layout_audit.py"
       - "src/dt/r800.dts"
+      - "build/r800_embedded_dtb.py"
+      - "build/r800_dtb_memory_audit.py"
+      - "tests/test_embedded_dtb.py"
       - "build/r800_initramfs_compile_smoke.sh"
       - "build/r800_initramfs_spec.py"
       - "build/r800_embedded_initramfs_config.py"
@@ -188,10 +191,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends device-tree-compiler
-          dtc -I dts -O dtb -S 133120 -o "$RUNNER_TEMP/r800-layout.dtb" src/dt/r800.dts 2>"$RUNNER_TEMP/r800-layout-dtc.txt"
+          python3 -m unittest discover -s tests -p 'test_embedded_dtb.py' -v
+          if [ "$EMBED_INIT" = true ]; then
+            python3 build/r800_embedded_dtb.py --source src/dt/r800.dts --out-dir "$RUNNER_TEMP/r800-embedded-dtb" 2>"$RUNNER_TEMP/r800-layout-dtc.txt"
+            dtb="$RUNNER_TEMP/r800-embedded-dtb/embedded-only.dtb"
+          else
+            dtb="$RUNNER_TEMP/r800-layout.dtb"
+            dtc -I dts -O dtb -S 133120 -o "$dtb" src/dt/r800.dts 2>"$RUNNER_TEMP/r800-layout-dtc.txt"
+          fi
           python3 build/r800_nzit_layout_audit.py \
             --image "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image" \
-            --dtb "$RUNNER_TEMP/r800-layout.dtb" \
+            --dtb "$dtb" \
             --report "$RUNNER_TEMP/r800-nzit-layout.json"
 
       - name: Record evidence only, never upload compiled Image
@@ -258,5 +268,6 @@ jobs:
             ${{ runner.temp }}/compiled-kernel/embedded-link-evidence.json
             ${{ runner.temp }}/r800-nzit-layout.json
             ${{ runner.temp }}/r800-layout-dtc.txt
+            ${{ runner.temp }}/r800-embedded-dtb/embedded-dtb-evidence.json
           if-no-files-found: warn
           retention-days: 7
