@@ -15,6 +15,7 @@ import tempfile
 
 from r800_android_rootfs_preflight import CONTEXTS, snapshot
 from r800_android_init_dependencies import regular
+from r800_android_init_rootfs import unique_object
 
 MAX_POLICY = 16 * 1024 * 1024
 POLICY_PATHS = ("odm/etc/selinux/precompiled_sepolicy",
@@ -110,16 +111,33 @@ def audit(product, checkfc):
     }
 
 
+def verify_rootfs(policy, rootfs):
+    if (rootfs.get("status") not in ("ANDROID_ROOTFS_PREFLIGHT_ARCHIVE_ONLY", "VIRT_ANDROID_ROOTFS_PREFLIGHT_ONLY")
+            or rootfs.get("safe_to_flash") is not False
+            or rootfs.get("property_contexts_sha256") != policy["property_contexts_sha256"]):
+        raise ValueError("Rootfs property context identity mismatch")
+    digest = rootfs.get("archive_sha256", "")
+    if not isinstance(digest, str) or not HASH.fullmatch(digest):
+        raise ValueError("Missing rootfs archive identity")
+    return digest
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--product-out", required=True, type=Path)
     p.add_argument("--checkfc", required=True, type=Path)
     p.add_argument("--report", required=True, type=Path)
+    p.add_argument("--rootfs-report", type=Path)
     a = p.parse_args()
     try:
         report = audit(a.product_out, a.checkfc)
+        report["rootfs_context_identity_matched"] = False
+        if a.rootfs_report:
+            rootfs = json.loads(snapshot(a.rootfs_report, 262144), object_pairs_hook=unique_object)
+            report["rootfs_archive_sha256"] = verify_rootfs(report, rootfs)
+            report["rootfs_context_identity_matched"] = True
         rc = 0
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as exc:
         report = {"status": "REJECT", "reason": str(exc), "safe_to_flash": False}
         rc = 2
     a.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
