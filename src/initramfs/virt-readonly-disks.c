@@ -16,6 +16,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(GALWEAR_TRANSITION_PROBE) && !defined(GALWEAR_LABEL_PROBE)
+#error "Transition requires label probe"
+#endif
+
 static const char *const names[] = {"system", "system_ext", "product", "vendor", "odm", "runtime"};
 
 static int allowed(const char *name)
@@ -73,15 +77,25 @@ static int mount_disk(const char *name)
 #else
     snprintf(target, sizeof(target), "/mnt/%s", name);
 #endif
-    if (mkdir(target, 0755) || mount(node, target, "ext4",
-        MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "noload")) return 6;
+    unsigned long flags = MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC;
+    unsigned long expected_flags = ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC;
+#ifdef GALWEAR_TRANSITION_PROBE
+    if (!strcmp(name, "system")) {
+        flags &= ~MS_NOEXEC;
+        expected_flags &= ~ST_NOEXEC;
+    }
+#endif
+    if (mkdir(target, 0755) || mount(node, target, "ext4", flags, "noload")) return 6;
     struct statfs fs;
     struct statvfs vfs;
     if (statfs(target, &fs) || (unsigned long)fs.f_type != 0xef53UL ||
         statvfs(target, &vfs) ||
         (vfs.f_flag & (ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC)) !=
-        (ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC)) return 7;
+        expected_flags) return 7;
     printf("r800-virt-disk: %s serial=PASS block-ro=1 ext4-ro=1\n", name);
+#ifdef GALWEAR_TRANSITION_PROBE
+    printf("r800-ext4-exec: %s noexec=%d\n", name, !!(vfs.f_flag & ST_NOEXEC));
+#endif
     return 0;
 }
 
@@ -191,6 +205,15 @@ int main(void)
     printf("r800-virt-disk: PASS count=%u policy=not-loaded android=not-started\n", count);
 #ifdef GALWEAR_LABEL_PROBE
     if (policy_and_labels()) return 6;
+#endif
+#ifdef GALWEAR_TRANSITION_PROBE
+    char path[] = "/system/bin/init";
+    char stage[] = "--galwear-ext4-diagnostic";
+    char *const args[] = {path, stage, NULL};
+    char *const env[] = {NULL};
+    puts("r800-ext4-transition: exec=/system/bin/init diagnostic-only");
+    execve(path, args, env);
+    return 7;
 #endif
     const struct timespec delay = {5, 0};
     unsigned sequence = 0;
