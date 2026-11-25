@@ -44,6 +44,39 @@ def fixture(abi="arm64", needed=(), bad_offset=False, unterminated=False, soname
     return data
 
 
+def version_fixture(abi="arm64", need=None, define=None, malformed=None):
+    data = fixture(abi)
+    data.extend(b"\0" * 512)
+    wide = abi == "arm64"
+    strings = b"\0libx.so\0VER_1\0VER_2\0"
+    data[400:400 + len(strings)] = strings
+    tags = [(5, 0x1000 + 400), (10, len(strings))]
+    if need:
+        tags += [(1, 1), (audit.DT_VERNEED, 0x1000 + 600),
+                 (audit.DT_VERNEEDNUM, 1)]
+        struct.pack_into("<HHIII", data, 600, 1, 1, 1, 16,
+                         16 if malformed == "chain" else 0)
+        struct.pack_into("<IHHII", data, 616, 0, 0, 2, strings.index(need.encode()), 0)
+    if define:
+        tags += [(audit.DT_VERDEF, 0x1000 + 700), (audit.DT_VERDEFNUM, 1)]
+        struct.pack_into("<HHHHIII", data, 700, 1, 0, 2, 1, 0, 20, 0)
+        struct.pack_into("<II", data, 720, strings.index(define.encode()), 0)
+    tags += [(audit.DT_VERSYM, 0x1000 + (1024 if malformed == "versym" else 800)), (0, 0)]
+    if malformed == "pair":
+        tags = [pair for pair in tags if pair[0] != audit.DT_VERNEEDNUM]
+    fmt = "<qQ" if wide else "<iI"
+    size = len(tags) * struct.calcsize(fmt)
+    for i, pair in enumerate(tags):
+        struct.pack_into(fmt, data, 224 + i * struct.calcsize(fmt), *pair)
+    if wide:
+        struct.pack_into("<QQ", data, 96, len(data), len(data))
+        struct.pack_into("<QQ", data, 152, size, size)
+    else:
+        struct.pack_into("<II", data, 68, len(data), len(data))
+        struct.pack_into("<II", data, 100, size, size)
+    return data
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -179,6 +212,44 @@ class LinkerTests(unittest.TestCase):
         self.assertEqual(out["soname_mismatches"], [{
             "from": "/init", "needed": "libx.so",
             "candidate": "/system/lib64/libx.so", "soname": "liby.so"}])
+        self.assertFalse(out["safe_to_flash"])
+
+    def test_version_inventory_both_abis(self):
+        for abi in ("arm", "arm64"):
+            with self.subTest(abi=abi):
+                need = audit.inspect(version_fixture(abi, need="VER_1"))
+                self.assertEqual(need["version_needs"], [{"library": "libx.so",
+                    "version": "VER_1", "weak": False, "index": 2}])
+                self.assertTrue(need["versym_present"])
+                definition = audit.inspect(version_fixture(abi, define="VER_1"))
+                self.assertEqual(definition["version_definitions"][0]["version"], "VER_1")
+
+    def test_invalid_version_chain(self):
+        with self.assertRaisesRegex(ValueError, "chain continuation"):
+            audit.inspect(version_fixture(need="VER_1", malformed="chain"))
+
+    def test_missing_version_count_tag(self):
+        with self.assertRaisesRegex(ValueError, "version tag"):
+            audit.inspect(version_fixture(need="VER_1", malformed="pair"))
+
+    def test_versym_outside_load(self):
+        with self.assertRaisesRegex(ValueError, "file-backed"):
+            audit.inspect(version_fixture(need="VER_1", malformed="versym"))
+
+    def test_matching_version_definition_is_not_runtime_proof(self):
+        self.put("init", version_fixture(need="VER_1"))
+        self.put("system/lib64/libx.so", version_fixture(define="VER_1"))
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["status"], "CANDIDATES_FOUND_ONLY")
+        self.assertEqual(out["version_mismatches"], [])
+        self.assertFalse(out["symbol_versions_verified"])
+
+    def test_missing_version_definition_requires_review(self):
+        self.put("init", version_fixture(need="VER_1"))
+        self.put("system/lib64/libx.so", version_fixture(define="VER_2"))
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["version_mismatches"][0]["version"], "VER_1")
         self.assertFalse(out["safe_to_flash"])
 
     def test_symlink_alias_not_ambiguous(self):
