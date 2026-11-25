@@ -29,10 +29,24 @@ class ReadinessTests(unittest.TestCase):
         lines=["SOURCE_SHA="+sha,"GPS_OFFLINE_COMPILE_GATE=PASS","DONOR_LINK_VERIFIED=false",
                "QEMU_RUNTIME_VERIFIED=false","GNSS_RUNTIME_VERIFIED=false","safe_to_flash=false"]
         with patch.object(r,"git_state",return_value=(sha,True)):
-            for extra,expected in (([],"PASS"),(["GPS_OFFLINE_COMPILE_GATE=PASS"],"FAILED")):
+            for extra,expected in (([],"PASS"),(["GPS_OFFLINE_COMPILE_GATE=PASS"],"FAILED"),
+                                   (["safe_to_flash=true"],"FAILED"),
+                                   (["DONOR_LINK_VERIFIED=true"],"FAILED"),
+                                   (["SOURCE_SHA="+"b"*40],"FAILED")):
                 result=subprocess.CompletedProcess([],0,"\n".join(lines+extra).encode(),b"")
                 with patch.object(r.subprocess,"run",return_value=result):
                     self.assertEqual(r.offline_gate(True,sha,True)["status"],expected)
+    def test_partial_link_inputs_rejected(self):
+        for flag in ("--binary", "--libdir"):
+            with patch.object(sys,"argv",["readiness",flag,"unused"]), \
+                 patch.object(r,"git_state",return_value=("a"*40,True)), \
+                 patch.object(r,"static_gate") as gate, \
+                 patch("builtins.print") as output:
+                self.assertEqual(r.main(),2)
+                gate.assert_not_called()
+                report=json.loads(output.call_args.args[0])
+                self.assertEqual(report["decision"],"REJECT_EVIDENCE")
+                self.assertFalse(report["safe_to_flash"])
     def test_hold_even_when_static_passes(self):
         report=r.summarize("a"*40,True,[r.outcome("link","STATIC_PASS")])
         self.assertFalse(report["safe_to_flash"])
