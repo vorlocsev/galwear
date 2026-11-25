@@ -49,8 +49,9 @@ def verify_system(stock, fixture):
         raise ValueError("Separate service system fixture required")
     old,new = stock["verified_system_entries"], fixture["verified_system_entries"]
     def executable_files(entries):
-        return {path:info.get("sha256") for path,info in entries.items()
-                if path.startswith(("system/bin/","system/lib64/")) and info.get("type")=="regular"}
+        return {path:{k:v for k,v in info.items() if k!="context"}
+                for path,info in entries.items()
+                if path in ("system/bin","system/lib64") or path.startswith(("system/bin/","system/lib64/"))}
     if executable_files(old) != executable_files(new):
         raise ValueError("System executable payloads changed from stock control")
     for path,label in ((FILE,LABEL),(SERVICE,SERVICE_LABEL)):
@@ -80,6 +81,8 @@ def inspect_console(log,records,plan):
     if [x for x in lines if x.startswith(b"r800-ext4-exec:")] != modes:
         raise ValueError("Unexpected service execution flags")
     markers = [x for x in lines if x.startswith((b"r800-property-service:",b"r800-property-client:"))]
+    if any(x.startswith(b"r800-ext4-transition:") for x in lines):
+        raise ValueError("Unexpected static transition markers")
     if markers != MARKERS:
         raise ValueError("Unexpected original libinit/client sequence")
     mount_end = disks.PREFIX+f"PASS count={len(records)} policy=not-loaded android=not-started".encode()
