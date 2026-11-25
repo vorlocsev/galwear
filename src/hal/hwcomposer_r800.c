@@ -119,6 +119,7 @@ struct r800_hwc {
 	hwc_composer_device_1_t base;      /* must be first */
 	const hwc_procs_t *procs;
 	const gralloc_module_t *gralloc;
+	void *hardware_lib;
 
 	int fb_fd;
 	struct fb_var_screeninfo var;
@@ -131,6 +132,7 @@ struct r800_hwc {
 	pthread_cond_t cond;
 	int vsync_enabled;
 	unsigned long vsync_epoch;
+	int vsync_stop, vsync_started;
 	int blanked;
 	int power_unknown;                 /* failed transition: do not present until recovered */
 	int real_blanked;
@@ -147,6 +149,7 @@ struct r800_hwc {
 	pthread_t idle_thread;
 	pthread_mutex_t doze_lock;
 	pthread_cond_t doze_cond;
+	int idle_stop, idle_started;
 	int doze_susp;                     /* we put DECON in DOZE_SUSPEND */
 	int64_t last_present_ns;
 	unsigned long doze_suspends;
@@ -163,7 +166,7 @@ static void fb_fill(struct r800_hwc *h, uint32_t col);
 static int handle_geom(buffer_handle_t hnd, int w, int ht, int *stride, int *fmt);
 
 /* ---- gralloc (looked up at run time: the NDK has no libhardware stub) ---- */
-static const gralloc_module_t *load_gralloc(void)
+static const gralloc_module_t *load_gralloc(struct r800_hwc *h)
 {
 	typedef int (*hw_get_module_t)(const char *, const struct hw_module_t **);
 	void *lib = dlopen("libhardware.so", RTLD_NOW);
@@ -175,8 +178,10 @@ static const gralloc_module_t *load_gralloc(void)
 	const struct hw_module_t *mod = NULL;
 	if (!get || get(GRALLOC_HARDWARE_MODULE_ID, &mod) || !mod) {
 		LOGE("hw_get_module(gralloc) failed");
+		dlclose(lib);
 		return NULL;
 	}
+	h->hardware_lib = lib;
 	LOGI("gralloc module '%s' by '%s'", mod->name, mod->author);
 	return (const gralloc_module_t *)mod;
 }
@@ -933,8 +938,12 @@ static void *vsync_loop(void *arg)
 		const hwc_procs_t *procs = NULL;
 
 		pthread_mutex_lock(&h->lock);
-		while (!h->vsync_enabled)
+		while (!h->vsync_enabled && !h->vsync_stop)
 			pthread_cond_wait(&h->cond, &h->lock);
+		if (h->vsync_stop) {
+			pthread_mutex_unlock(&h->lock);
+			break;
+		}
 		epoch = h->vsync_epoch;
 		pthread_mutex_unlock(&h->lock);
 		if (epoch != seen_epoch) {
@@ -982,11 +991,10 @@ static void *vsync_loop(void *arg)
 			sw_count++;
 		}
 
-		/* Synchronize the callback snapshot; do not hold the mutex while
-		 * invoking framework code. The callback owner must outlive in-flight
-		 * calls (the existing process-lifetime HWC contract). */
+		/* Synchronize the callback snapshot; close joins in-flight calls.
+		 * Registration changes still require caller-owned callback lifetime. */
 		pthread_mutex_lock(&h->lock);
-		if (h->vsync_enabled && h->vsync_epoch == epoch)
+		if (!h->vsync_stop && h->vsync_enabled && h->vsync_epoch == epoch)
 			procs = h->procs;
 		pthread_mutex_unlock(&h->lock);
 		if (procs && procs->vsync && ts > last_sent) {
@@ -996,6 +1004,8 @@ static void *vsync_loop(void *arg)
 		if (((hw_count + sw_count) & 1023) == 0)
 			LOGI("vsync: %lu from TE, %lu filled in", hw_count, sw_count);
 	}
+	if (vfd >= 0)
+		close(vfd);
 	return NULL;
 }
 
@@ -1006,6 +1016,10 @@ static int r800_event_control(hwc_composer_device_1_t *dev, int disp, int event,
 	if (disp != 0 || event != HWC_EVENT_VSYNC)
 		return -EINVAL;
 	pthread_mutex_lock(&h->lock);
+	if (h->vsync_stop) {
+		pthread_mutex_unlock(&h->lock);
+		return -ESHUTDOWN;
+	}
 	if (h->vsync_enabled != (int)on) {
 		h->vsync_epoch++;
 		int r = h->fb_fd >= 0 ? ioctl(h->fb_fd, R800_S3CFB_SET_VSYNC_INT, &on) : -1;
@@ -1095,8 +1109,10 @@ static void *doze_idle_loop(void *arg)
 		int ms;
 		int64_t due, now;
 		struct timespec t;
-		while (h->power_unknown || h->power_mode != HWC_POWER_MODE_DOZE || h->doze_susp)
+		while (!h->idle_stop && (h->power_unknown || h->power_mode != HWC_POWER_MODE_DOZE || h->doze_susp))
 			pthread_cond_wait(&h->doze_cond, &h->doze_lock);
+		if (h->idle_stop)
+			break;
 		ms = doze_idle_ms();
 		now = mono_ns();
 		due = ms ? h->last_present_ns + (int64_t)ms * 1000000LL : now + 5000000000LL;
@@ -1115,6 +1131,7 @@ static void *doze_idle_loop(void *arg)
 		h->doze_susp = 1;
 		h->doze_suspends++;
 	}
+	pthread_mutex_unlock(&h->doze_lock);
 	return NULL;
 }
 
@@ -1203,7 +1220,8 @@ static void r800_register_procs(hwc_composer_device_1_t *dev, hwc_procs_t const 
 {
 	struct r800_hwc *h = (struct r800_hwc *)dev;
 	pthread_mutex_lock(&h->lock);
-	h->procs = procs;
+	if (!h->vsync_stop)
+		h->procs = procs;
 	pthread_mutex_unlock(&h->lock);
 }
 
@@ -1250,30 +1268,104 @@ static void r800_dump(hwc_composer_device_1_t *dev, char *buf, int len)
 		 h->gpu_frames, h->ovl_fail, h->fmt_verified, h->ovl_off);
 }
 
+/* Framework must quiesce external HAL entrypoints before close. Signal
+ * both workers, join without holding either mutex, and only then free.
+ * A callback cannot close its own worker; do not attempt self-join. */
+static int r800_stop_workers(struct r800_hwc *h)
+{
+	int r;
+	uint32_t off = 0;
+	if ((h->vsync_started && pthread_equal(pthread_self(), h->vsync_thread)) ||
+	    (h->idle_started && pthread_equal(pthread_self(), h->idle_thread)))
+		return -EDEADLK;
+
+	pthread_mutex_lock(&h->lock);
+	h->vsync_stop = 1;
+	h->vsync_epoch++;
+	h->procs = NULL;
+	if (h->vsync_enabled && h->fb_fd >= 0 &&
+	    ioctl(h->fb_fd, R800_S3CFB_SET_VSYNC_INT, &off))
+		LOGW("vsync interrupt disable failed: %s", strerror(errno));
+	h->vsync_enabled = 0;
+	pthread_cond_broadcast(&h->cond);
+	pthread_mutex_unlock(&h->lock);
+
+	pthread_mutex_lock(&h->doze_lock);
+	h->idle_stop = 1;
+	pthread_cond_broadcast(&h->doze_cond);
+	pthread_mutex_unlock(&h->doze_lock);
+
+	if (h->vsync_started) {
+		r = pthread_join(h->vsync_thread, NULL);
+		if (r)
+			return -r;
+		h->vsync_started = 0;
+	}
+	if (h->idle_started) {
+		r = pthread_join(h->idle_thread, NULL);
+		if (r)
+			return -r;
+		h->idle_started = 0;
+	}
+	return 0;
+}
+
+static void r800_release(struct r800_hwc *h)
+{
+	if (h->fb_mem)
+		munmap(h->fb_mem, h->fix.smem_len);
+	if (h->fb_fd >= 0)
+		close(h->fb_fd);
+	if (h->hardware_lib)
+		dlclose(h->hardware_lib);
+	pthread_cond_destroy(&h->doze_cond);
+	pthread_mutex_destroy(&h->doze_lock);
+	pthread_cond_destroy(&h->cond);
+	pthread_mutex_destroy(&h->lock);
+	free(h);
+}
+
 static int r800_close(hw_device_t *dev)
 {
-	(void)dev;
-	return 0;   /* lives for the process lifetime */
+	struct r800_hwc *h = (struct r800_hwc *)dev;
+	int r;
+	if (!h)
+		return -EINVAL;
+	r = r800_stop_workers(h);
+	if (r)
+		return r; /* never free storage while a worker may still use it */
+	r800_release(h);
+	return 0;
 }
 
 static int r800_open(const hw_module_t *module, const char *name, hw_device_t **device)
 {
 	struct r800_hwc *h;
+	pthread_condattr_t doze_attr;
+	int r;
 
-	if (strcmp(name, HWC_HARDWARE_COMPOSER))
+	if (!device)
+		return -EINVAL;
+	*device = NULL;
+	if (!module || !name || strcmp(name, HWC_HARDWARE_COMPOSER))
 		return -EINVAL;
 	h = calloc(1, sizeof(*h));
 	if (!h)
 		return -ENOMEM;
 	h->fb_fd = -1;
-	pthread_mutex_init(&h->lock, NULL);
-	pthread_cond_init(&h->cond, NULL);
-	pthread_mutex_init(&h->doze_lock, NULL);
-	pthread_condattr_t doze_attr;
-	pthread_condattr_init(&doze_attr);
-	pthread_condattr_setclock(&doze_attr, CLOCK_MONOTONIC);
-	pthread_cond_init(&h->doze_cond, &doze_attr);
+	if ((r = pthread_mutex_init(&h->lock, NULL)))
+		goto fail_alloc;
+	if ((r = pthread_cond_init(&h->cond, NULL)))
+		goto fail_lock;
+	if ((r = pthread_mutex_init(&h->doze_lock, NULL)))
+		goto fail_cond;
+	if ((r = pthread_condattr_init(&doze_attr)))
+		goto fail_doze_lock;
+	if (!(r = pthread_condattr_setclock(&doze_attr, CLOCK_MONOTONIC)))
+		r = pthread_cond_init(&h->doze_cond, &doze_attr);
 	pthread_condattr_destroy(&doze_attr);
+	if (r)
+		goto fail_doze_lock;
 
 	h->power_mode = HWC_POWER_MODE_NORMAL;   /* the panel is on at start */
 	h->base.common.tag = HARDWARE_DEVICE_TAG;
@@ -1292,14 +1384,16 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 	h->base.getDisplayConfigs = r800_get_display_configs;
 	h->base.getDisplayAttributes = r800_get_display_attributes;
 
-	if (fb_open(h)) {
-		h->power_unknown = 1;
-		LOGE("framebuffer unavailable (errno %d): frames will be dropped", errno);
+	r = fb_open(h);
+	if (r) {
+		LOGE("framebuffer unavailable (%d); HWC open refused", r);
+		r800_release(h);
+		return r;
 	} else {
 		LOGE("fb ok: %ux%u %ubpp smem=%u", h->var.xres, h->var.yres,
 		     h->var.bits_per_pixel, h->fix.smem_len);
 	}
-	h->gralloc = load_gralloc();
+	h->gralloc = load_gralloc(h);
 	if (h->fb_mem) {
 		/* The initramfs had fb0 open and released it at handover, which
 		 * powers the panel down; unblank + re-apply the mode to wake it.
@@ -1326,11 +1420,35 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 		/* no bring-up paint: after a composer restart the last frame stays */
 	}
 	/* Publish startup state before the worker threads can read it. */
-	pthread_create(&h->vsync_thread, NULL, vsync_loop, h);
-	pthread_create(&h->idle_thread, NULL, doze_idle_loop, h);
+	r = pthread_create(&h->vsync_thread, NULL, vsync_loop, h);
+	if (r) {
+		r800_release(h);
+		return -r;
+	}
+	h->vsync_started = 1;
+	r = pthread_create(&h->idle_thread, NULL, doze_idle_loop, h);
+	if (r) {
+		int stop = r800_stop_workers(h);
+		if (!stop)
+			r800_release(h);
+		else
+			LOGE("partial HWC open: worker join failed (%d); retaining state", stop);
+		return -r;
+	}
+	h->idle_started = 1;
 	*device = &h->base.common;
 	LOGI("opened (HWC 1.4, DECON overlays for <=3 plain layers, else client composition -> DECON zero-copy)");
 	return 0;
+
+fail_doze_lock:
+	pthread_mutex_destroy(&h->doze_lock);
+fail_cond:
+	pthread_cond_destroy(&h->cond);
+fail_lock:
+	pthread_mutex_destroy(&h->lock);
+fail_alloc:
+	free(h);
+	return -r;
 }
 
 static struct hw_module_methods_t r800_methods = { .open = r800_open };
