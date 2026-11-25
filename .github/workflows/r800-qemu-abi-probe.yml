@@ -1,0 +1,58 @@
+name: SM-R800 AArch64 userspace ABI probe (non-release)
+
+on:
+  push:
+    branches:
+      - development/r800-display-error-propagation-20261125
+    paths:
+      - .github/workflows/r800-qemu-abi-probe.yml
+      - src/initramfs/abi-probe.c
+      - build/r800_qemu_abi_probe.py
+      - build/r800_initramfs_spec.py
+      - tests/test_qemu_abi_probe.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  aarch64-abi-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact triggering commit and test result contract
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -m unittest discover -s tests -p 'test_qemu_abi_probe.py' -v
+      - name: Install cross compiler and emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+      - name: Compile separate static diagnostic executable
+        run: |
+          mkdir "$RUNNER_TEMP/r800-abi"
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -pthread \
+            -Wl,--build-id=none -o "$RUNNER_TEMP/r800-abi/probe" src/initramfs/abi-probe.c
+          {
+            printf 'commit=%s\n' "$GITHUB_SHA"
+            aarch64-linux-gnu-gcc --version
+            dpkg-query -W gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+            sha256sum src/initramfs/abi-probe.c "$RUNNER_TEMP/r800-abi/probe"
+            echo 'safe_to_flash=false'
+          } > "$RUNNER_TEMP/r800-abi/toolchain.txt"
+      - name: Execute ABI probe under user-mode QEMU
+        run: |
+          python3 build/r800_qemu_abi_probe.py \
+            --probe "$RUNNER_TEMP/r800-abi/probe" \
+            --report "$RUNNER_TEMP/r800-abi/abi-evidence.json"
+      - name: Upload diagnostic evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-qemu-abi-evidence-only
+          path: |
+            ${{ runner.temp }}/r800-abi/toolchain.txt
+            ${{ runner.temp }}/r800-abi/abi-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
