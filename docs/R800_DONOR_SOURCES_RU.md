@@ -38,3 +38,19 @@ bootloader или другие разделы. Не изменяет ориги�
 Не использовать дампы с персональными данными или секретами устройств.
 Точная версия базового TicWatch vendor остаётся неизвестной.
 safe_to_flash=false.
+
+## Комплект glibc для GPS bridge
+
+Из одного локального raw EXT4 rootfs SM-R800, с заранее вычисленным SHA-256:
+
+```sh
+python3 build/r800_extract_ext4.py --profile gps-glibc \
+  --image /path/to/rootfs.img --sha256 <sha256> --output /path/to/gps-donor
+src/tools/gps/build.sh /path/to/ndk-r27c /path/to/gps-donor/tizen /path/to/new-gpsbridge
+```
+Профиль извлекает только libc, libdl, libpthread и ld-linux.so.3, не использует
+данные пользователя. Требуются оригинальные библиотеки одного донорского образа.
+Сборка использует временные копии, проверяет ELF, SONAME, прямые и внутренние
+DT_NEEDED, версии и кандидатов символов. GLIBC_PRIVATE допускается только
+внутри комплекта glibc. Это не доказательство совместимости закрытого ABI,
+фактической работы загрузчика, подлинности прошивки или GNSS.

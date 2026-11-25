@@ -12,6 +12,8 @@ from r800_android_userspace_preflight import read_regular
 from r800_tizen_dependencies import interpreter
 
 LIBS = ("libc.so.6", "libdl.so.2", "libpthread.so.0")
+LOADER = "ld-linux.so.3"
+DONORS = LIBS + (LOADER,)
 LIMIT = 64 * 1024**2
 MAX_GLIBC = (2, 24, 0)
 
@@ -57,22 +59,31 @@ def elf(raw, executable=False):
     return info
 
 
-def import_problems(info, providers):
+def import_problems(info, providers, internal=False, scope=None):
     problems = []
+    scope = info["needed"] if scope is None else scope
+    index = {}
+    for name in scope:
+        for exp in providers.get(name, {}).get("symbol_exports", []):
+            index.setdefault(exp["name"], []).append((name, exp))
     for name in info["needed"]:
         if name not in providers:
             problems.append("Unexpected DT_NEEDED: " + name)
     for need in info["version_needs"]:
         name, version = need["library"], need["version"]
-        if name not in info["needed"] or not check_version(version):
+        if name not in info["needed"] or not (check_version(version) or (internal and version == "GLIBC_PRIVATE")):
             problems.append("Unsupported version requirement: " + name + ":" + version)
         elif version not in {v["version"] for v in providers.get(name, {}).get(
                 "version_definitions", []) if not v["base"]}:
             problems.append("Version absent from supplied library: " + name + ":" + version)
     for imp in info["symbol_imports"]:
-        names = [imp["version_library"]] if imp["version_library"] else info["needed"]
-        matches = [exp for name in names for exp in providers.get(name, {}).get("symbol_exports", [])
-                   if exp["name"] == imp["name"]
+        names = {imp["version_library"]} if imp["version_library"] else set(scope)
+        if imp["version"] is not None and not (check_version(imp["version"]) or
+                (internal and imp["version"] == "GLIBC_PRIVATE")):
+            problems.append("Unsupported symbol version: " + imp["name"])
+            continue
+        matches = [exp for name, exp in index.get(imp["name"], [])
+                   if name in names
                    and (exp["type"] == 6) == (imp["type"] == 6)
                    and (exp["version"] == imp["version"] if imp["version"] is not None
                         else not exp["version_hidden"])]
@@ -85,20 +96,33 @@ def audit(binary, libdir):
     raw = read_regular(binary, LIMIT)
     info = elf(raw, executable=True)
     providers, hashes = {}, {}
-    for name in LIBS:
+    for name in DONORS:
         data = read_regular(libdir / name, LIMIT)
         p = elf(data)
         if p["soname"] != name:
             raise ValueError("Unexpected donor SONAME: " + name)
+        if p["custom_search_path"]:
+            raise ValueError("Unexpected donor RPATH/RUNPATH: " + name)
+        if name == LOADER and interpreter(data) is not None:
+            raise ValueError("Loader must not have PT_INTERP")
         providers[name] = p
         hashes[name] = hashlib.sha256(data).hexdigest()
     problems = import_problems(info, providers)
-    return {"status":"REVIEW_REQUIRED" if problems else "STATIC_DIRECT_LINK_CONTRACT_ONLY",
+    # glibc components can use GLIBC_PRIVATE internally. Presence of the
+    # version/symbol does not establish matching private data layouts.
+    for name, obj in providers.items():
+        problems.extend(name + ": " + issue for issue in
+                        import_problems(obj, providers, internal=True, scope=DONORS))
+    edges = {name: obj["needed"] for name, obj in providers.items()}
+    edges["gpsbridge"] = info["needed"] + [LOADER]
+    return {"status":"REVIEW_REQUIRED" if problems else "STATIC_GLIBC_CLOSURE_ONLY",
             "problems":problems,"sha256":hashlib.sha256(raw).hexdigest(),
             "donor_sha256":hashes,"needed":info["needed"],
             "version_needs":info["version_needs"],"imports_checked":len(info["symbol_imports"]),
-            "glibc_ceiling":"2.24","loader_verified":False,
-            "transitive_dependencies_verified":False,"runtime_verified":False,"safe_to_flash":False}
+            "glibc_ceiling":"2.24","loader_sha256":hashes[LOADER],"dependency_edges":edges,
+            "static_closure_pass":not problems,"loader_verified":False,
+            "transitive_dependencies_verified":False,"private_abi_verified":False,
+            "runtime_verified":False,"safe_to_flash":False}
 
 
 def main():

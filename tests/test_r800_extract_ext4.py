@@ -50,6 +50,17 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.image.read_bytes()).hexdigest(), sha)
         self.assertFalse(report["safe_to_flash"])
 
+    def test_gps_glibc_profile_includes_loader(self):
+        for name in ("libc", "libdl", "libpthread", "ld"):
+            self.put("lib/"+name+"-2.24.so", name.encode("ascii"))
+        self.put("home/user/private.txt", b"excluded")
+        sha = self.make_image()
+        result = extract(self.image, self.output, "gps-glibc", sha)
+        self.assertEqual(result["missing_or_ambiguous"], [])
+        self.assertEqual((self.output/"tizen/ld-linux.so.3").read_bytes(),b"ld")
+        self.assertFalse((self.output/"home").exists())
+        self.assertFalse(result["safe_to_flash"])
+
     def test_vendor_profile(self):
         self.put("lib/libeffectsconfig.so", b"synthetic library")
         sha = self.make_image()

@@ -13,7 +13,7 @@ OUT=$3
 [ ! -e "$OUT" ] && [ ! -L "$OUT" ] || { echo "output already exists" >&2; exit 2; }
 grep -Eq '^Pkg.Revision[[:space:]]*=[[:space:]]*27\.2\.12479018$' "$NDK/source.properties"
 TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
-for lib in libc.so.6 libdl.so.2 libpthread.so.0; do
+for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
     [ -f "$SR/$lib" ] && [ ! -L "$SR/$lib" ] || { echo "supply resolved local library: $lib" >&2; exit 2; }
     "$TC/llvm-readelf" -h "$SR/$lib" | grep -Eq 'Class:[[:space:]]*ELF32'
     "$TC/llvm-readelf" -h "$SR/$lib" | grep -Eq 'Machine:[[:space:]]*ARM'
@@ -24,17 +24,25 @@ OUT=$PARENT/$(basename -- "$OUT")
 TMP=$(mktemp -d "$PARENT/.gpsbridge.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
 trap 'exit 1' HUP INT TERM
-sha256sum "$SR/libc.so.6" "$SR/libdl.so.2" "$SR/libpthread.so.0" > "$TMP/input.txt"
+sha256sum "$SR/libc.so.6" "$SR/libdl.so.2" "$SR/libpthread.so.0" "$SR/ld-linux.so.3" > "$TMP/input.txt"
+mkdir "$TMP/libs"
+for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
+    cp -- "$SR/$lib" "$TMP/libs/$lib"
+    cmp -- "$SR/$lib" "$TMP/libs/$lib"
+done
+sha256sum -c "$TMP/input.txt"
+(cd "$TMP/libs" && sha256sum libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3) > "$TMP/snapshot.txt"
 "$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
     -DR800_XTRA_ABI="$XTRA_ABI" -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
     -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
     -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-e,_start \
-    -o "$TMP/gpsbridge" "$S/gpsbridge.c" "$SR/libc.so.6" "$SR/libdl.so.2" "$SR/libpthread.so.0"
+    -o "$TMP/gpsbridge" "$S/gpsbridge.c" "$TMP/libs/libc.so.6" "$TMP/libs/libdl.so.2" "$TMP/libs/libpthread.so.0"
 "$TC/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
 grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
 grep -Fq '/lib/ld-linux.so.3' "$TMP/elf.txt"
-python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "$SR"
+python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "$TMP/libs"
+(cd "$TMP/libs" && sha256sum -c "$TMP/snapshot.txt")
 sha256sum -c "$TMP/input.txt"
 ln -- "$TMP/gpsbridge" "$OUT"
 sha256sum "$OUT"

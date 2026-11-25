@@ -45,5 +45,31 @@ class GpsLinkGateTests(unittest.TestCase):
         self.imp["type"]=6
         self.assertIn("No supplied direct provider for: malloc",import_problems(self.info,self.providers))
 
+    def test_private_version_internal_only(self):
+        self.imp["version"]="GLIBC_PRIVATE"
+        self.info["version_needs"][0]["version"]="GLIBC_PRIVATE"
+        self.providers["libc.so.6"]["version_definitions"][0]["version"]="GLIBC_PRIVATE"
+        self.providers["libc.so.6"]["symbol_exports"][0]["version"]="GLIBC_PRIVATE"
+        self.assertTrue(import_problems(self.info,self.providers))
+        self.assertEqual(import_problems(self.info,self.providers,internal=True),[])
+
+    def test_missing_transitive_provider(self):
+        self.info["needed"].append("ld-linux.so.3")
+        self.assertIn("Unexpected DT_NEEDED: ld-linux.so.3",
+                      import_problems(self.info,self.providers,internal=True))
+
+    def test_private_version_missing_definition(self):
+        self.info["version_needs"][0]["version"]="GLIBC_PRIVATE"
+        self.assertTrue(any("Version absent" in p for p in
+                            import_problems(self.info,self.providers,internal=True)))
+
+    def test_unversioned_internal_scope(self):
+        self.imp["version"]=None
+        self.imp["version_library"]=None
+        self.info["needed"]=[]
+        self.info["version_needs"]=[]
+        self.assertEqual(import_problems(self.info,self.providers,internal=True,
+                                         scope=["libc.so.6"]),[])
+
 if __name__ == "__main__":
     unittest.main()
