@@ -14,6 +14,9 @@ on:
       - build/r800_android_init_inventory.py
       - build/r800_android_init_dependencies.py
       - build/r800_android_init_rootfs.py
+      - build/r800_android_rootfs_preflight.py
+      - src/initramfs/android-rootfs-preflight.c
+      - tests/test_android_rootfs_preflight.py
       - tests/test_android_init_rootfs.py
       - tests/test_android_init_dependencies.py
       - src/android/property-service-harness.cpp
@@ -50,6 +53,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_android_init_inventory.py' -v
           python3 -m unittest discover -s tests -p 'test_android_init_dependencies.py' -v
           python3 -m unittest discover -s tests -p 'test_android_init_rootfs.py' -v
+          python3 -m unittest discover -s tests -p 'test_android_rootfs_preflight.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_property_area.py' -v
           command -v debugfs
           command -v mke2fs
