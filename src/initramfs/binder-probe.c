@@ -17,6 +17,7 @@ struct binder_version { int32_t protocol_version; };
 #define BINDER_SET_MAX_THREADS _IOW('b', 5, uint32_t)
 
 extern int binder_roundtrip(void);
+extern int shared_memory_probe(void);
 
 int binder_probe(void)
 {
@@ -72,11 +73,13 @@ int binder_probe(void)
         fputs("r800-binder: FAIL transaction roundtrip\n", stderr);
         goto done;
     }
+    puts("r800-binder: PASS");
+    if (shared_memory_probe() != 0)
+        goto done;
     rc = 0;
 done:
     if (umount("/dev"))
         rc = 1;
-    if (rc == 0)
-        puts("r800-binder: PASS");
+
     return rc;
 }
