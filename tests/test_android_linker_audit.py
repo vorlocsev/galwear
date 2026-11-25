@@ -2071,6 +2071,77 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["audio_inventory"]["microphone_capture_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def bluetooth_fixture(self):
+        self.put("init.rc", b"service vendor.bluetooth /vendor/bin/hw/bluetooth-service\n"
+                 b"    interface android.hardware.bluetooth@1.0::IBluetoothHci default\n")
+        self.put_art_executable("vendor/bin/hw/bluetooth-service", "arm")
+        self.put("vendor/lib/libbt-vendor.so", fixture("arm"))
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"><hal format="hidl"><name>android.hardware.bluetooth</name><fqname>@1.0::IBluetoothHci/default</fqname></hal></manifest>')
+        self.put("vendor/etc/bluetooth/bt_vendor.conf", b"UartPort=/dev/ttySAC1\nFwPatchFileName=fixture.hcd\n")
+        self.put("vendor/firmware/fixture.hcd", b"synthetic")
+
+    def inspect_bluetooth(self, kernel=None, dtb=None):
+        return audit.r800_bluetooth_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel, dtb)
+
+    def test_bluetooth_static_candidates(self):
+        self.bluetooth_fixture()
+        out = self.inspect_bluetooth({"CONFIG_BT": "y"})
+        self.assertEqual(len(out["hal_declarations"]), 1)
+        self.assertEqual(len(out["services"]), 1)
+        self.assertIsNotNone(out["services"][0]["elf"])
+        self.assertEqual(out["firmware_candidates"]["/vendor/firmware/fixture.hcd"]["bytes"], 9)
+        self.assertEqual(out["transport_configs"]["/vendor/etc/bluetooth/bt_vendor.conf"]["UartPort"], "/dev/ttySAC1")
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["pairing_verified"])
+
+    def test_bluetooth_wrong_library_abi(self):
+        self.bluetooth_fixture()
+        self.put("vendor/lib/libbt-vendor.so", fixture("arm64"))
+        out = self.inspect_bluetooth()
+        self.assertIsNone(out["libraries"]["/vendor/lib/libbt-vendor.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_bluetooth_dt_uart_controller(self):
+        mod = audit.r800_bluetooth_inventory
+        nodes = {"/": {}, "/serial@1000": {"compatible": b"samsung,serial\0"},
+                 "/serial@1000/bluetooth": {"compatible": b"brcm,bcm-fixture\0",
+                     "max-speed": struct.pack(">I", 3000000),
+                     "firmware-name": b"fixture.hcd\0"}}
+        out = mod.dt_inventory(nodes)
+        self.assertTrue(out[0]["transport_candidate"])
+        self.assertTrue(out[1]["bluetooth_candidate"])
+        self.assertEqual(out[1]["max_speed"], 3000000)
+        self.assertEqual(out[1]["firmware_names"], ["fixture.hcd"])
+
+    def test_bluetooth_dt_disabled_controller(self):
+        nodes = {"/": {}, "/uart": {"status": b"disabled\0"},
+                 "/uart/bluetooth": {"compatible": b"fixture,bluetooth\0"}}
+        out = audit.r800_bluetooth_inventory.dt_inventory(nodes)
+        self.assertFalse(out[1]["enabled"])
+
+    def test_bluetooth_transport_config_duplicate_and_privacy(self):
+        mod = audit.r800_bluetooth_inventory
+        self.assertEqual(mod.config_inventory(b"Address=ignored\nUartPort=/dev/ttySAC1\n"),
+                         {"UartPort": "/dev/ttySAC1"})
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            mod.config_inventory(b"UartPort=a\nUartPort=b\n")
+
+    def test_bluetooth_fake_rfkill_device(self):
+        self.bluetooth_fixture()
+        self.put("dev/rfkill", b"fake")
+        out = self.inspect_bluetooth()
+        self.assertFalse(out["device_nodes"]["/dev/rfkill"])
+        self.assertTrue(any("not a character device" in e for e in out["errors"]))
+
+    def test_bluetooth_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["bluetooth_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["bluetooth_inventory"]["hci_transport_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
