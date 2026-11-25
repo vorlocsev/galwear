@@ -43,6 +43,8 @@ int socket(int, int, int);
 int bind(int, const void *, unsigned int);
 int listen(int, int);
 int accept(int, void *, unsigned int *);
+long send(int, const void *, size_t, int);
+int shutdown(int, int);
 int close(int);
 long read(int, void *, size_t);
 long write(int, const void *, size_t);
@@ -62,6 +64,9 @@ int pthread_mutex_lock(void *);
 int pthread_mutex_unlock(void *);
 #define AF_UNIX 1
 #define SOCK_STREAM 1
+#define MSG_DONTWAIT 0x40
+#define MSG_NOSIGNAL 0x4000
+#define SHUT_RDWR 2
 #define SOCK_PATH "/opt/usr/r800dev/gps.sock"
 
 /* daemon: the connected gps.r800.so, or -1 */
@@ -70,8 +75,11 @@ static int mtx[8];   /* glibc pthread_mutex_t (24 bytes), zero = default mutex *
 static void out(const char *line, int len)
 {
 	pthread_mutex_lock(mtx);
-	if (client >= 0 && write(client, line, len) != len) {
-		close(client);
+	if (client >= 0 && len > 0 &&
+	    send(client, line, (size_t)len, MSG_DONTWAIT | MSG_NOSIGNAL) != len) {
+		/* Only the serve loop owns close(c). Shutdown wakes its reader
+		 * and prevents another callback from writing a partial frame. */
+		shutdown(client, SHUT_RDWR);
 		client = -1;
 	}
 	pthread_mutex_unlock(mtx);
@@ -154,7 +162,7 @@ static void save_fix(const GpsLocation *l)
 	fd = open(LAST_TMP, O_WRONLY_CREAT_TRUNC, 0644);
 	if (fd < 0)
 		return;
-	if (write(fd, b, n) == n) {
+	if (n > 0 && n < (int)sizeof(b) && write(fd, b, n) == n) {
 		close(fd);
 		rename(LAST_TMP, LAST_PATH);
 	} else {
@@ -168,7 +176,8 @@ static void location_cb(GpsLocation *l)
 	int n = snprintf(b, sizeof(b), "FIX %u %.8f %.8f %.2f %.3f %.2f %.2f %lld\n",
 			 l->flags, l->latitude, l->longitude, l->altitude, (double)l->speed,
 			 (double)l->bearing, (double)l->accuracy, l->timestamp);
-	out(b, n);
+	if (n > 0 && n < (int)sizeof(b))
+		out(b, n);
 	save_fix(l);
 	if (daemon_mode)
 		return;
@@ -357,17 +366,21 @@ static int session(int on)
 	aid();
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				   GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-	r = gps->start();
-	if (r < 0) {
+	if (r == 0)
+		r = gps->start();
+	if (r != 0) {
 		/* gpsd restarted under us: reconnect the client library and retry */
 		printf("start failed, re-init\n");
 		fflush(0);
 		gps->cleanup();
-		gps->init(&cbs);
+		r = gps->init(&cbs);
+		if (r != 0)
+			return r;
 		aid();
-		gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
+		r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				       GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-		r = gps->start();
+		if (r == 0)
+			r = gps->start();
 	}
 	printf("session %s -> %d\n", on ? "start" : "stop", r);
 	fflush(0);
@@ -408,17 +421,20 @@ static int serve(void)
 			char *s, *nl;
 			if (n <= 0)
 				break;
+			/* Embedded NUL must not hide commands or truncate a frame. */
+			for (long j = 0; j < n; j++)
+				if (buf[have + j] == 0)
+					goto disconnected;
 			have += n;
 			buf[have] = 0;
 			s = buf;
 			while ((nl = strchr(s, '\n'))) {
 				*nl = 0;
 				if (!strcmp(s, "START") && !on) {
-					session(1);
-					on = 1;
+					on = session(1) == 0;
 				} else if (!strcmp(s, "STOP") && on) {
-					session(0);
-					on = 0;
+					if (session(0) == 0)
+						on = 0;
 				} else if (!strncmp(s, "TIME ", 5)) {
 					/* TIME <utc_ms> [<elapsedRealtime_ms> <unc_ms>] */
 					char *e;
@@ -440,16 +456,21 @@ static int serve(void)
 			have = 0;
 			while (*s)
 				buf[have++] = *s++;
+			/* Never reinterpret the tail of an oversized line as a command. */
 			if (have >= (int)sizeof(buf) - 1)
-				have = 0;
+				break;
 		}
-		if (on)
-			session(0);
+disconnected:
 		pthread_mutex_lock(mtx);
 		if (client == c)
 			client = -1;
 		pthread_mutex_unlock(mtx);
 		close(c);
+		if (on && session(0) != 0) {
+			/* Unknown engine state: fail closed rather than accept a new client. */
+			close(ls);
+			return 1;
+		}
 		printf("client gone\n");
 		fflush(0);
 	}
@@ -478,10 +499,14 @@ int main(int argc, char **argv, char **envp)
 	gps = get();
 	printf("GpsInterface %p size %u\n", (void *)gps, gps ? gps->size : 0);
 	fflush(0);
-	if (!gps)
+	if (!gps || gps->size < sizeof(GpsInterface) || !gps->init ||
+	    !gps->start || !gps->stop || !gps->cleanup || !gps->inject_time ||
+	    !gps->inject_location || !gps->set_position_mode)
 		return 1;
 	r = gps->init(&cbs);
 	printf("init %d\n", r);
+	if (r != 0)
+		return 1;
 	if (daemon_mode) {
 		inject_now();
 		exit(serve());
