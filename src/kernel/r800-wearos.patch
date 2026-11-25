@@ -28865,20 +28865,52 @@ diff --git a/sound/soc/samsung/abox/abox.c b/sound/soc/samsung/abox/abox.c
 index 136eb7329..616a798f5 100644
 --- a/sound/soc/samsung/abox/abox.c
 +++ b/sound/soc/samsung/abox/abox.c
-@@ -5756,6 +5756,29 @@ static void abox_download_extra_firmware(struct abox_data *data)
+@@ -5756,77 +5756,145 @@ static void abox_download_extra_firmware(struct abox_data *data)
  	}
  }
  
 +/*
-+ * R800: ABOX probes (built in, no firmware user helper) long before userspace
-+ * mounts the firmware and sets firmware_class.path, and the device then stays
-+ * powered, so the enable path that would request the firmware again never
-+ * runs: calliope was stuck in CALLIOPE_ENABLING. Retry the request instead.
++ * R800: the built-in driver probes before the userspace firmware mount.
++ * Bound automatic retry attempts and allow only one asynchronous SRAM
++ * request at a time. No changes to the DSP power policy.
 + */
-+#define ABOX_FW_RETRY_MAX	60	/* every 2 s: 2 minutes */
-+static void abox_complete_sram_firmware_request(const struct firmware *fw,
++#define ABOX_FW_RETRY_MAX	60
++static atomic_t abox_fw_retries = ATOMIC_INIT(0);
++static atomic_t abox_fw_inflight = ATOMIC_INIT(0);
+ static void abox_complete_sram_firmware_request(const struct firmware *fw,
 +		void *context);
-+static int abox_fw_retries;
++static void abox_fw_retry_func(struct work_struct *work);
++static DECLARE_DELAYED_WORK(abox_fw_retry_work, abox_fw_retry_func);
++
++static void abox_fw_schedule_retry(struct abox_data *data)
++{
++	int attempt = atomic_inc_return(&abox_fw_retries);
++
++	if (attempt <= ABOX_FW_RETRY_MAX) {
++		dev_info(data->dev, "%s not ready, retrying (%d)\n",
++				data->sram_name, attempt);
++		schedule_delayed_work(&abox_fw_retry_work, 2 * HZ);
++	} else {
++		dev_err(data->dev, "SRAM firmware retry budget exhausted\n");
++	}
++}
++
++static void abox_fw_request_sram(struct abox_data *data)
++{
++	int ret;
++
++	if (atomic_cmpxchg(&abox_fw_inflight, 0, 1))
++		return;
++	ret = request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
++			data->sram_name, data->dev, GFP_KERNEL,
++			to_platform_device(data->dev),
++			abox_complete_sram_firmware_request);
++	if (ret) {
++		dev_err(data->dev, "SRAM request submission failed: %d\n", ret);
++		atomic_set(&abox_fw_inflight, 0);
++		abox_fw_schedule_retry(data);
++	}
++}
 +
 +static void abox_fw_retry_func(struct work_struct *work)
 +{
@@ -28886,29 +28918,112 @@ index 136eb7329..616a798f5 100644
 +
 +	if (!data || data->firmware_sram)
 +		return;
-+	request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG, data->sram_name,
-+			data->dev, GFP_KERNEL, to_platform_device(data->dev),
-+			abox_complete_sram_firmware_request);
++	abox_fw_request_sram(data);
 +}
-+static DECLARE_DELAYED_WORK(abox_fw_retry_work, abox_fw_retry_func);
 +
- static void abox_complete_sram_firmware_request(const struct firmware *fw,
++static void abox_complete_sram_firmware_request(const struct firmware *fw,
  		void *context)
  {
-@@ -5764,6 +5787,12 @@ static void abox_complete_sram_firmware_request(const struct firmware *fw,
+ 	struct platform_device *pdev = context;
+ 	struct device *dev = &pdev->dev;
  	struct abox_data *data = platform_get_drvdata(pdev);
  
  	if (!fw) {
-+		if (abox_fw_retries++ < ABOX_FW_RETRY_MAX) {
-+			dev_info(dev, "%s not found yet, retrying (%d)\n",
-+					data->sram_name, abox_fw_retries);
-+			schedule_delayed_work(&abox_fw_retry_work, 2 * HZ);
-+			return;
-+		}
- 		dev_err(dev, "Failed to request firmware\n");
+-		dev_err(dev, "Failed to request firmware\n");
++		atomic_set(&abox_fw_inflight, 0);
++		abox_fw_schedule_retry(data);
  		return;
  	}
-@@ -6261,12 +6290,35 @@ void abox_poweroff(void)
++	if (!fw->size || fw->size > data->sram_size) {
++		dev_err(dev, "Invalid SRAM firmware size: %zu\n", fw->size);
++		release_firmware(fw);
++		atomic_set(&abox_fw_inflight, 0);
++		return;
++	}
+ 
+ 	if (data->firmware_sram)
+ 		release_firmware(data->firmware_sram);
+ 
+ 	data->firmware_sram = fw;
+ 
+ 	dev_info(dev, "SRAM firmware loaded at %p (%zu)\n", fw->data, fw->size);
+ 
+ 	abox_request_firmware(dev, &data->firmware_dram, data->dram_name);
+ 	abox_request_extra_firmware(data);
++	atomic_set(&abox_fw_inflight, 0);
+ 
+ 	if (abox_test_quirk(data, ABOX_QUIRK_OFF_ON_SUSPEND))
+ 		if (pm_runtime_active(dev))
+ 			abox_enable(dev);
+ }
+ 
+ static int abox_download_firmware(struct platform_device *pdev)
+ {
+ 	struct abox_data *data = platform_get_drvdata(pdev);
+ 	struct device *dev = &pdev->dev;
+ 
+ 	dev_info(dev, "%s\n", __func__);
+ 
+ 	if (unlikely(!data->firmware_sram)) {
+-		request_firmware_nowait(THIS_MODULE,
+-			FW_ACTION_HOTPLUG,
+-			data->sram_name,
+-			dev,
+-			GFP_KERNEL,
+-			pdev,
+-			abox_complete_sram_firmware_request);
++		abox_fw_request_sram(data);
+ 		dev_warn(dev, "SRAM firmware downloading is deferred\n");
+ 		return -EAGAIN;
+ 	}
++	if (unlikely(!data->firmware_dram)) {
++		dev_warn(dev, "DRAM firmware downloading is deferred\n");
++		return -EAGAIN;
++	}
++	/* Validate both images before any copy or unsigned size subtraction. */
++	if (!data->firmware_sram->size ||
++	    data->firmware_sram->size > data->sram_size ||
++	    !data->firmware_dram->size ||
++	    data->firmware_dram->size > DRAM_FIRMWARE_SIZE) {
++		dev_err(dev, "Invalid ABOX firmware sizes\n");
++		return -EINVAL;
++	}
++	if (data->bootargs_offset && data->bootargs &&
++	    (data->bootargs_offset > data->sram_size ||
++	     SZ_512 > data->sram_size - data->bootargs_offset)) {
++		dev_err(dev, "Invalid ABOX bootargs offset\n");
++		return -EINVAL;
++	}
+ 	memcpy_toio(data->sram_base, data->firmware_sram->data,
+ 			data->firmware_sram->size);
+ 	memset_io(data->sram_base + data->firmware_sram->size, 0,
+ 			data->sram_size - data->firmware_sram->size);
+ 
+-	if (unlikely(!data->firmware_dram)) {
+-		dev_warn(dev, "DRAM firmware downloading is defferred\n");
+-		return -EAGAIN;
+-	}
+ 	memcpy(data->dram_base, data->firmware_dram->data,
+ 			data->firmware_dram->size);
+ 	memset(data->dram_base + data->firmware_dram->size, 0,
+ 			DRAM_FIRMWARE_SIZE - data->firmware_dram->size);
+ 	if ((data->bootargs_offset != 0) && (data->bootargs != NULL)) {
+ 		dev_info(dev, "bootargs[%p][0x%x][%s]\n",
+ 				data->sram_base,
+ 				data->bootargs_offset, data->bootargs);
+ 
+ 		memcpy_toio(data->sram_base + data->bootargs_offset,
+ 				data->bootargs, SZ_512);
+ 	} else {
+ 		dev_info(dev, "bootargs is NULL\n");
+ 	}
+ 
+ 	abox_download_extra_firmware(data);
+ 
+ 	return 0;
+ }
+ 
+@@ -6261,12 +6329,35 @@ void abox_poweroff(void)
  	exynos_sysmmu_control(dev, false);
  }
  
@@ -28944,7 +29059,7 @@ index 136eb7329..616a798f5 100644
  	return 0;
  }
  
-@@ -6417,7 +6469,14 @@ static int abox_pm_notifier(struct notifier_block *nb,
+@@ -6417,7 +6508,14 @@ static int abox_pm_notifier(struct notifier_block *nb,
  		if (abox_is_clearable(dev, data) &&
  		    !atomic_read(&data->suspend_state)) {
  			pm_runtime_barrier(dev);
@@ -28960,7 +29075,7 @@ index 136eb7329..616a798f5 100644
  				(data->boot_done == true)) {
  				dev_warn(dev, "runtime_status: %d, boot_done: %d\n",
  					dev->power.runtime_status, data->boot_done);
-@@ -6682,7 +6741,7 @@ static int __init abox_dram_rmem_setup(struct reserved_mem *rmem)
+@@ -6682,7 +6780,7 @@ static int __init abox_dram_rmem_setup(struct reserved_mem *rmem)
  }
  RESERVEDMEM_OF_DECLARE(abox_dram_rmem, "exynos,abox_dram_rmem", abox_dram_rmem_setup);
  
@@ -28969,7 +29084,7 @@ index 136eb7329..616a798f5 100644
  {
  	struct device *dev = &pdev->dev;
  	struct device_node *np = dev->of_node;
-@@ -7132,6 +7191,20 @@ static void samsung_abox_shutdown(struct platform_device *pdev)
+@@ -7132,6 +7230,20 @@ static void samsung_abox_shutdown(struct platform_device *pdev)
  	pm_runtime_disable(dev);
  }
  

@@ -23,6 +23,15 @@ jobs:
           sh -n src/initramfs/build.sh
       - name: Verify unified diff parses (not applying it)
         run: git apply --numstat src/kernel/r800-wearos.patch > /dev/null
+      - name: Verify ABOX hunk against pinned kernel source
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/r800-abox-source"
+          mkdir -p "$scratch/sound/soc/samsung/abox"
+          file="$scratch/sound/soc/samsung/abox/abox.c"
+          curl --fail --location --retry 3 --max-time 90 https://raw.githubusercontent.com/xanderlent/COMBINED_android-kernel-exynos/50db73fc799f20a7120a8b5f653b16cc123d856f/sound/soc/samsung/abox/abox.c -o "$file"
+          test "$(git hash-object "$file")" = "136eb73295f47537086280bf850e3ba79ac94248"
+          (cd "$scratch"; git apply --check --include=sound/soc/samsung/abox/abox.c "$GITHUB_WORKSPACE/src/kernel/r800-wearos.patch")
       - name: Compile preflight and synthetic tests
         run: python3 -m py_compile build/r800_kernel_preflight.py tests/test_kernel_preflight.py
       - name: Audit kernel patch/config without external source
