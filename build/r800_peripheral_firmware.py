@@ -5,6 +5,7 @@ import hashlib
 import json
 import argparse
 import stat
+import os
 
 # Active ABOX ext_bin@0 and @1, SRAM/DRAM names in src/dt/r800.dts.
 # VTS and BBD names from src/kernel/r800-wearos.patch.
@@ -49,14 +50,25 @@ def audit(root):
             s = p.lstat()
             if not stat.S_ISREG(s.st_mode) or not 0 < s.st_size <= MAX_FILE:
                 raise ValueError("Expected bounded regular firmware")
-            with p.open("rb") as stream:
+            # Bind the bytes to the originally inspected regular file, not
+            # just its pathname and modification time. O_NONBLOCK also
+            # avoids blocking if a file is replaced by a FIFO before open.
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+            def identity(st):
+                return (st.st_dev, st.st_ino, st.st_mode, st.st_size,
+                        st.st_mtime_ns, st.st_ctime_ns)
+            with os.fdopen(os.open(p, flags), "rb") as stream:
+                if identity(os.fstat(stream.fileno())) != identity(s):
+                    raise ValueError("Firmware changed before read")
                 raw = stream.read(MAX_FILE+1)
-            if len(raw) != s.st_size or p.stat().st_mtime_ns != s.st_mtime_ns:
+                if identity(os.fstat(stream.fileno())) != identity(s):
+                    raise ValueError("Firmware changed during read")
+            if len(raw) != s.st_size or identity(p.lstat()) != identity(s) or p.resolve(strict=False) != p:
                 raise ValueError("Firmware changed during read")
             files[name] = {"purpose":purpose,"status":"STRUCTURE_PASS_ONLY",**check_bytes(name,raw)}
         except FileNotFoundError:
             files[name] = {"purpose":purpose,"status":"MISSING"}
-        except (OSError,ValueError) as exc:
+        except (OSError,ValueError,RuntimeError) as exc:
             files[name] = {"purpose":purpose,"status":"REJECTED","reason":str(exc)}
     blockers = [n for n,v in files.items() if v["status"]!="STRUCTURE_PASS_ONLY"]
     return {"status":"PERIPHERAL_FIRMWARE_INCOMPLETE" if blockers else "PERIPHERAL_FIRMWARE_STRUCTURE_ONLY",
