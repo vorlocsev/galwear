@@ -51,5 +51,6 @@ sha256sum "$APEX" > "$EVIDENCE/runtime-apex.sha256"
 printf '%s\n' "$(realpath "$APEX")" > "$EVIDENCE/runtime-apex-path.txt"
 APEX_SHA=$(sha256sum "$APEX" | cut -d ' ' -f 1)
 python3 "$TOOLS/r800_android_runtime_extract.py" --donor "$APEX" --sha256 "$APEX_SHA" \
-    --out "$EVIDENCE/runtime-root" --report "$EVIDENCE/runtime-extraction.json"
+    --out "$EVIDENCE/runtime-root" --report "$EVIDENCE/runtime-extraction.json" \
+    --resolved-manifest "$EVIDENCE/manifest-resolved.xml"
 printf 'status=AOSP_RUNTIME_EXTRACTED_STATIC_ONLY\nsafe_to_flash=false\n' >> "$EVIDENCE/source.txt"
