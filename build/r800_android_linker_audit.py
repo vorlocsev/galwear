@@ -14,6 +14,7 @@ import r800_init_inventory
 import r800_art_inventory
 import r800_art_precompiled
 import r800_art_launch
+import r800_binder_inventory
 
 NAME = re.compile(r"[A-Za-z0-9_.+~-]{1,255}")
 TARGETS = ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager",
@@ -721,7 +722,7 @@ def symbol_candidates(seen, edges):
             "ambiguous": ambiguous, "incomplete": incomplete, "limit_exceeded": False}
 
 
-def audit(root: Path, targets=TARGETS) -> dict:
+def audit(root: Path, targets=TARGETS, kernel_config=None) -> dict:
     targets = tuple(targets)
     queue = list(targets)
     seen, errors, unresolved, ambiguous = {}, [], [], []
@@ -805,6 +806,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
     art_inventory = r800_art_inventory.audit(root, init_inventory)
     art_precompiled = r800_art_precompiled.audit(root)
     art_launch = r800_art_launch.audit(root, init_inventory, art_precompiled)
+    binder_inventory = r800_binder_inventory.audit(root, init_inventory, art_inventory, art_launch, kernel_config)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -828,6 +830,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
             "art_inventory": art_inventory,
             "art_precompiled": art_precompiled,
             "art_launch": art_launch,
+            "binder_inventory": binder_inventory,
             "namespace_inventory": namespace_inventory,
             "namespace_scope": namespace_scope,
             "android_namespace_resolution_verified": False,
