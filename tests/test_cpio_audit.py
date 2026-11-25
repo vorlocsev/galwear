@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "build"))
@@ -17,13 +19,13 @@ import r800_cpio_audit as audit
 from test_initramfs_recipe import fake_aarch64_elf
 
 
-def make_newc(entries: list[tuple[str, int, bytes]], trailer=True):
+def make_newc(entries: list[tuple[str, int, bytes]], trailer=True, crc=False):
     result = bytearray()
     for name, mode, data in entries + ([("TRAILER!!!", 0, b"")] if trailer else []):
         name_encoded = name.encode("ascii") + b"\x00"
         fields = [1, mode, 0, 0, 1, 0, len(data), 0, 0, 5 if name == "dev/console" else 0,
-                  1 if name == "dev/console" else 0, len(name_encoded), 0]
-        header = b"070701" + b"".join(f"{n:08x}".encode() for n in fields)
+                  1 if name == "dev/console" else 0, len(name_encoded), sum(data) & 0xffffffff if crc else 0]
+        header = (b"070702" if crc else b"070701") + b"".join(f"{n:08x}".encode() for n in fields)
         assert len(header) == 110
         result.extend(header)
         result.extend(name_encoded)
@@ -64,6 +66,63 @@ class CpioAuditTests(unittest.TestCase):
         self.cpio.write_bytes(gzip.compress(make_newc(self.entries), mtime=0))
         result = audit.inspect_cpio(self.cpio, self.init)
         self.assertEqual(result["entries_checked"], 6)
+
+    def test_crc_archive_passes_and_hashes_exact_input(self):
+        raw = gzip.compress(make_newc(self.entries, crc=True), mtime=0)
+        self.cpio.write_bytes(raw)
+        report = audit.inspect_cpio(self.cpio, self.init)
+        self.assertEqual(report["archive_sha256"], hashlib.sha256(raw).hexdigest())
+
+    def test_bad_crc_rejected(self):
+        raw = bytearray(make_newc(self.entries, crc=True))
+        entry = raw.rfind(b"070702", 0, raw.rfind(b"070702"))
+        raw[entry + 102:entry + 110] = b"ffffffff"
+        self.cpio.write_bytes(raw)
+        with self.assertRaisesRegex(audit.CpioError, "CRC checksum"):
+            audit.inspect_cpio(self.cpio, self.init)
+
+    def test_non_crc_checksum_rejected(self):
+        raw = bytearray(self.cpio.read_bytes())
+        raw[102:110] = b"00000001"
+        self.cpio.write_bytes(raw)
+        with self.assertRaisesRegex(audit.CpioError, "non-CRC"):
+            audit.inspect_cpio(self.cpio, self.init)
+
+    def test_signed_hex_field_rejected(self):
+        raw = bytearray(self.cpio.read_bytes())
+        raw[6:14] = b"+0000001"
+        self.cpio.write_bytes(raw)
+        with self.assertRaisesRegex(audit.CpioError, "hexadecimal"):
+            audit.inspect_cpio(self.cpio, self.init)
+
+    def test_nonzero_padding_rejected(self):
+        raw = bytearray(self.cpio.read_bytes())
+        raw[114] = 1  # dev pathname ends at offset 114, aligned to 116
+        self.cpio.write_bytes(raw)
+        with self.assertRaisesRegex(audit.CpioError, "padding"):
+            audit.inspect_cpio(self.cpio, self.init)
+
+    def test_init_hardlink_count_rejected(self):
+        raw = bytearray(self.cpio.read_bytes())
+        entry = raw.rfind(b"070701", 0, raw.rfind(b"070701"))
+        raw[entry + 38:entry + 46] = b"00000002"
+        self.cpio.write_bytes(raw)
+        with self.assertRaisesRegex(audit.CpioError, "exactly one link"):
+            audit.inspect_cpio(self.cpio, self.init)
+
+    def test_console_before_parent_rejected(self):
+        self.entries[0], self.entries[1] = self.entries[1], self.entries[0]
+        self.cpio.write_bytes(make_newc(self.entries))
+        with self.assertRaisesRegex(audit.CpioError, "parent directory"):
+            audit.inspect_cpio(self.cpio, self.init)
+
+    def test_input_and_uncompressed_limits(self):
+        with patch.object(audit, "MAX_ARCHIVE_BYTES", 64):
+            with self.assertRaisesRegex(audit.CpioError, "input size"):
+                audit.inspect_cpio(self.cpio, self.init)
+            self.cpio.write_bytes(gzip.compress(bytes(2048), mtime=0))
+            with self.assertRaisesRegex(audit.CpioError, "uncompressed size"):
+                audit.inspect_cpio(self.cpio, self.init)
 
     def test_wrong_embedded_init_rejected(self):
         self.entries[-1] = ("init", 0o100755, self.init.read_bytes() + b"different")
