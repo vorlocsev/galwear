@@ -19,6 +19,8 @@ PROPERTIES = {
     "ro.property_service.version": "u:object_r:galwear_protocol_prop:s0",
 }
 FILE = "/system/bin/galwear_property_client"
+SERVICE = "/system/bin/galwear_property_service"
+SERVICE_LABEL = "u:object_r:init_exec:s0"
 
 
 def rows(data):
@@ -31,9 +33,9 @@ def verify_overlay(private, fixture):
     fc = rows((fixture / "file_contexts").read_text())
     if sorted(prop) != sorted([[key, value, "exact", "string"] for key, value in PROPERTIES.items()]):
         raise ValueError("Unexpected fixture property mapping")
-    if fc != [[FILE, LABEL]]:
+    if sorted(fc) != sorted([[FILE, LABEL], [SERVICE, SERVICE_LABEL]]):
         raise ValueError("Unexpected fixture executable mapping")
-    for name, keys in (("file_contexts", {FILE}), ("property_contexts", set(PROPERTIES))):
+    for name, keys in (("file_contexts", {FILE, SERVICE}), ("property_contexts", set(PROPERTIES))):
         if any(row[0] in keys for row in rows((private / name).read_text())):
             raise ValueError("Existing exact platform context key: " + name)
 
@@ -51,8 +53,9 @@ def audit_fixture(product, checkfc, analyze):
         if [r for r in rows(prop.decode()) if r[0] == key] != [[key, label, "exact", "string"]]:
             raise ValueError("Fixture property mapping missing or ambiguous: " + key)
     fc = snapshot(regular(root, "system/etc/selinux/plat_file_contexts"), 4*1024*1024)
-    if [r for r in rows(fc.decode()) if r[0] == FILE] != [[FILE, LABEL]]:
-        raise ValueError("Fixture executable mapping missing or ambiguous")
+    for path, label in ((FILE, LABEL), (SERVICE, SERVICE_LABEL)):
+        if [r for r in rows(fc.decode()) if r[0] == path] != [[path, label]]:
+            raise ValueError("Fixture executable mapping missing or ambiguous: " + path)
     tool_sha = sha(snapshot(analyze, MAX_POLICY))
     with tempfile.TemporaryDirectory(prefix="galwear-fixture-policy-") as tmp:
         p, f = Path(tmp)/"sepolicy", Path(tmp)/"file_contexts"
