@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 
 from r800_vendor_inputs import image_info
+from r800_peripheral_firmware import REQUIRED, check_bytes
 
 MAX_FILE = 64 * 1024**2
 HCD = "BCM43012B0_002.001.021.0153.0156.hcd"
@@ -26,6 +27,8 @@ TIZEN = {
     "payload/fw/nvram_net.txt": ("/usr/lib/firmware/nvram_net.txt",),
     "payload/fw/bcmdhd_clm.blob": ("/usr/lib/firmware/bcmdhd_clm.blob",),
 }
+TIZEN.update({"payload/"+name: ("/usr/lib/firmware/"+name.removeprefix("fw/"),)
+              for name in REQUIRED})
 VENDOR_NAMES = (
     "lib/libeffectsconfig.so",
     "bin/hw/android.hardware.sensors@1.0-service",
@@ -104,6 +107,8 @@ def extract(image, output, profile, expected_sha):
             if not stat.S_ISREG(st.st_mode) or st.st_size != length:
                 raise ValueError("Extracted donor size mismatch: " + guest)
             raw = target.read_bytes()
+            if dest.removeprefix("payload/") in REQUIRED:
+                check_bytes(dest.removeprefix("payload/"), raw)
             destpath = tree/dest
             destpath.parent.mkdir(parents=True, exist_ok=True)
             os.rename(target, destpath)
