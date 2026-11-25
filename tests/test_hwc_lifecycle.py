@@ -13,6 +13,8 @@ class HwcLifecycleTests(unittest.TestCase):
         source = SOURCE.read_text()
         stop = source[source.index("static int r800_stop_workers("):
                       source.index("static void r800_release(")]
+        irq = source[source.index("static int r800_set_vsync_irq_locked("):
+                     source.index("static int r800_event_control(")]
         harness = r"""
 #include <assert.h>
 #include <errno.h>
@@ -28,10 +30,11 @@ struct r800_hwc {
     pthread_cond_t cond, doze_cond;
     int vsync_stop, idle_stop, vsync_started, idle_started;
     int vsync_enabled, fb_fd;
+    int vsync_irq_known, vsync_irq_enabled;
     unsigned long vsync_epoch;
     void *procs;
 };
-""" + stop + r"""
+""" + irq + stop + r"""
 static void *vsync_worker(void *arg) {
     struct r800_hwc *h = arg;
     pthread_mutex_lock(&h->lock);
