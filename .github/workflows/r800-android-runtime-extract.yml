@@ -38,6 +38,8 @@ on:
       - build/r800_ext4_nosuid_policy_gate.py
       - build/r800_ext4_exec_access_audit.py
       - build/r800_ext4_linker_resolution.py
+      - build/r800_ext4_elf_abi.py
+      - tests/test_ext4_elf_abi.py
       - tests/test_ext4_linker_resolution.py
       - build/r800_ext4_console_contract.py
       - tests/test_ext4_exec_access_audit.py
@@ -103,7 +105,7 @@ jobs:
       - name: Install filesystem inspection tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends e2fsprogs selinux-utils android-sdk-libsparse-utils gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          sudo apt-get install -y --no-install-recommends e2fsprogs selinux-utils android-sdk-libsparse-utils gcc-aarch64-linux-gnu libc6-dev-arm64-cross clang lld
       - name: Verify exact commit and execute synthetic tests
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -130,6 +132,8 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_ext4_nosuid_policy_gate.py' -v
           python3 -m unittest discover -s tests -p 'test_ext4_exec_access_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_ext4_linker_resolution.py' -v
+          command -v clang && command -v ld.lld && command -v readelf
+          python3 -m unittest discover -s tests -p 'test_ext4_elf_abi.py' -v
           python3 -m unittest discover -s tests -p 'test_ext4_evidence_boundaries.py' -v
           python3 -m compileall -q build tests
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
