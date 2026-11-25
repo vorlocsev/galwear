@@ -28,6 +28,12 @@ on:
       - build/r800_property_pipeline.py
       - build/r800_rootfs_relabel_policy_gate.py
       - build/r800_android_system_ext4.py
+      - build/r800_qemu_readonly_disks.py
+      - build/r800_qemu_virt_contract.py
+      - src/kernel/qemu-virt-block.config
+      - src/initramfs/virt-readonly-disks.c
+      - tests/test_qemu_readonly_disks.py
+      - tests/test_qemu_virt_contract.py
       - build/r800_android_context_partitions.py
       - build/r800_android_apex_payload.py
       - tests/test_android_context_partitions.py
@@ -92,6 +98,9 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_property_pipeline.py' -v
           python3 -m unittest discover -s tests -p 'test_rootfs_relabel_policy_gate.py' -v
           python3 -m unittest discover -s tests -p 'test_android_system_ext4.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_readonly_disks.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/virt-readonly-disks.c -o "$RUNNER_TEMP/virt-disk-init"
           python3 -m unittest discover -s tests -p 'test_android_context_partitions.py' -v
           python3 -m unittest discover -s tests -p 'test_android_sepolicy_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_android_stock_policy.py' -v
