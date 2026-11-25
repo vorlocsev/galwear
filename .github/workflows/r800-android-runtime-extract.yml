@@ -31,6 +31,8 @@ on:
       - build/r800_qemu_readonly_disks.py
       - build/r800_qemu_prelabeled_mounts.py
       - build/r800_qemu_ext4_init_transition.py
+      - build/r800_qemu_ext4_property_service.py
+      - tests/test_qemu_ext4_property_service.py
       - tests/test_qemu_ext4_init_transition.py
       - src/initramfs/ext4-init-domain-probe.c
       - tests/test_qemu_prelabeled_mounts.py
@@ -106,10 +108,12 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_qemu_readonly_disks.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_prelabeled_mounts.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_ext4_init_transition.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_ext4_property_service.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/virt-readonly-disks.c -o "$RUNNER_TEMP/virt-disk-init"
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -DGALWEAR_LABEL_PROBE src/initramfs/virt-readonly-disks.c -o "$RUNNER_TEMP/virt-label-init"
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -DGALWEAR_LABEL_PROBE -DGALWEAR_TRANSITION_PROBE src/initramfs/virt-readonly-disks.c -o "$RUNNER_TEMP/virt-transition-init"
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -DGALWEAR_LABEL_PROBE -DGALWEAR_SERVICE_PROBE src/initramfs/virt-readonly-disks.c -o "$RUNNER_TEMP/virt-service-init"
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/ext4-init-domain-probe.c -o "$RUNNER_TEMP/ext4-second-stage"
           python3 -m unittest discover -s tests -p 'test_android_context_partitions.py' -v
           python3 -m unittest discover -s tests -p 'test_android_sepolicy_audit.py' -v
