@@ -54,6 +54,28 @@ def validate_dtb(raw):
     return nodes
 
 
+def component_evidence(dtb, kernel=None):
+    """Check actual compiled components without creating an NZIT package."""
+    nodes = validate_dtb(dtb)
+    report = {"status": "DTB_STRUCTURE_ONLY", "model": "GALILEO-LARGE-BT",
+              "dtb_bytes": len(dtb), "dtb_sha256": hashlib.sha256(dtb).hexdigest(),
+              "dtb_nodes": len(nodes), "template_verified": False,
+              "bootloader_verified": False, "safe_to_flash": False}
+    if kernel is not None:
+        if not 64 <= len(kernel) <= PARTITION or kernel[56:60] != b"ARM\\x64":
+            raise ValueError("Expected uncompressed ARM64 Linux Image")
+        aligned = (len(kernel) + HEADER - 1) & ~(HEADER - 1)
+        minimum = HEADER + aligned + DT_OFFSET + DT_SIZE + SIG
+        if minimum > PARTITION:
+            raise ValueError("Kernel and minimum DT table exceed partition budget")
+        report.update({"status": "COMPILED_COMPONENTS_STRUCTURE_ONLY",
+                       "kernel_bytes": len(kernel), "kernel_sha256": hashlib.sha256(kernel).hexdigest(),
+                       "minimum_container_bytes": minimum,
+                       "maximum_remaining_bytes": PARTITION - minimum,
+                       "partition_size_verified": False})
+    return report
+
+
 def build(kernel, dtb, template):
     # ARM64 boot protocol magic is at offset 56 in the uncompressed Image.
     if not 64 <= len(kernel) <= PARTITION or kernel[56:60] != b"ARM\x64":
