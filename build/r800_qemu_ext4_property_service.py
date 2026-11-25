@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 
 import r800_qemu_readonly_disks as disks
+from r800_ext4_nosuid_policy_gate import require_ready
 import r800_qemu_prelabeled_mounts as labels
 from r800_qemu_property_service import MARKERS
 from r800_galwear_policy_fixture import audit_fixture, FILE, LABEL, SERVICE, SERVICE_LABEL
@@ -119,6 +120,7 @@ def run(a):
     if sha(blob)!=policy:
         raise ValueError("Fixture policy changed")
     plan = labels.label_plan(fixture,extra,runtime)
+    nosuid = require_ready(blob, "fixture", a.seinfo, a.sesearch)
     manifest = "".join(p+" "+v+"\n" for p,v in plan.items()).encode("ascii")
     if len(manifest)>256*1024:
         raise ValueError("Label manifest exceeds bounds")
@@ -126,7 +128,7 @@ def run(a):
         extra_entries=[("galwear-policy",(0o100400,blob,0,0)),
                        ("galwear-labels.list",(0o100400,manifest,0,0))],
         label_parser=lambda log,actual:inspect_console(log,actual,plan))
-    return {**result,"stock_policy_sha256":stock["policy_sha256"],
+    return {**result,"nosuid_policy_prerequisites":nosuid,"stock_policy_sha256":stock["policy_sha256"],
             "fixture_audit":checked,"label_manifest_sha256":sha(manifest),
             "prior_transition_archive_sha256":prior["archive_sha256"],
             "experimental_linker_config_sha256":sha(CONFIG),
@@ -140,6 +142,8 @@ def main():
                  "runtime-dir","runtime-report","kernel","baseline","config-evidence","init",
                  "compile-evidence","product-out","checkfc","analyze","transition-report","out-dir","report"):
         p.add_argument("--"+name,type=Path,required=True)
+    p.add_argument("--seinfo",default="seinfo")
+    p.add_argument("--sesearch",default="sesearch")
     a=p.parse_args()
     try:
         result=run(a)
