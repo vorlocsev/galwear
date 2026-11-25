@@ -20,10 +20,11 @@ set +u
 source build/envsetup.sh
 lunch aosp_arm64-eng
 test "$(get_build_var TARGET_ARCH)" = arm64
-m -j4 selinux_policy checkfc
+m -j4 selinux_policy checkfc e2fsdroid
 PRODUCT_OUT=$(get_build_var PRODUCT_OUT)
 HOST_OUT=$(get_build_var HOST_OUT)
 set -u
+test -x "$HOST_OUT/bin/e2fsdroid"
 printf '%s\n' "$(realpath "$PRODUCT_OUT")" > "$OUT/product-out-path.txt"
 printf '%s\n' "$(realpath "$HOST_OUT")" > "$OUT/host-out-path.txt"
 python3 "$TOOLS/r800_android_sepolicy_audit.py" --product-out "$PRODUCT_OUT" \
