@@ -816,18 +816,13 @@ H
     /system/bin/logcat -b kernel -v threadtime -f /oem/r800dev/kmsg.log -r 1024 -n 1 > /dev/null 2>&1 &
     $B cat /dev/kmsg | $B awk '/unvalid fd/ {next} /decon|dsim|DSIM|PANEL|s6e36|KEY_|power_keys|gpio_keys|vsync|sysmmu|fence|underrun|timeout|Oops|BUG|WARNING|blocked for more|hung_task|sysrq|r800:/ {print; fflush()}' > /oem/r800dev/kdisp.log 2>/dev/null &
     fi
-    # Composer watchdog. hwc2onfb can wedge after "NoResources" under memory
-    # pressure: SurfaceFlinger presents in bursts (only when content changes),
-    # each failing with HWComposer errors, and no frame reaches the panel (decon
-    # frame IRQ stops). Rule: an error newer than the last decon frame, with no
-    # frame for 5 s after it = wedged -> kill the composer (init restarts it + SF).
-    # If still no frame since the previous restart, the DECON itself is hung:
-    # reboot. Never sync first (a sync blocked forever in hang 3), and stop
-    # feeding the hardware dead-man so it resets us if sysrq does not.
-    # If the helper is absent (old payload), skip display recovery rather
-    # than fall back to the unreliable historical IRQ and PID parsing.
+    # Display watchdog is diagnostic by default. Experimental CPU-copy
+    # recovery requires DEV and HWC_RESTART, with one attempt per boot.
+    # No forced reboot or escalation; the independent dead-man is unchanged.
+    # Skip recovery if the helper or process/IRQ evidence is unavailable.
     ( . /oem/r800dev/r800-display-watchdog.sh || exit 0
       HWCERR=/dev/r800_hwcerr
+      HWCATTEMPT=/dev/r800_hwc_restart_attempt
       started=$($B date +%s)
       r800_uint "$started" || exit 0
       ticks=$(r800_clock_ticks) || { k "display watchdog: CLK_TCK unavailable"; exit 0; }
@@ -866,31 +861,38 @@ H
         read -r e event_pid event_birth < "$HWCERR" || continue
         [ "$event_pid" = "$cp" ] && [ "$event_birth" = "$birth" ] || continue
         zc=$(/system/bin/getprop debug.r800.zerocopy) || continue
-        action=$(r800_hwc_action "$now" "$e" "$tframe" "$last" "$age" "$zc") || continue
+        opt=0
+        if dev && [ -f /oem/r800dev/android/HWC_RESTART ]; then
+            opt=1
+        fi
+        action=$(r800_hwc_action "$now" "$e" "$tframe" "$last" "$age" "$zc" "$opt") || continue
         # Revalidate the same process immediately before any recovery.
         current=$(r800_process_start_ticks "/proc/$cp/stat" "$cp") || continue
         [ "$current" = "$birth" ] || continue
         current_irq=$(r800_irq_total /proc/interrupts) || continue
         [ "$current_irq" = "$d" ] || continue
-        if [ "$action" = reboot ]; then
-                k "decon hung (no frame since restart, irq $d): rebooting"
-                echo "$($B date) REBOOT (irq $d)" >> /oem/r800dev/wedge.log
-                kill $PETTER 2>/dev/null
-                echo 1 > /proc/sys/kernel/sysrq
-                echo w > /proc/sysrq-trigger     # blocked tasks -> kmsg -> kdisp.log
-                $B sleep 2
-                /system/bin/timeout 5 $B dmesg > /oem/r800dev/hang-dmesg.txt 2>/dev/null
-                /system/bin/timeout 8 /system/bin/logcat -d -v threadtime -t 1500 > /oem/r800dev/hang-logcat.txt 2>/dev/null
-                echo s > /proc/sysrq-trigger; $B sleep 3
-                echo b > /proc/sysrq-trigger
-                $B sleep 120                     # dead-man fires if we are still here
+        if [ "$action" = restart ]; then
+            # /dev is recreated at boot. Claim the single attempt even if
+            # the helper restarts or signal delivery subsequently fails.
+            # Never delete the claim from this watchdog.
+            if dev && [ -f /oem/r800dev/android/HWC_RESTART ] &&
+                [ "$(/system/bin/getprop debug.r800.zerocopy)" = 0 ] &&
+                $B mkdir "$HWCATTEMPT" 2>/dev/null; then
+                current=$(r800_process_start_ticks "/proc/$cp/stat" "$cp") || continue
+                [ "$current" = "$birth" ] || continue
+                current_irq=$(r800_irq_total /proc/interrupts) || continue
+                [ "$current_irq" = "$d" ] || continue
+                k "display watchdog: one experimental composer TERM (irq $d)"
+                if kill -TERM "$cp" 2>/dev/null; then
+                    k "display watchdog: signal sent; recovery unverified"
+                else
+                    k "display watchdog: signal failed; attempt consumed"
+                fi
+            else
+                k "display watchdog: restart not authorized or attempt already used"
+            fi
         else
-            k "composer wedged (hwc errors, decon irq stuck at $d): restarting"
-            /system/bin/logcat -d -v threadtime -t 400 > /oem/r800dev/wedge-logcat.txt 2>/dev/null
-            echo "$($B date) restart (irq $d)" >> /oem/r800dev/wedge.log
-            current=$(r800_process_start_ticks "/proc/$cp/stat" "$cp") || continue
-            [ "$current" = "$birth" ] || continue
-            kill "$cp" 2>/dev/null
+            k "display watchdog: stall evidence (irq $d), observe only"
         fi
         last=$now
         tframe=$now

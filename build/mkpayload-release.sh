@@ -19,7 +19,7 @@ cp -a $SRC/android $P/
 # Do not inherit watch-specific state or experimental kernel power flags.
 # These markers are *opt-in* runtime overrides; shipping them in a release
 # bypasses the conservative suspend/CPU-idle defaults.
-for marker in DEV STAY SLEEP CPUIDLE_DEEP OVERLAY PANEL_REALBLANK ABOX_POWEROFF GPU_SCALE gemini.tries userdata.img RESET_DATA; do
+for marker in DEV STAY SLEEP CPUIDLE_DEEP OVERLAY PANEL_REALBLANK ABOX_POWEROFF GPU_SCALE HWC_RESTART gemini.tries userdata.img RESET_DATA; do
     rm -f "$P/android/$marker"
 done
 # Factory-reset-protection block: per-watch state (Android writes the owner's

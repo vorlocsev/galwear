@@ -46,10 +46,30 @@ class DisplayWatchdogTests(unittest.TestCase):
         result = self.fixture("122.75 91.00\n", "r800_uptime_seconds")
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "122"))
 
-    def test_valid_restart_and_zero_copy_reboot(self):
-        for mode, expected in (("0", "restart"), ("1", "reboot"), ("", "reboot")):
-            r = self.invoke("r800_hwc_action", 150, 140, 130, 0, 100, mode)
-            self.assertEqual((r.returncode, r.stdout.strip()), (0, expected))
+    def test_restart_requires_explicit_cpu_copy_opt_in(self):
+        for mode in ("0", "1", ""):
+            for opt in (0, 1):
+                with self.subTest(mode=mode, opt=opt):
+                    expected = "restart" if mode == "0" and opt == 1 else "observe"
+                    r = self.invoke("r800_hwc_action", 150, 140, 130, 0, 100, mode, opt)
+                    self.assertEqual((r.returncode, r.stdout.strip()), (0, expected))
+
+    def test_second_attempt_never_escalates(self):
+        r = self.invoke("r800_hwc_action", 250, 240, 230, 150, 100, 0, 1)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "observe"))
+
+    def test_no_reboot_or_deadman_disarm_in_display_watchdog(self):
+        source = (ROOT / "payload/android-helper.sh").read_text()
+        block = source[source.index("    # Display watchdog is diagnostic"):
+                       source.index("    # Developer mode: post-boot logcat")]
+        for forbidden in ("/proc/sysrq-trigger", "kill $PETTER", "kill -KILL", "reboot"):
+            # Comments explain why reboot was removed; inspect executable lines.
+            commands = "\n".join(line for line in block.splitlines()
+                                 if not line.lstrip().startswith("#"))
+            self.assertNotIn(forbidden, commands)
+        self.assertIn('$B mkdir "$HWCATTEMPT"', block)
+        self.assertIn('kill -TERM "$cp"', block)
+        self.assertIn("HWC_RESTART", (ROOT / "build/mkpayload-release.sh").read_text())
 
     def test_stale_future_and_young_process(self):
         for args in ((150, 130, 130, 0, 100, 1),
@@ -57,12 +77,13 @@ class DisplayWatchdogTests(unittest.TestCase):
                      (150, 147, 130, 0, 100, 1),
                      (150, 140, 130, 0, 12, 1),
                      (150, 140, 130, 120, 100, 1)):
-            self.assertNotEqual(self.invoke("r800_hwc_action", *args).returncode, 0)
+            self.assertNotEqual(self.invoke("r800_hwc_action", *args, 1).returncode, 0)
 
     def test_reject_ambiguous_numeric_inputs(self):
         for bad in ("", "1 2", "-1", "010", "1234567890123", "abc"):
-            self.assertNotEqual(self.invoke("r800_hwc_action", 150, bad, 130, 0, 100, 1).returncode, 0)
-        self.assertNotEqual(self.invoke("r800_hwc_action", 150, 140, 130, 0, 100, "unknown").returncode, 0)
+            self.assertNotEqual(self.invoke("r800_hwc_action", 150, bad, 130, 0, 100, 1, 1).returncode, 0)
+        self.assertNotEqual(self.invoke("r800_hwc_action", 150, 140, 130, 0, 100, "unknown", 1).returncode)
+        self.assertNotEqual(self.invoke("r800_hwc_action", 150, 140, 130, 0, 100, 0, "unknown").returncode, 0)
 
     def test_shell_syntax_and_packaging(self):
         for path in (HELPER, ROOT / "payload/android-helper.sh", ROOT / "build/mkpayload-release.sh"):

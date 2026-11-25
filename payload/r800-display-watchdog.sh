@@ -70,23 +70,20 @@ r800_clock_ticks() {
 
 r800_hwc_action() {
     # now, error observation, last frame, last recovery, process age,
-    # zero-copy mode. All timestamps use monotonic uptime seconds.
-    [ "$#" -eq 6 ] || return 1
+    # zero-copy mode, recovery opt-in. All timestamps use uptime seconds.
+    [ "$#" -eq 7 ] || return 1
     for n in "$1" "$2" "$3" "$4" "$5"; do
         r800_uint "$n" || return 1
     done
     [ "$2" -gt "$3" ] && [ "$2" -le "$1" ] &&
         [ "$4" -le "$1" ] && [ "$(( $1 - $2 ))" -ge 5 ] &&
         [ "$(( $1 - $4 ))" -ge 60 ] && [ "$5" -ge 60 ] || return 1
-    case "$6" in
-        0)
-            if [ "$4" -gt 0 ] && [ "$3" -le "$4" ]; then
-                printf '%s\n' reboot
-            else
-                printf '%s\n' restart
-            fi
-            ;;
-        1|"") printf '%s\n' reboot ;; # historical default: zero-copy
-        *) return 1 ;;
-    esac
+    case "$6" in 0|1|"") ;; *) return 1 ;; esac
+    case "$7" in 0|1) ;; *) return 1 ;; esac
+    # Zero-copy recovery is not validated. Never escalate to reboot.
+    if [ "$6" = 0 ] && [ "$7" = 1 ] && [ "$4" = 0 ]; then
+        printf '%s\n' restart
+    else
+        printf '%s\n' observe
+    fi
 }
