@@ -23,6 +23,7 @@ on:
       - src/initramfs/init-readonly.c
       - src/initramfs/abi-probe.c
       - src/initramfs/abi-probe-pid1.c
+      - src/initramfs/binder-probe.c
       - build/r800_qemu_guest_abi.py
       - build/r800_qemu_abi_probe.py
       - tests/test_qemu_guest_abi.py
@@ -79,7 +80,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           mkdir "$RUNNER_TEMP/virt-abi-init"
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -pthread -Dmain=abi_probe_main -c src/initramfs/abi-probe.c -o "$RUNNER_TEMP/virt-abi-init/probe.o"
-          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -pthread -Wl,--build-id=none src/initramfs/abi-probe-pid1.c "$RUNNER_TEMP/virt-abi-init/probe.o" -o "$RUNNER_TEMP/virt-abi-init/init"
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -pthread -Wl,--build-id=none src/initramfs/abi-probe-pid1.c src/initramfs/binder-probe.c "$RUNNER_TEMP/virt-abi-init/probe.o" -o "$RUNNER_TEMP/virt-abi-init/init"
           python3 build/r800_initramfs_spec.py --init "$RUNNER_TEMP/virt-abi-init/init" --list "$RUNNER_TEMP/virt-abi-init/initramfs.list" --report "$RUNNER_TEMP/virt-abi-init/initramfs-evidence.json"
       - name: Boot identical virt kernel with diagnostic external initramfs
         run: |
