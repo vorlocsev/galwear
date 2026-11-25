@@ -193,18 +193,20 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
                         grace=$((grace+1))
                     done
                 fi
-                if child_alive "$1"; then
-                    k "gnss: child did not terminate; no restart"
-                    return 1
-                fi
             fi
-            # No wait on a process that may still be blocked.
+            # An unreadable /proc entry or recycled PID is not proof of exit.
+            if kill -0 "$1" 2>/dev/null; then
+                k "gnss: child still exists or identity uncertain; no restart"
+                return 1
+            fi
             wait "$1" 2>/dev/null || :
         }
         stop_stack() {
-            stop_child "$bridge_pid" || return 1; bridge_pid=
-            stop_child "$gpsd_pid" || return 1; gpsd_pid=
-            stop_child "$lhd_pid" || return 1; lhd_pid=
+            stop_failed=0
+            if stop_child "$bridge_pid"; then bridge_pid=; else stop_failed=1; fi
+            if stop_child "$gpsd_pid"; then gpsd_pid=; else stop_failed=1; fi
+            if stop_child "$lhd_pid"; then lhd_pid=; else stop_failed=1; fi
+            return "$stop_failed"
         }
         # Shell PID variables may identify the parent shell. Read /proc/self
         # using a builtin in this subshell rather than an external command.
@@ -213,7 +215,7 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
             if [ "$key" = Pid: ]; then supervisor_pid=$value; break; fi
         done < /proc/self/status
         case "$supervisor_pid" in ''|*[!0-9]*) exit 1;; esac
-        trap 'trap - EXIT HUP INT TERM; stop_stack; exit 0' HUP INT TERM
+        trap 'trap - EXIT HUP INT TERM; stop_stack; exit $?' HUP INT TERM
         trap 'stop_stack' EXIT
         # Existing kernel-owned GPIO remains preferred. The fallback holder
         # is not restarted/killed by this supervisor.
