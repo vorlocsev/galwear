@@ -81,6 +81,8 @@ class LiveHeartbeat:
             if line == EXPECTED.rstrip(b"\n"):
                 if self.marker is not None:
                     raise ValueError("Duplicate live startup marker")
+                if now - self.start > STARTUP_LIMIT:
+                    raise ValueError("Startup marker deadline exceeded")
                 self.marker = now
             elif line.startswith(HEARTBEAT_PREFIX):
                 if self.marker is None:
@@ -211,7 +213,10 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
                 if log_path.stat().st_size > MAX_LOG:
                     raise ValueError("Virtual console exceeded log limit")
                 now = time.monotonic()
-                monitor.feed(reader.read(MAX_LOG + 1), now)
+                chunk = reader.read(MAX_LOG + 1)
+                if len(chunk) > MAX_LOG:
+                    raise ValueError("Virtual console exceeded log limit")
+                monitor.feed(chunk, now)
                 monitor.check(now)
                 remaining = deadline - now
                 if remaining <= 0:
