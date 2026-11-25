@@ -131,6 +131,7 @@ struct r800_hwc {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	int vsync_enabled;
+	int vsync_irq_known, vsync_irq_enabled;
 	unsigned long vsync_epoch;
 	int vsync_stop, vsync_started;
 	unsigned int callback_active, callback_waiters;
@@ -1093,6 +1094,29 @@ static void *vsync_loop(void *arg)
 	return NULL;
 }
 
+/* Software callbacks remain available even when the kernel TE request fails.
+ * Track the last acknowledged IRQ request separately; retry unknown requests. */
+static int r800_set_vsync_irq_locked(struct r800_hwc *h, uint32_t on)
+{
+	int ret;
+	if (h->vsync_irq_known && h->vsync_irq_enabled == (int)on)
+		return 0;
+	if (h->fb_fd < 0) {
+		h->vsync_irq_known = 0;
+		return -ENODEV;
+	}
+	do {
+		ret = ioctl(h->fb_fd, R800_S3CFB_SET_VSYNC_INT, &on);
+	} while (ret < 0 && errno == EINTR);
+	if (ret) {
+		h->vsync_irq_known = 0;
+		return ret < 0 ? -errno : -EIO;
+	}
+	h->vsync_irq_known = 1;
+	h->vsync_irq_enabled = on;
+	return 0;
+}
+
 static int r800_event_control(hwc_composer_device_1_t *dev, int disp, int event, int enabled)
 {
 	struct r800_hwc *h = (struct r800_hwc *)dev;
@@ -1104,14 +1128,12 @@ static int r800_event_control(hwc_composer_device_1_t *dev, int disp, int event,
 		pthread_mutex_unlock(&h->lock);
 		return -ESHUTDOWN;
 	}
-	if (h->vsync_enabled != (int)on) {
+	if (h->vsync_enabled != (int)on)
 		h->vsync_epoch++;
-		int r = h->fb_fd >= 0 ? ioctl(h->fb_fd, R800_S3CFB_SET_VSYNC_INT, &on) : -1;
-		static unsigned long toggles;
-		if (toggles++ < 40)
-			LOGI("vsync %s (decon vsync int: %s)", on ? "on" : "off",
-			     r ? strerror(errno) : "ok");
-	}
+	int r = r800_set_vsync_irq_locked(h, on);
+	if (r)
+		LOGW("vsync IRQ %s unavailable: %s; timer fallback allowed",
+		     on ? "on" : "off", strerror(-r));
 	h->vsync_enabled = on;
 	pthread_cond_signal(&h->cond);
 	pthread_mutex_unlock(&h->lock);
@@ -1355,7 +1377,6 @@ static void r800_dump(hwc_composer_device_1_t *dev, char *buf, int len)
 static int r800_stop_workers(struct r800_hwc *h)
 {
 	int r;
-	uint32_t off = 0;
 	if ((h->vsync_started && pthread_equal(pthread_self(), h->vsync_thread)) ||
 	    (h->idle_started && pthread_equal(pthread_self(), h->idle_thread)))
 		return -EDEADLK;
@@ -1364,9 +1385,8 @@ static int r800_stop_workers(struct r800_hwc *h)
 	h->vsync_stop = 1;
 	h->vsync_epoch++;
 	h->procs = NULL;
-	if (h->vsync_enabled && h->fb_fd >= 0 &&
-	    ioctl(h->fb_fd, R800_S3CFB_SET_VSYNC_INT, &off))
-		LOGW("vsync interrupt disable failed: %s", strerror(errno));
+	if (h->fb_fd >= 0 && r800_set_vsync_irq_locked(h, 0))
+		LOGW("vsync interrupt disable unconfirmed");
 	h->vsync_enabled = 0;
 	pthread_cond_broadcast(&h->cond);
 	pthread_mutex_unlock(&h->lock);
