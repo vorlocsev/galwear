@@ -18,7 +18,7 @@ from r800_qemu_user_init import EXPECTED, HEARTBEAT_PREFIX
 
 START = b"r800-abi-pid1: guest PID=1"
 END = b"r800-abi-pid1: complete"
-BINDER_EXPECTED = [b"r800-binder: " + name + b" version=8 mmap=PASS" for name in (b"binder", b"hwbinder", b"vndbinder")] + [b"r800-binder: PASS"]
+BINDER_EXPECTED = [b"r800-binder: " + name + b" version=8 mmap=PASS" for name in (b"binder", b"hwbinder", b"vndbinder")] + [b"r800-binder: transaction roundtrip=PASS distinct-processes=1", b"r800-binder: PASS"]
 
 
 def inspect_abi(log: bytes) -> dict:
@@ -43,7 +43,8 @@ def inspect_abi(log: bytes) -> dict:
     if not abi_end < lines.index(binder_lines[0]) < lines.index(binder_lines[-1]) < end:
         raise ValueError("Binder stages outside ABI completion window")
     return {"binder_version_reported": 8, "binder_devices_checked": ["binder", "hwbinder", "vndbinder"],
-            "binder_buffer_mapping_reported": True, "binder_transactions_tested": False,
+            "binder_buffer_mapping_reported": True, "binder_transactions_tested": True,
+            "binder_roundtrip_context": "binder", "binder_distinct_processes_reported": True,
             "bionic_tested": False, "guest_pid1_reported": True, "abi_completed_before_heartbeat": True,
             **inspect_result(b"\n".join(abi_lines) + b"\n", b"", 0)}
 
