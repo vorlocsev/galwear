@@ -148,7 +148,8 @@ def audit(root):
             if total > MAX_TOTAL_BYTES or records > MAX_RECORDS:
                 break
 
-    relevant = [s for s in services if s["name"] in APEX_SERVICES or
+    binder_services = ("servicemanager", "hwservicemanager", "vndservicemanager")
+    relevant = [s for s in services if s["name"] in APEX_SERVICES + binder_services or
                 s["name"].startswith("zygote") or "art" in s["name"].split("-")]
     duplicates = []
     by_name = {}
@@ -159,6 +160,7 @@ def audit(root):
                                "override_declared": any(o["name"] == "override" for o in service["options"])})
         by_name[service["name"]] = service
     evidence = []
+    binder_commands = []
     environment = []
     for action in actions:
         for command in action["commands"]:
@@ -169,6 +171,11 @@ def audit(root):
                     key == "setprop" and args and args[0].startswith("apexd.") or
                     "apexd.status" in action["trigger"]):
                 evidence.append({"trigger": action["trigger"], "source": action["source"], **command})
+            if ((key in ("start", "exec_start", "restart", "stop") and args and args[0] in binder_services) or
+                    (key in ("chmod", "chown", "wait", "symlink") and any(
+                        arg in ("/dev/binder", "/dev/hwbinder", "/dev/vndbinder") for arg in args)) or
+                    (key == "mount" and args and args[0] == "binder")):
+                binder_commands.append({"trigger": action["trigger"], "source": action["source"], **command})
             if key == "export" and args and args[0] in (
                     "ANDROID_ROOT", "ANDROID_ART_ROOT", "ANDROID_RUNTIME_ROOT",
                     "BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH", "SYSTEMSERVERCLASSPATH"):
@@ -183,6 +190,7 @@ def audit(root):
     return {"status": "STATIC_INIT_INVENTORY_ONLY" if not (errors or unresolved or unknown or
                  duplicates or missing) else "REVIEW_REQUIRED",
             "files": files, "services": relevant, "activation_commands": evidence,
+            "binder_commands": binder_commands,
             "art_environment": environment, "duplicate_services": duplicates,
             "unresolved_imports": unresolved, "unknown_top_level": unknown,
             "missing_evidence": missing, "errors": errors,
