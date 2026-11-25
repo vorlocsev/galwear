@@ -32,6 +32,7 @@
 #include <hardware/hardware.h>
 #endif
 #include "gps_wire.h"
+#include "gps_nmea.h"
 #include "../tools/gps/gps_frame.h"
 
 #ifdef R800_GPS_HOST_TEST
@@ -198,119 +199,82 @@ static void report_status(uint16_t st)
  * One report per epoch, sent when the epoch's RMC arrives.
  */
 static GnssSvStatus sv_cur;		/* being filled for this epoch */
-static int used[8][100];		/* [constellation][svid] used in fix */
+static unsigned char used[8][264];
+static unsigned char gsv_next[8], gsv_total[8];
 
-static int talker_constellation(const char *t)
+static void reset_sv(void)
 {
-	if (!strncmp(t, "GP", 2)) return 1;
-	if (!strncmp(t, "GL", 2)) return 3;
-	if (!strncmp(t, "QZ", 2)) return 4;
-	if (!strncmp(t, "BD", 2) || !strncmp(t, "GB", 2)) return 5;
-	if (!strncmp(t, "GA", 2)) return 6;
-	return 0;
-}
-
-/* NMEA PRN -> (constellation, svid) as GnssSvInfo wants them */
-static void map_prn(int c, int prn, int *oc, int *svid)
-{
-	*oc = c;
-	*svid = prn;
-	if (prn >= 65 && prn <= 96) {		/* GLONASS: slot + 64 */
-		*oc = 3;
-		*svid = prn - 64;
-	} else if (prn >= 193 && prn <= 200) {	/* QZSS */
-		*oc = 4;
-	} else if (prn >= 33 && prn <= 64 && c == 1) {	/* SBAS: 120 + (prn - 33) */
-		*oc = 2;
-		*svid = prn + 87;
-	} else if (prn >= 201 && prn <= 263) {	/* BeiDou, 200+ style */
-		*oc = 5;
-		*svid = prn - 200;
-	}
-}
-
-static int field(const char **p, char *out, int n)
-{
-	int i = 0;
-	if (!**p)
-		return 0;
-	while (**p && **p != ',' && **p != '*') {
-		if (i < n - 1)
-			out[i++] = **p;
-		(*p)++;
-	}
-	out[i] = 0;
-	if (**p == ',')
-		(*p)++;
-	else if (**p == '*')
-		*p += strlen(*p);
-	return 1;
+    memset(&sv_cur, 0, sizeof(sv_cur));
+    memset(used, 0, sizeof(used));
+    memset(gsv_next, 0, sizeof(gsv_next));
+    memset(gsv_total, 0, sizeof(gsv_total));
 }
 
 static void parse_gsv(const char *s, int c)
 {
-	char f[16];
-	const char *p = strchr(s, ',');
-	int k;
-	if (!p || !c)
-		return;
-	p++;
-	field(&p, f, sizeof(f));	/* total messages */
-	field(&p, f, sizeof(f));	/* message number */
-	field(&p, f, sizeof(f));	/* satellites in view */
-	for (k = 0; k < 4; k++) {
-		char prn[8], el[8], az[8], snr[8];
-		int oc, svid;
-		if (!field(&p, prn, sizeof(prn)) || !prn[0])
-			break;
-		field(&p, el, sizeof(el));
-		field(&p, az, sizeof(az));
-		field(&p, snr, sizeof(snr));
-		if (sv_cur.num_svs >= GNSS_MAX_SVS)
-			return;
-		map_prn(c, atoi(prn), &oc, &svid);
-		GnssSvInfo *v = &sv_cur.gnss_sv_list[sv_cur.num_svs++];
-		memset(v, 0, sizeof(*v));
-		v->size = sizeof(*v);
-		v->svid = (int16_t)svid;
-		v->constellation = (uint8_t)oc;
-		v->c_n0_dbhz = snr[0] ? (float)atof(snr) : 0.0f;
-		v->elevation = el[0] ? (float)atof(el) : 0.0f;
-		v->azimuth = az[0] ? (float)atof(az) : 0.0f;
-	}
+    struct gps_nmea_gsv m;
+    if (!gps_nmea_parse_gsv(s, c, &m))
+        return;
+    if (m.part == 1) {
+        int n = 0;
+        for (int i = 0; i < sv_cur.num_svs; ++i)
+            if (sv_cur.gnss_sv_list[i].constellation != c &&
+                !(c == 1 && sv_cur.gnss_sv_list[i].constellation == 2))
+                sv_cur.gnss_sv_list[n++] = sv_cur.gnss_sv_list[i];
+        sv_cur.num_svs = n;
+        gsv_next[c] = 1;
+        gsv_total[c] = m.total;
+    }
+    if (gsv_next[c] != m.part || gsv_total[c] != m.total)
+        return;
+    gsv_next[c] = m.part == m.total ? 0 : m.part + 1;
+    for (unsigned k = 0; k < m.count; ++k) {
+        const struct gps_nmea_sv *v = &m.sv[k];
+        int i;
+        for (i = 0; i < sv_cur.num_svs; ++i)
+            if (sv_cur.gnss_sv_list[i].constellation == v->c &&
+                sv_cur.gnss_sv_list[i].svid == v->id)
+                break;
+        if (i == GNSS_MAX_SVS)
+            continue;
+        if (i == sv_cur.num_svs)
+            ++sv_cur.num_svs;
+        GnssSvInfo *o = &sv_cur.gnss_sv_list[i];
+        memset(o, 0, sizeof(*o));
+        o->size = sizeof(*o);
+        o->svid = v->id;
+        o->constellation = v->c;
+        o->elevation = v->el;
+        o->azimuth = v->az;
+        o->c_n0_dbhz = v->snr;
+    }
 }
-
 static void parse_gsa(const char *s, int c)
 {
-	char f[16];
-	const char *p = strchr(s, ',');
-	int k;
-	if (!p)
-		return;
-	p++;
-	field(&p, f, sizeof(f));	/* mode A/M */
-	field(&p, f, sizeof(f));	/* fix type */
-	for (k = 0; k < 12; k++) {
-		int oc, svid;
-		if (!field(&p, f, sizeof(f)))
-			break;
-		if (!f[0])
-			continue;
-		map_prn(c ? c : 1, atoi(f), &oc, &svid);
-		if (oc > 0 && oc < 8 && svid > 0 && svid < 100)
-			used[oc][svid] = 1;
-	}
+    struct gps_nmea_gsa m;
+    if (!gps_nmea_parse_gsa(s, c, &m))
+        return;
+    memset(used[m.c], 0, sizeof(used[m.c]));
+    if (m.c == 1)
+        memset(used[2], 0, sizeof(used[2]));
+    for (unsigned i = 0; i < m.count; ++i)
+        used[m.sv[i].c][m.sv[i].id] = 1;
 }
 
 static void report_sv(void)
 {
-	int i;
+	int i, n = 0;
+	for (i = 0; i < sv_cur.num_svs; ++i) {
+		int c = sv_cur.gnss_sv_list[i].constellation;
+		if (c == 2) c = 1;
+		if (!gsv_next[c]) sv_cur.gnss_sv_list[n++] = sv_cur.gnss_sv_list[i];
+	}
+	sv_cur.num_svs = n;
 	for (i = 0; i < sv_cur.num_svs; i++) {
 		GnssSvInfo *v = &sv_cur.gnss_sv_list[i];
-		if (v->constellation < 8 && v->svid > 0 && v->svid < 100 && used[v->constellation][v->svid])
+		if (v->constellation < 8 && v->svid > 0 && v->svid < 264 && used[v->constellation][v->svid])
 			v->flags |= 4;
-		if (v->elevation > 0 || v->azimuth > 0)
-			v->flags |= 2;	/* position known: from almanac/LTO at least */
+
 	}
 	sv_cur.size = sizeof(sv_cur);
 	if (cb && cb->size >= sizeof(GpsCallbacks) && cb->gnss_sv_status_cb) {
@@ -321,7 +285,7 @@ static void report_sv(void)
 		g.size = sizeof(g);
 		for (i = 0; i < sv_cur.num_svs && g.num_svs < 32; i++) {
 			GnssSvInfo *v = &sv_cur.gnss_sv_list[i];
-			if (v->constellation != 1)
+			if (v->constellation != 1 || v->svid < 1 || v->svid > 32)
 				continue;
 			GpsSvInfo *o = &g.sv_list[g.num_svs++];
 			o->size = sizeof(*o);
@@ -334,8 +298,7 @@ static void report_sv(void)
 		}
 		cb->sv_status_cb(&g);
 	}
-	memset(&sv_cur, 0, sizeof(sv_cur));
-	memset(used, 0, sizeof(used));
+	reset_sv();
 }
 
 static void handle_nmea_sv(const char *s)
@@ -343,9 +306,9 @@ static void handle_nmea_sv(const char *s)
 	if (s[0] != '$' || strlen(s) < 7)
 		return;
 	if (!strncmp(s + 3, "GSV", 3))
-		parse_gsv(s, talker_constellation(s + 1));
+		parse_gsv(s, gps_nmea_talker(s + 1));
 	else if (!strncmp(s + 3, "GSA", 3))
-		parse_gsa(s, talker_constellation(s + 1));
+		parse_gsa(s, gps_nmea_talker(s + 1));
 	else if (!strncmp(s + 3, "RMC", 3))
 		report_sv();
 }
@@ -372,7 +335,7 @@ static void handle_line(char *l)
     } else if (!strncmp(l, "NMEA ", 5)) {
         long long ts;
         const char *sentence;
-        if (!gps_wire_parse_nmea(l + 5, &ts, &sentence))
+        if (!gps_wire_parse_nmea(l + 5, &ts, &sentence) || !gps_nmea_checksum(sentence))
             return;
         if (cb && cb->nmea_cb)
             cb->nmea_cb(ts, sentence, (int)strlen(sentence));
@@ -431,8 +394,7 @@ static void reader(void *arg)
 				send_line("START\n");
 			pthread_mutex_unlock(&lock);
 			frame.used = 0;
-			memset(&sv_cur, 0, sizeof(sv_cur));
-			memset(used, 0, sizeof(used));
+			reset_sv();
 		}
 		ssize_t n = read(fd, buf, sizeof(buf));
 		if (n < 0 && errno == EINTR)
