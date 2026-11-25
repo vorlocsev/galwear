@@ -1,0 +1,51 @@
+name: SM-R800 DTB memory audit (non-release)
+
+on:
+  push:
+    branches:
+      - development/r800-display-error-propagation-20261125
+    paths:
+      - .github/workflows/r800-dtb-memory-audit.yml
+      - build/r800_dtb_memory_audit.py
+      - tests/test_dtb_memory_audit.py
+      - src/dt/r800.dts
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dtb-memory-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify triggering commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install device tree tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends device-tree-compiler
+          dtc --version
+      - name: Verify synthetic fixtures
+        run: |
+          command -v fdtget
+          python3 -m unittest discover -s tests -p 'test_dtb_memory_audit.py' -v
+      - name: Compile standalone DTB and inspect without packaging
+        run: |
+          dtc -I dts -O dtb -S 133120 -o "$RUNNER_TEMP/r800-audit.dtb" src/dt/r800.dts 2>"$RUNNER_TEMP/r800-dtc-diagnostics.txt" || {
+            cat "$RUNNER_TEMP/r800-dtc-diagnostics.txt"
+            exit 1
+          }
+          python3 build/r800_dtb_memory_audit.py --dtb "$RUNNER_TEMP/r800-audit.dtb" --report "$RUNNER_TEMP/r800-dtb-audit.json"
+          cat "$RUNNER_TEMP/r800-dtb-audit.json"
+      - name: Upload diagnostic reports only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-dtb-memory-evidence-only
+          path: |
+            ${{ runner.temp }}/r800-dtb-audit.json
+            ${{ runner.temp }}/r800-dtc-diagnostics.txt
+          if-no-files-found: warn
+          retention-days: 7
