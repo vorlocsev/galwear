@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
 import r800_qemu_block_smoke as a
+import r800_qemu_system_init as observer
 
 class BlockSmokeTests(unittest.TestCase):
     def test_two_real_files_and_separate_status(self):
@@ -32,6 +33,14 @@ class BlockSmokeTests(unittest.TestCase):
     def test_synthetic_rejects_label_parser(self):
         with self.assertRaisesRegex(ValueError,"Synthetic disk mode"):
             a.disk.run_disks(None,None,[],synthetic=True,label_parser=lambda *_: {})
+
+    def test_live_explicit_guest_failure_stops_observer(self):
+        for line in (b"r800-virt-disk: FAIL stage=mount name=system code=6",
+                     b"r800-disk-label: FAIL path=/system/bin/init actual=bad"):
+            with self.subTest(line=line):
+                monitor = observer.LiveHeartbeat(0.0)
+                with self.assertRaisesRegex(ValueError, "critical diagnostic"):
+                    monitor.feed(line + b"\n", 1.0)
 
     def test_failure_stops_before_boot(self):
         with tempfile.TemporaryDirectory() as tmp:
