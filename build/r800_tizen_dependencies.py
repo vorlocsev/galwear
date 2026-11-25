@@ -95,7 +95,7 @@ def audit_symbols(targets, aliases, objects, edges):
             graph[source].setdefault(edge["needed"], set()).add(provider)
     reports = {}
     budget = MAX_SYMBOL_COMPARISONS
-    for target in targets:
+    for target in dict.fromkeys(targets):
         pending = [aliases.get(target)]
         reached = set()
         incomplete = False
@@ -107,6 +107,8 @@ def audit_symbols(targets, aliases, objects, edges):
             if name not in objects:
                 incomplete = True
                 continue
+            if any(dep not in graph[name] for dep in objects[name]["needed"]):
+                incomplete = True
             pending.extend(p for group in graph[name].values() for p in group)
         index = {}
         missing, weak_missing, ambiguous, unknown = [], [], [], []
@@ -115,7 +117,7 @@ def audit_symbols(targets, aliases, objects, edges):
             info = objects.get(name)
             if info is None:
                 continue
-            if info["has_dynamic"] and info["dynamic_symbol_count"] is None:
+            if info["unsupported_symbols"] or (info["has_dynamic"] and info["dynamic_symbol_count"] is None):
                 incomplete = True
             for symbol in info["symbol_exports"]:
                 index.setdefault(symbol["name"], []).append((name, symbol))
@@ -124,6 +126,9 @@ def audit_symbols(targets, aliases, objects, edges):
             if info is None:
                 continue
             for symbol in info["symbol_imports"]:
+                budget -= 1  # bound even imports without any indexed candidates
+                if budget < 0:
+                    return {"targets":reports,"limit_exceeded":True}
                 record = {"from":name, **symbol}
                 allowed = reached
                 if symbol["version_library"] is not None:
