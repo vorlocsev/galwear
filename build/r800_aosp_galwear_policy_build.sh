@@ -47,6 +47,8 @@ m -j4 selinux_policy checkfc sepolicy-analyze
 PRODUCT_OUT=$(get_build_var PRODUCT_OUT)
 HOST_OUT=$(get_build_var HOST_OUT)
 set -u
+printf '%s\n' "$(realpath "$PRODUCT_OUT")" > "$OUT/product-out-path.txt"
+printf '%s\n' "$(realpath "$HOST_OUT")" > "$OUT/host-out-path.txt"
 python3 "$TOOLS/r800_galwear_policy_fixture.py" \
     --product-out "$PRODUCT_OUT" --checkfc "$HOST_OUT/bin/checkfc" \
     --analyze "$HOST_OUT/bin/sepolicy-analyze" --report "$OUT/fixture-policy-audit.json"
