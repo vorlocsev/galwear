@@ -42,6 +42,9 @@ on:
       - build/r800_elf_relocations.py
       - build/r800_aosp_artifact_origin.py
       - build/r800_bionic_behavior_contract.py
+      - build/r800_qemu_thread_event.py
+      - src/initramfs/virt-thread-event-probe.c
+      - tests/test_qemu_thread_event.py
       - tests/test_bionic_behavior_contract.py
       - tests/test_aosp_artifact_origin.py
       - tests/test_elf_relocations.py
@@ -143,6 +146,9 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_elf_relocations.py' -v
           python3 -m unittest discover -s tests -p 'test_aosp_artifact_origin.py' -v
           python3 -m unittest discover -s tests -p 'test_bionic_behavior_contract.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_thread_event.py' -v
+          gcc -std=c11 -Wall -Wextra -Werror -O2 -pthread -DGALWEAR_HOST_TEST src/initramfs/virt-thread-event-probe.c -o "$RUNNER_TEMP/thread-event-native"
+          timeout 10 "$RUNNER_TEMP/thread-event-native"
           python3 -m unittest discover -s tests -p 'test_ext4_evidence_boundaries.py' -v
           python3 -m compileall -q build tests
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
