@@ -70,6 +70,13 @@ class PayloadCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ARM32 ELF"):
             self.build()
 
+    def test_obsolete_musl_tree_excluded(self):
+        self.put(self.src, "root/lib/ld-musl-aarch64.so.1", b"obsolete")
+        report = self.build()
+        self.assertFalse(report["safe_to_flash"])
+        with tarfile.open(self.out) as tar:
+            self.assertFalse(any(n.startswith("r800dev/root/") for n in tar.getnames()))
+
     def test_missing_wifi_firmware(self):
         (self.src / "fw/bcmdhd_sta.bin").unlink()
         with self.assertRaisesRegex(ValueError, "Missing radio input"):
@@ -129,7 +136,7 @@ class PayloadCandidateTests(unittest.TestCase):
         self.assertEqual(self.out.read_bytes(), b"keep")
 
     def test_unsafe_symlink(self):
-        (self.src / "root/escape").symlink_to("/etc/passwd")
+        (self.src / "tzlite/escape").symlink_to("/etc/passwd")
         with self.assertRaisesRegex(ValueError, "Unsafe payload symlink"):
             self.build()
 
