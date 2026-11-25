@@ -17,6 +17,8 @@ from r800_android_sepolicy_audit import audit, MAX_POLICY
 from r800_android_file_contexts import FILE_CONTEXTS, MAX_CONTEXTS
 from r800_android_init_dependencies import regular
 from r800_android_runtime_extract import digest, ext4
+from r800_initramfs_spec import validate_init
+from r800_qemu_guest_abi import read_bounded_json
 
 IMAGE_SIZE = 128*1024*1024
 PATH = re.compile(r"[A-Za-z0-9_./+-]+")
@@ -145,6 +147,27 @@ def build(a):
         raise ValueError("Expected text file_contexts")
     fc.decode("utf-8")
     entries = system_entries(entries, {FILE_CONTEXTS[0]: fc})
+    transition = None
+    if a.transition_init is not None:
+        if a.transition_compile_evidence is None:
+            raise ValueError("Transition compile evidence required")
+        info = validate_init(a.transition_init)
+        spec = read_bounded_json(a.transition_compile_evidence)
+        if spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != info:
+            raise ValueError("Transition init compile evidence mismatch")
+        binary = snapshot(a.transition_init, 2*1024*1024)
+        if sha(binary) != info["sha256"]:
+            raise ValueError("Transition init changed")
+        if "system/bin/init" not in entries or entries["system/bin/init"][0] != 0o100755:
+            raise ValueError("Canonical original /system/bin/init required")
+        original = sha(entries["system/bin/init"][1])
+        if original == sha(binary):
+            raise ValueError("Diagnostic must differ from original init")
+        entries["system/bin/init"] = (0o100755, binary, 0, 0)
+        transition = {"path": "/system/bin/init", "original_sha256": original,
+                      "diagnostic_sha256": sha(binary)}
+    elif a.transition_compile_evidence is not None:
+        raise ValueError("Unexpected transition compile evidence")
     if sum(len(v[1]) for v in entries.values()) > IMAGE_SIZE//2 or len(entries)>512:
         raise ValueError("System fixture outside bounds")
     if a.out.exists() or a.out.is_symlink():
@@ -186,7 +209,9 @@ def build(a):
                 dst.write(chunk)
         if digest(dest, IMAGE_SIZE) != before:
             raise ValueError("Image copy mismatch")
-    return {"status": "ANDROID_SYSTEM_EXT4_LABELED_STATIC_ONLY",
+    return {"status": ("ANDROID_SYSTEM_EXT4_TRANSITION_STATIC_ONLY" if transition else
+                       "ANDROID_SYSTEM_EXT4_LABELED_STATIC_ONLY"),
+            "diagnostic_init_substitution": transition,
             "image_sha256": before, "image_bytes": IMAGE_SIZE,
             "e2fsdroid_sha256": e2fsdroid_hash,
             "policy_sha256": policy["policy_sha256"], "platform_file_contexts_sha256": sha(fc),
@@ -202,6 +227,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ("staged", "product-out", "preflight-init", "checkfc", "e2fsdroid", "out", "report"):
         p.add_argument("--"+name, type=Path, required=True)
+    p.add_argument("--transition-init", type=Path)
+    p.add_argument("--transition-compile-evidence", type=Path)
     for name in ("mke2fs", "e2fsck", "debugfs", "matchpathcon", "readelf"):
         p.add_argument("--"+name, default=name)
     a = p.parse_args()
