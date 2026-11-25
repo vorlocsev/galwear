@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Generic ARM64 virt boot test, deliberately NOT an Exynos/R800 kernel test."""
+from __future__ import annotations
+
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+
+from r800_cpio_audit import inspect_cpio
+from r800_initramfs_spec import validate_init
+from r800_qemu_user_init import EXPECTED
+
+SCHEMA = "galwear-r800-generic-arm64-system-v1"
+MAX_KERNEL = 128 * 1024 * 1024
+TIMEOUT = 90
+
+
+def create_archive(binary: Path) -> bytes:
+    validate_init(binary)
+    entries = [
+        ("dev", 0o040755, b"", 0, 0),
+        ("dev/console", 0o020600, b"", 5, 1),
+        ("proc", 0o040555, b"", 0, 0),
+        ("sys", 0o040555, b"", 0, 0),
+        ("data", 0o040755, b"", 0, 0),
+        ("init", 0o100755, binary.read_bytes(), 0, 0),
+        ("TRAILER!!!", 0, b"", 0, 0),
+    ]
+    out = bytearray()
+    for ino, (name, mode, payload, major, minor) in enumerate(entries, 1):
+        pathname = name.encode("ascii") + b"\0"
+        fields = (ino, mode, 0, 0, 2 if mode & 0o170000 == 0o040000 else 1,
+                  0, len(payload), 0, 0, major, minor, len(pathname), 0)
+        out.extend(b"070701" + b"".join(f"{x:08x}".encode() for x in fields))
+        out.extend(pathname)
+        out.extend(bytes((-len(out)) % 4))
+        out.extend(payload)
+        out.extend(bytes((-len(out)) % 4))
+    return bytes(out)
+
+
+def inspect_console(log: bytes, timed_out: bool) -> dict:
+    normalized = log.replace(b"\r\n", b"\n")
+    lines = normalized.splitlines()
+    marker = EXPECTED.rstrip(b"\n")
+    if not timed_out:
+        raise ValueError("Virtual machine exited before host timeout")
+    if lines.count(marker) != 1:
+        raise ValueError("Expected exactly one minimal init marker")
+    idx = lines.index(marker)
+    if not any(b"Run /init as init process" in line for line in lines[:idx]):
+        raise ValueError("No kernel evidence of launching /init")
+    if any(b"Kernel panic" in line or b"Attempted to kill init" in line
+           or b"Failed to execute /init" in line for line in lines):
+        raise ValueError("Kernel panic or init execution failure")
+    return {"kernel_launched_init": True, "console_marker_exact": True,
+            "guest_alive_until_host_timeout": True}
+
+
+def kernel_bytes(path: Path) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Invalid generic kernel input")
+    with path.open("rb") as f:
+        magic = f.read(2)
+    opener = gzip.open if magic == b"\x1f\x8b" else open
+    with opener(path, "rb") as f:
+        raw = f.read(MAX_KERNEL + 1)
+    if not 64 <= len(raw) <= MAX_KERNEL or raw[56:60] != b"ARM\x64":
+        raise ValueError("Expected bounded uncompressed or gzip ARM64 Linux Image")
+    return raw
+
+
+def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path) -> dict:
+    elf = validate_init(binary)
+    spec = json.loads(compile_evidence.read_text())
+    if spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != elf:
+        raise ValueError("Init does not match compile evidence")
+    raw = kernel_bytes(kernel)
+    out.mkdir(exist_ok=False)
+    image = out / "generic-Image"
+    image.write_bytes(raw)
+    archive = out / "initramfs.cpio"
+    archive.write_bytes(create_archive(binary))
+    cpio = inspect_cpio(archive, binary)
+    if cpio["embedded_init_sha256"] != elf["sha256"]:
+        raise ValueError("Archive init hash mismatch")
+    version = subprocess.run(["qemu-system-aarch64", "--version"], check=True,
+                             capture_output=True, text=True, timeout=5).stdout.splitlines()[0]
+    command = [
+        "qemu-system-aarch64", "-machine", "virt,gic-version=3,accel=tcg",
+        "-cpu", "cortex-a53", "-smp", "2", "-m", "512M",
+        "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none",
+        "-serial", "stdio", "-nic", "none",
+        "-kernel", str(image.resolve()), "-initrd", str(archive.resolve()),
+        "-append", "console=ttyAMA0 rdinit=/init ro panic=-1",
+    ]
+    timed_out = False
+    log_path = out / "generic-console.log"
+    with log_path.open("wb") as stream:
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream,
+                                stderr=subprocess.STDOUT)
+        try:
+            proc.wait(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+    if log_path.stat().st_size > 8 * 1024 * 1024:
+        raise ValueError("Unexpectedly large virtual console log")
+    observed = inspect_console(log_path.read_bytes(), timed_out)
+    return {"schema": SCHEMA, "status": "GENERIC_ARM64_PID1_BOOT_ONLY",
+            "generic_kernel_sha256": hashlib.sha256(raw).hexdigest(),
+            "init_sha256": elf["sha256"], "archive_sha256": cpio["archive_sha256"],
+            "qemu_version": version, **observed,
+            "r800_kernel_boot_tested": False, "exynos9110_emulated": False,
+            "device_contacted": False, "safe_to_flash": False}
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--init", required=True, type=Path)
+    p.add_argument("--compile-evidence", required=True, type=Path)
+    p.add_argument("--generic-kernel", required=True, type=Path)
+    p.add_argument("--out-dir", required=True, type=Path)
+    p.add_argument("--report", required=True, type=Path)
+    a = p.parse_args()
+    try:
+        report = run(a.init, a.compile_evidence, a.generic_kernel, a.out_dir)
+        rc = 0
+    except (OSError, ValueError, subprocess.SubprocessError, IndexError, EOFError) as exc:
+        report = {"schema": SCHEMA, "status": "REJECT", "reason": str(exc),
+                  "r800_kernel_boot_tested": False, "safe_to_flash": False}
+        rc = 2
+    a.report.write_text(json.dumps(report, indent=2) + "\n")
+    print(report["status"])
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
