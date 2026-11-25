@@ -1,0 +1,88 @@
+name: SM-R800 virt block smoke (non-release)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - development/r800-display-error-propagation-20261125
+    paths:
+      - .github/workflows/r800-qemu-block-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  block-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check exact head and static contracts
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_readonly_disks.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_block_smoke.py' -v
+      - name: Fetch pinned disposable kernel source
+        run: |
+          sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/block-source" "$RUNNER_TEMP/block-source-evidence.json"
+          git -C "$RUNNER_TEMP/block-source" sparse-checkout disable
+      - name: Compile block profile with pinned toolchain
+        run: |
+          docker run --rm --pull=always \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/block-source:/source" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache clang19=19.1.4-r0 lld=19.1.4-r0 llvm19=19.1.4-r1 \
+                git make bash bc bison flex perl python3 openssl-dev \
+                elfutils-dev build-base linux-headers coreutils findutils
+              git config --global --add safe.directory /source
+              sh /repo/build/r800_initramfs_compile_smoke.sh /repo /scratch/block-init
+              sh /repo/build/r800_qemu_virt_compile.sh /source /repo /scratch/block-kernel /scratch/block-init/initramfs.list block
+            '
+      - name: Install host QEMU and image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm gcc-aarch64-linux-gnu libc6-dev-arm64-cross e2fsprogs
+      - name: Boot embedded PID1 without any disks
+        run: |
+          python3 build/r800_qemu_system_init.py \
+            --init "$RUNNER_TEMP/block-init/init" \
+            --compile-evidence "$RUNNER_TEMP/block-init/initramfs-evidence.json" \
+            --generic-kernel "$RUNNER_TEMP/block-kernel/arch/arm64/boot/Image" \
+            --embedded-archive "$RUNNER_TEMP/block-kernel/usr/initramfs_data.cpio" \
+            --out-dir "$RUNNER_TEMP/block-baseline" \
+            --report "$RUNNER_TEMP/block-baseline.json"
+      - name: Compile static disk probe
+        run: |
+          mkdir "$RUNNER_TEMP/block-probe"
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/virt-readonly-disks.c -o "$RUNNER_TEMP/block-probe/init"
+          python3 build/r800_initramfs_spec.py --init "$RUNNER_TEMP/block-probe/init" --list "$RUNNER_TEMP/block-probe/initramfs.list" --report "$RUNNER_TEMP/block-probe/compile.json"
+      - name: Boot two synthetic read-only EXT4 disks
+        run: |
+          python3 build/r800_qemu_block_smoke.py \
+            --init "$RUNNER_TEMP/block-probe/init" \
+            --compile-evidence "$RUNNER_TEMP/block-probe/compile.json" \
+            --kernel "$RUNNER_TEMP/block-kernel/arch/arm64/boot/Image" \
+            --baseline "$RUNNER_TEMP/block-baseline.json" \
+            --config-evidence "$RUNNER_TEMP/block-kernel/virt-config-evidence.json" \
+            --fixture-dir "$RUNNER_TEMP/synthetic-disks" \
+            --out-dir "$RUNNER_TEMP/block-smoke" \
+            --report "$RUNNER_TEMP/block-smoke.json"
+      - name: Upload evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: block-smoke-evidence-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/block-source-evidence.json
+            ${{ runner.temp }}/block-kernel/virt-config-evidence.json
+            ${{ runner.temp }}/block-kernel/virt-cpio-evidence.json
+            ${{ runner.temp }}/block-baseline.json
+            ${{ runner.temp }}/block-baseline/generic-console.log
+            ${{ runner.temp }}/block-probe/compile.json
+            ${{ runner.temp }}/block-smoke.json
+            ${{ runner.temp }}/block-smoke/generic-console.log
+          if-no-files-found: warn
+          retention-days: 7
