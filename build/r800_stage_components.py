@@ -14,6 +14,7 @@ from r800_android_userspace_preflight import read_regular
 from r800_stage_hals import stage as stage_hals
 from r800_vendor_inputs import file_info
 
+WIFI_TOOLS = ("wpa_supplicant", "wpa_cli", "iw")
 TOOLS = ("bin/fsfreeze", "bin/loopdio", "bin/r800boost", "bin/r800keys", "bin/ukey",
          "bin/gpiotool", "bin/wpcd", "charger/r800charger",
          "charger/r800wdui", "charger/wpcd")
@@ -72,9 +73,9 @@ def dex(data):
         raise ValueError("Invalid DEX checksum")
 
 
-def assemble(hal_dir, vendor_sources, tools, bluetooth, keepwifi, output, source_sha, busybox):
-    roots = [p.resolve(strict=True) for p in (hal_dir, vendor_sources, tools, bluetooth, keepwifi, busybox)]
-    hal_dir, vendor_sources, tools, bluetooth, keepwifi, busybox = roots
+def assemble(hal_dir, vendor_sources, tools, bluetooth, keepwifi, output, source_sha, busybox, wifi):
+    roots = [p.resolve(strict=True) for p in (hal_dir, vendor_sources, tools, bluetooth, keepwifi, busybox, wifi)]
+    hal_dir, vendor_sources, tools, bluetooth, keepwifi, busybox, wifi = roots
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise ValueError("Output already exists")
@@ -102,6 +103,17 @@ def assemble(hal_dir, vendor_sources, tools, bluetooth, keepwifi, output, source
         evidence = (tree / "busybox-evidence/busybox-evidence.txt").read_text()
         if not any(line.split() and line.split()[0] == expected_hash and line.endswith("/bin/busybox") for line in evidence.splitlines()):
             raise ValueError("BusyBox build evidence hash mismatch")
+        add(wifi / "evidence/wifi-build-evidence.txt", tree / "wifi-evidence/wifi-build-evidence.txt")
+        evidence = (tree / "wifi-evidence/wifi-build-evidence.txt").read_text()
+        for name in WIFI_TOOLS:
+            dest = payload / "bin" / name
+            add(wifi / "bin" / name, dest, static_arm, 0o755)
+            expected_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
+            if not any(line.split() and line.split()[0] == expected_hash and line.endswith("/bin/" + name) for line in evidence.splitlines()):
+                raise ValueError("Wi-Fi tool build evidence hash mismatch: " + name)
+            for suffix in (".elf.txt", ".version.txt"):
+                add(wifi / "evidence" / (name + suffix), tree / "wifi-evidence" / (name + suffix))
+        add(wifi / "evidence/wpa.config", tree / "wifi-evidence/wpa.config")
         for name in TOOLS:
             add(tools / name, payload / name, static_arm, 0o755)
         if (payload / "bin/wpcd").read_bytes() != (payload / "charger/wpcd").read_bytes():
@@ -130,12 +142,12 @@ def assemble(hal_dir, vendor_sources, tools, bluetooth, keepwifi, output, source
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for arg in ("hal-dir", "vendor-sources", "tools", "bluetooth", "keepwifi", "output", "busybox"):
+    for arg in ("hal-dir", "vendor-sources", "tools", "bluetooth", "keepwifi", "output", "busybox", "wifi"):
         p.add_argument("--" + arg, type=Path, required=True)
     p.add_argument("--source-sha", required=True)
     a = p.parse_args()
     print(json.dumps(assemble(a.hal_dir, a.vendor_sources, a.tools, a.bluetooth,
-                              a.keepwifi, a.output, a.source_sha, a.busybox), sort_keys=True))
+                              a.keepwifi, a.output, a.source_sha, a.busybox, a.wifi), sort_keys=True))
 
 
 if __name__ == "__main__":
