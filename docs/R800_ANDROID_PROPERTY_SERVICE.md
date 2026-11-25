@@ -263,3 +263,36 @@ exec, with enforcing=1. A failed restorecon, transition, or console
 heartbeat rejects the gate. This does not label the entire Android
 rootfs or launch the Android property service. Actual AOSP linkage,
 ramdisk SELinux labeling, and guest execution remain unconfirmed.
+
+
+## Expanded rootfs stock-policy relabel
+
+Build the AOSP-linked static probe using the third argument relabel:
+
+    bash build/r800_aosp_selinux_transition_build.sh /absolute/aosp-r48 /absolute/new-relabel-build relabel
+
+The new build/r800_qemu_rootfs_relabel.py runner requires same-kernel
+preflight, stock policy load and diagnostic domain transition reports,
+the previous archive, the original preflight PID1, the staged tree and
+the new relabel binary with its compile evidence. Use --help for the
+complete argument list. It reconstructs the previous archive exactly
+before replacing only the diagnostic /init and adding policy,
+file_contexts and a bounded relabel manifest. The original system init
+and property binaries remain present but are never executed.
+
+For each selected system/partition/APEX/linkerconfig path and /dev/socket,
+the probe uses Android libselinux lookup and restorecon, reads back the
+label and compares it to the lookup. Missing contexts or denied relabel
+are blockers, including potential APEX labels normally provided by its
+filesystem image. This is not a general recursive labeling of every
+virtual filesystem. The init executable and socket directory labels
+are specifically checked when present.
+
+Important policy constraint: Android 11 public/init.te contains
+neverallow init { file_type fs_type }:file execute_no_trans.
+A generic executable label on the experimental property client does
+not authorize exec from init. Do not bypass this with setcon, permissive
+mode, or arbitrary relabeling to init_exec. A subsequent test must use a
+legitimate policy-authorized client domain and normal transition, or
+report that the stock policy does not support the diagnostic harness.
+No actual source build, relabel or property-service launch is established.
