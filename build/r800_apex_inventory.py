@@ -11,6 +11,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from r800_android_userspace_preflight import guest_path, read_regular
+import r800_avb_inventory
 
 MAX_METADATA = 1024 * 1024
 MAX_MODULES = 512
@@ -215,7 +216,9 @@ def package_inventory(path):
                 head = image.read(1082)
             if head[1080:1082] != b"\x53\xef":
                 raise ValueError("APEX payload lacks ext4 magic")
+            avb = r800_avb_inventory.inspect(stream, image_offset, payload.file_size, key)
             return {"identity": identities[0], "entries": sorted(by_name),
+                    "avb": avb,
                     "payload_bytes": payload.file_size, "payload_offset": image_offset,
                     "payload_ext4_magic": True, "pubkey_sha256": hashlib.sha256(key).hexdigest(),
                     "payload_crc_verified": False, "signature_verified": False}
@@ -288,5 +291,6 @@ def audit(root):
     return {"status": "METADATA_INVENTORY_ONLY" if not errors else "REVIEW_REQUIRED",
             "modules": modules, "records": records, "errors": errors,
             "package_status": "REVIEW_REQUIRED" if any(m["package"] is None or m["package_error"] for m in modules.values()) else "PACKAGE_STRUCTURE_ONLY",
+            "avb_status": "AVB_STRUCTURE_ONLY" if modules and all(m["package"] and not m["package_error"] and m["package"]["avb"]["status"] == "AVB_STRUCTURE_ONLY" for m in modules.values()) else "REVIEW_REQUIRED",
             "apexd_activation_verified": False, "signature_verified": False,
             "mounts_verified": False, "safe_to_flash": False}
