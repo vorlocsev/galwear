@@ -153,14 +153,16 @@ int main(void)
     transmit(fd,bad);
     await_readable(fd);
     char ch;
-    assert(recv(fd,&ch,1,0)==0 || errno==ECONNRESET);
+    ssize_t got=recv(fd,&ch,1,0);
+    assert(got==0 || (got<0 && errno==ECONNRESET));
     close(fd);
     fd=connect_peer(ls);
     expect_line(fd,"START\n");
     const char nul[]={'F','I','X',' ',0,'\n'};
     assert(send(fd,nul,sizeof(nul),MSG_NOSIGNAL)==(ssize_t)sizeof(nul));
     await_readable(fd);
-    assert(recv(fd,&ch,1,0)==0 || errno==ECONNRESET);
+    got=recv(fd,&ch,1,0);
+    assert(got==0 || (got<0 && errno==ECONNRESET));
     close(fd);
     fd=connect_peer(ls);
     expect_line(fd,"START\n");
