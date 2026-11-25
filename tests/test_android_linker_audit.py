@@ -2476,6 +2476,78 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["health_inventory"]["charging_safety_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def power_fixture(self):
+        self.put("init.rc", b"service vendor.power /vendor/bin/hw/power-service\n"
+                 b"    interface android.hardware.power@1.3::IPower default\n"
+                 b"service vendor.thermal /vendor/bin/hw/thermal-service\n"
+                 b"    interface android.hardware.thermal@2.0::IThermal default\n")
+        self.put_art_executable("vendor/bin/hw/power-service", "arm")
+        self.put_art_executable("vendor/bin/hw/thermal-service", "arm")
+        self.put("vendor/lib/hw/power.exynos.so", fixture("arm"))
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"><hal format="hidl"><name>android.hardware.power</name><fqname>@1.3::IPower/default</fqname></hal><hal format="hidl"><name>android.hardware.thermal</name><fqname>@2.0::IThermal/default</fqname></hal></manifest>')
+
+    def inspect_power(self, kernel=None, dtb=None):
+        return audit.r800_power_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel, dtb)
+
+    def test_power_static_hal_candidates(self):
+        self.power_fixture()
+        out = self.inspect_power({"CONFIG_PM": "y", "CONFIG_CPU_FREQ": "y", "CONFIG_THERMAL": "y"})
+        self.assertEqual(len(out["hal_declarations"]), 2)
+        self.assertEqual(len(out["services"]), 2)
+        self.assertTrue(all(s["elf"] for s in out["services"]))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["thermal_protection_verified"])
+
+    def test_power_dt_opp_thermal_idle_and_wakeup(self):
+        nodes = {"/": {}, "/opp-table": {}, "/opp-table/opp-1000": {"opp-hz": struct.pack(">Q", 1000)},
+                 "/thermal-zones": {}, "/idle-states": {}, "/rtc": {"wakeup-source": b""}}
+        out = audit.r800_power_inventory.dt_inventory(nodes)
+        self.assertEqual({k for entry in out for k in entry["kinds"]},
+                         {"opp", "thermal", "idle_or_domain", "wakeup"})
+        self.assertEqual(out[1]["property_names"], ["opp-hz"])
+
+    def test_power_dt_disabled_parent(self):
+        nodes = {"/": {}, "/bus": {"status": b"disabled\0"},
+                 "/bus/opp-table": {"compatible": b"operating-points-v2\0"}}
+        self.assertFalse(audit.r800_power_inventory.dt_inventory(nodes)[0]["enabled"])
+
+    def test_power_sysfs_metadata_without_limit_values(self):
+        self.power_fixture()
+        self.put("sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq", b"1234567\n")
+        self.put("sys/class/devfreq/gpu/governor", b"fixture\n")
+        self.put("sys/class/thermal/thermal_zone0/trip_point_0_temp", b"98765\n")
+        out = self.inspect_power()
+        snap = out["sysfs_attribute_snapshot"]
+        self.assertIn("scaling_max_freq", snap["/sys/devices/system/cpu/cpufreq/policy0"])
+        self.assertIn("governor", snap["/sys/class/devfreq/gpu"])
+        self.assertIn("trip_point_0_temp", snap["/sys/class/thermal/thermal_zone0"])
+        self.assertNotIn("1234567", str(snap))
+        self.assertNotIn("98765", str(snap))
+
+    def test_power_sleep_mode_snapshot_not_runtime_proof(self):
+        self.put("sys/power/state", b"freeze mem\n")
+        self.put("sys/power/mem_sleep", b"s2idle [deep]\n")
+        out = self.inspect_power()
+        self.assertEqual(out["sleep_modes_snapshot"]["/sys/power/state"], ["freeze", "mem"])
+        self.assertEqual(out["sleep_modes_snapshot"]["/sys/power/mem_sleep"], ["s2idle", "[deep]"])
+        self.assertFalse(out["suspend_resume_verified"])
+
+    def test_power_wrong_library_abi(self):
+        self.power_fixture()
+        self.put("vendor/lib/hw/power.exynos.so", fixture("arm64"))
+        out = self.inspect_power()
+        self.assertIsNone(out["libraries"]["/vendor/lib/hw/power.exynos.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_power_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",), kernel_config={"CONFIG_PM": "y"})
+        self.assertEqual(out["power_inventory"]["kernel_config"]["CONFIG_PM"], "y")
+        self.assertFalse(out["power_inventory"]["suspend_resume_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
