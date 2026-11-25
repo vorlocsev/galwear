@@ -209,14 +209,21 @@ def symbol_inventory(tags, data, loads, cls, strings, result):
     need_by_index = {v["index"]: v for v in result["version_needs"]}
     def_by_index = {v["index"]: v for v in result["version_definitions"]}
     imports, exports, unsupported = [], [], []
+    tls_indices = set()
     name_bytes = 0
     for i in range(1, count):
         entry = struct.unpack_from(fmt, data, pos + i * entry_size)
         if cls == 2:
-            name, info, other, section, _, _ = entry
+            name, info, other, section, value, symbol_size = entry
         else:
-            name, _, _, info, other, section = entry
+            name, value, symbol_size, info, other, section = entry
         binding, typ, visibility = info >> 4, info & 15, other & 3
+        if typ == 6:
+            tls_indices.add(i)
+            if section not in (0, 0xffff):
+                segment = result["tls_segment"]
+                if segment is None or value + symbol_size > segment["memory_size"]:
+                    raise ValueError("Defined TLS symbol outside PT_TLS")
         if binding == 0:
             continue
         end = strings.find(b"\0", name, min(len(strings), name + 4096))
@@ -248,6 +255,8 @@ def symbol_inventory(tags, data, loads, cls, strings, result):
                 unsupported.append({**record, "reason": "defined_symbol_with_version_requirement"})
             else:
                 exports.append(record)
+    result["_tls_indices"] = tls_indices
+    result["tls_symbol_count"] = len(tls_indices)
     result["symbol_imports"] = imports
     result["symbol_exports"] = exports
     result["unsupported_symbols"] = unsupported
@@ -281,18 +290,20 @@ DT_ANDROID_RELR, DT_ANDROID_RELRSZ, DT_ANDROID_RELRENT = 0x6fffe000, 0x6fffe001,
 MAX_PACKED_BYTES = 16 * 1024 * 1024
 
 
-def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
+def relocation_inventory(tags, data, loads, memory, cls, symbol_count, tls_indices=None):
     result = {"tables": [], "unsupported_types": [], "symbol_indices_checked": True,
               "packed_tags": [],
-              "nonwritable_targets": 0, "relocations_applied": False}
+              "nonwritable_targets": 0, "relocations_applied": False,
+              "tls_count": 0, "tls_symbol_types_checked": True, "tlsdesc_count": 0}
     wide = cls == 2
-    # Width of common scalar dynamic relocations. COPY and TLSDESC require
-    # additional symbol/type-specific checks and are deliberately not covered.
+    # COPY requires additional symbol-specific checks; TLSDESC spans two words.
     widths = ({257: 8, 258: 4, 259: 2, 260: 8, 261: 4, 262: 2,
-               1025: 8, 1026: 8, 1027: 8, 1028: 8, 1029: 8, 1030: 8, 1032: 8}
-              if wide else {2: 4, 3: 4, 17: 4, 18: 4, 19: 4,
+               1025: 8, 1026: 8, 1027: 8, 1028: 8, 1029: 8, 1030: 8, 1031: 16, 1032: 8}
+              if wide else {2: 4, 3: 4, 13: 8, 17: 4, 18: 4, 19: 4,
                             21: 4, 22: 4, 23: 4, 160: 4})
     relative = (1027, 1032) if wide else (23, 160)
+    tls_types = (1028, 1029, 1030, 1031) if wide else (13, 17, 18, 19)
+    tlsdesc = 1031 if wide else 13
     unsupported, ranges, total = set(), [], 0
 
     def single(tag):
@@ -309,6 +320,17 @@ def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
             raise ValueError("Relocation symbol index out of bounds")
         if typ in relative and sym:
             raise ValueError("Relative relocation has nonzero symbol index")
+        if typ in tls_types:
+            result["tls_count"] += 1
+            if typ == tlsdesc:
+                result["tlsdesc_count"] += 1
+            if sym:
+                if tls_indices is None:
+                    result["tls_symbol_types_checked"] = False
+                elif sym not in tls_indices:
+                    raise ValueError("TLS relocation references non-TLS symbol")
+            if target % (8 if wide else 4):
+                raise ValueError("Unaligned TLS relocation target")
         if typ == 0:
             return
         width = widths.get(typ, 1)
@@ -521,24 +543,40 @@ def inspect(data: bytes) -> dict:
         expected, dynfmt = 32, "<iI"
     if entsize != expected or not 1 <= count <= 128 or phoff + count * entsize > len(data):
         raise ValueError("Invalid program header table")
-    loads, memory, dynamic = [], [], None
+    loads, memory, dynamic, tls = [], [], None, None
     for i in range(count):
         p = phoff + i * entsize
         if cls == 2:
-            typ, flags, off, addr, _, size, mem, _ = struct.unpack_from("<IIQQQQQQ", data, p)
+            typ, flags, off, addr, _, size, mem, align = struct.unpack_from("<IIQQQQQQ", data, p)
         else:
-            typ, off, addr, _, size, mem, flags, _ = struct.unpack_from("<IIIIIIII", data, p)
-        if typ in (1, 2) and (off + size > len(data) or size > mem):
+            typ, off, addr, _, size, mem, flags, align = struct.unpack_from("<IIIIIIII", data, p)
+        if typ in (1, 2, 7) and (off + size > len(data) or size > mem):
             raise ValueError("Invalid segment bounds")
         if typ == 1:
             loads.append((addr, off, size))
             memory.append((addr, mem, flags))
+        if typ == 7:
+            if tls is not None:
+                raise ValueError("Duplicate PT_TLS")
+            if align > 1 and (align & (align - 1) or addr % align != off % align):
+                raise ValueError("Invalid PT_TLS alignment")
+            if addr + mem > 1 << (64 if cls == 2 else 32):
+                raise ValueError("PT_TLS address overflow")
+            tls = {"address": addr, "file_offset": off, "file_size": size,
+                   "memory_size": mem, "alignment": align}
         if typ == 2:
             if dynamic is not None:
                 raise ValueError("Duplicate PT_DYNAMIC")
             dynamic = (off, size)
     if not loads:
         raise ValueError("Missing PT_LOAD")
+    if tls is not None:
+        addr, off, size, mem = (tls[k] for k in ("address", "file_offset", "file_size", "memory_size"))
+        if not any(va <= addr and mem <= span - (addr - va) for va, span, _ in memory):
+            raise ValueError("PT_TLS outside PT_LOAD memory")
+        if size and not any(va <= addr and size <= fs - (addr - va) and
+                            fo + addr - va == off for va, fo, fs in loads):
+            raise ValueError("PT_TLS initialization not file-backed")
     result = {"abi": "arm64" if cls == 2 else "arm", "needed": [],
               "has_dynamic": dynamic is not None, "custom_search_path": False,
               "elf_type": "ET_DYN" if etype == 3 else "ET_EXEC", "soname": None,
@@ -546,6 +584,7 @@ def inspect(data: bytes) -> dict:
               "dynamic_symbol_count": None, "symbol_table_status": "NOT_PRESENT",
               "versym_indices_checked": False, "symbol_imports": [],
               "symbol_exports": [], "unsupported_symbols": [],
+              "tls_segment": tls, "tls_symbol_count": None,
               "relocations": relocation_inventory({}, data, loads, memory, cls, None)}
     if dynamic is None:
         return result
@@ -596,7 +635,7 @@ def inspect(data: bytes) -> dict:
         result["soname"] = dynamic_name(tags[14][0], "DT_SONAME")
     result["version_needs"], result["version_definitions"], result["versym_present"] = version_inventory(tags, data, loads, dynamic_name)
     symbol_inventory(tags, data, loads, cls, strings, result)
-    result["relocations"] = relocation_inventory(tags, data, loads, memory, cls, result["dynamic_symbol_count"])
+    result["relocations"] = relocation_inventory(tags, data, loads, memory, cls, result["dynamic_symbol_count"], result.pop("_tls_indices", None))
     return result
 
 
@@ -709,7 +748,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
         edges[name] = {}
         reloc = info["relocations"]
         if (reloc["unsupported_types"] or reloc["packed_tags"] or
-                not reloc["symbol_indices_checked"] or reloc["nonwritable_targets"]):
+                not reloc["symbol_indices_checked"] or not reloc["tls_symbol_types_checked"] or reloc["nonwritable_targets"]):
             relocation_review_objects.append(name)
         if info["unsupported_symbols"]:
             unsupported_symbol_objects.append(name)
