@@ -146,6 +146,50 @@ done
 cp "$EFFECTS" "$OUT/lib/libeffectsconfig.so"
 setfattr -n security.selinux -v u:object_r:vendor_file:s0 "$OUT/lib/libeffectsconfig.so"
 
+# Legacy HIDL 1.0 wrappers must come from one complete donor per subsystem.
+# Do not substitute a differently versioned or vendor-specific service silently.
+copy_hidl_group() {
+    local group=$1 donor f complete
+    shift
+    for donor in "$BASE_MNT" "$J4_MNT"; do
+        complete=1
+        for f in "$@"; do
+            [[ -f "$donor/$f" && ! -L "$donor/$f" ]] || { complete=0; break; }
+        done
+        if [[ $complete == 1 ]]; then
+            for f in "$@"; do
+                tar --xattrs --xattrs-include='*' -C "$donor" -cf - "$f" |
+                    tar --xattrs --xattrs-include='*' -C "$OUT" -xpf -
+            done
+            printf '%s donor=%s\n' "$group" "$(basename "$donor")" >> "$WORK/hidl-donors.txt"
+            return 0
+        fi
+    done
+    echo "Missing complete HIDL 1.0 donor group: $group" >&2
+    printf '  %s\n' "$@" >&2
+    return 2
+}
+copy_hidl_group sensors \
+    ./bin/hw/android.hardware.sensors@1.0-service \
+    ./lib/hw/android.hardware.sensors@1.0-impl.so \
+    ./lib/android.hardware.sensors@1.0.so
+copy_hidl_group gnss \
+    ./bin/hw/android.hardware.gnss@1.0-service \
+    ./etc/init/android.hardware.gnss@1.0-service.rc \
+    ./lib/hw/android.hardware.gnss@1.0-impl.so \
+    ./lib/android.hardware.gnss@1.0.so
+cp "$S/sensors/android.hardware.sensors@1.0-service.rc" "$OUT/etc/init/"
+setfattr -n security.selinux -v u:object_r:vendor_configs_file:s0 \
+    "$OUT/etc/init/android.hardware.sensors@1.0-service.rc"
+for group in sensors gnss; do
+    for binary in "$OUT/bin/hw/android.hardware.$group@1.0-service" \
+                  "$OUT/lib/hw/android.hardware.$group@1.0-impl.so"; do
+        llvm-readelf -h "$binary" | grep -Eq 'Class:[[:space:]]*ELF32'
+        llvm-readelf -h "$binary" | grep -Eq 'Machine:[[:space:]]*ARM'
+        llvm-readelf -d "$binary" >> "$WORK/hidl-dependencies.txt"
+    done
+done
+
 # ---- bluetooth HAL (crash loop without it: btHci == nullptr) ----
 for f in \
     ./bin/hw/android.hardware.bluetooth@1.0-service \
