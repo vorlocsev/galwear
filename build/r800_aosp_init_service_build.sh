@@ -33,6 +33,7 @@ cc_binary {
     srcs: ["property-service-client.c"],
     compile_multilib: "64",
     stl: "none",
+    shared_libs: ["libdl", "libm"],
     cflags: ["-Wall", "-Wextra", "-Werror"],
 }
 BP
