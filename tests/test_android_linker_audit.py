@@ -2603,6 +2603,44 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["selinux_inventory"]["policy_loaded_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def test_integration_vintf_accepts_xml_comments(self):
+        out = audit.r800_vintf_inventory.parse(b'<!-- fixture --><manifest type="device"><!-- HALs --></manifest>', "fixture")
+        self.assertEqual(out["type"], "device")
+
+    def test_integration_audio_accepts_xml_comments(self):
+        out = audit.r800_audio_inventory.parse_config(b'<!-- fixture --><mixer><!-- paths --><path name="speaker"/></mixer>')
+        self.assertEqual(out["mixer_paths"][0]["name"], "speaker")
+
+    def test_integration_xml_rejects_entity_declarations(self):
+        raw = b'<?test <!-- ?><!DOCTYPE mixer [<!ENTITY x "fixture">]><!-- end --><mixer>&x;</mixer>'
+        with self.assertRaisesRegex(ValueError, "declaration"):
+            audit.r800_audio_inventory.parse_config(raw)
+        with self.assertRaisesRegex(ValueError, "declaration"):
+            audit.r800_vintf_inventory.parse(raw, "fixture")
+
+    def test_integration_summary_preserves_static_and_runtime_distinction(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        summary = out["integration_summary"]
+        self.assertEqual(out["status"], "CANDIDATES_FOUND_ONLY")
+        self.assertEqual(summary["status"], "REVIEW_REQUIRED")
+        self.assertIn("selinux_inventory", summary["static_review_required"])
+        self.assertEqual(len(summary["missing_target_inputs"]), 2)
+        self.assertTrue(all(s["runtime_status"] == "NOT_TESTED" for s in summary["stages"].values()))
+        self.assertFalse(summary["safe_to_flash"])
+
+    def test_integration_summary_includes_linker_failure(self):
+        self.put("init", fixture(needed=["missing.so"]))
+        out = audit.audit(self.root, ("/init",))
+        self.assertIn("elf_linker", out["integration_summary"]["static_review_required"])
+
+    def test_integration_static_evidence_not_boot_pass(self):
+        summary = audit.integration_summary({"example": {"status": "STATIC_INVENTORY_ONLY"}}, {}, b"fixture")
+        self.assertEqual(summary["status"], "STATIC_EVIDENCE_ONLY")
+        self.assertEqual(summary["stages"]["example"]["runtime_status"], "NOT_TESTED")
+        self.assertFalse(summary["android_boot_verified"])
+        self.assertFalse(summary["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
