@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compile four complete Android HAL translation units and link HWC only. No payload or flash.
+# Compile five Android HAL translation units and link four NDK-only modules. No payload or flash.
 set -eu
 [ "$#" -eq 4 ] || {
     echo "usage: $0 <repo> <ndk-r27c> <tinyalsa-checkout> <new-out-dir>" >&2
@@ -17,7 +17,7 @@ toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
 cc="$toolchain/armv7a-linux-androideabi28-clang"
 test -x "$cc"
 mkdir -p "$out"
-for module in audio_r800 gps_r800 sensors_r800 hwcomposer_r800; do
+for module in audio_r800 gps_r800 sensors_r800 hwcomposer_r800 lights_r800; do
     echo "Compiling $module (ARM32, API 28)"
     "$cc" -std=gnu11 -O2 -fPIC -mfpu=neon \
         -Werror=implicit-function-declaration -Werror=incompatible-pointer-types \
@@ -25,23 +25,51 @@ for module in audio_r800 gps_r800 sensors_r800 hwcomposer_r800; do
         -c "$repo/src/hal/$module.c" -o "$out/$module.o"
     "$toolchain/llvm-readelf" -h "$out/$module.o" | grep -Eq 'Machine:[[:space:]]+ARM'
 done
-# HWC depends only on NDK libraries; gralloc is resolved dynamically.
-"$cc" -shared -Wl,--no-undefined -Wl,-soname,hwcomposer.r800.so \
-    "$out/hwcomposer_r800.o" -llog -ldl -o "$out/hwcomposer.r800.so"
-"$toolchain/llvm-readelf" -h "$out/hwcomposer.r800.so" | grep -Eq 'Machine:[[:space:]]+ARM'
-"$toolchain/llvm-readelf" -h "$out/hwcomposer.r800.so" | grep -Eq 'Type:[[:space:]]+DYN'
-"$toolchain/llvm-readelf" --dyn-syms --wide "$out/hwcomposer.r800.so" | grep -Eq '[[:space:]]GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+HMI$'
-"$toolchain/llvm-readelf" -d "$out/hwcomposer.r800.so" > "$out/hwc-dynamic.txt"
+# Audio needs the hardware-specific tinyalsa patch; do not substitute stock
+# tinyalsa or claim that its runtime linkage has been validated.
+for module in hwcomposer gps sensors lights; do
+    soname="$module.r800.so"
+    echo "Linking $soname (ARM32, API 28)"
+    "$cc" -shared -Wl,--no-undefined -Wl,-soname,"$soname" \
+        "$out/${module}_r800.o" -llog -ldl -lm -o "$out/$soname"
+    "$toolchain/llvm-readelf" -h "$out/$soname" > "$out/$module-elf.txt"
+    grep -Eq 'Class:[[:space:]]+ELF32' "$out/$module-elf.txt"
+    grep -Eq 'Machine:[[:space:]]+ARM' "$out/$module-elf.txt"
+    grep -Eq 'Type:[[:space:]]+DYN' "$out/$module-elf.txt"
+    "$toolchain/llvm-readelf" --dyn-syms --wide "$out/$soname" > "$out/$module-symbols.txt"
+    grep -Eq '[[:space:]]OBJECT[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+HMI$' "$out/$module-symbols.txt"
+    "$toolchain/llvm-readelf" -d "$out/$soname" > "$out/$module-dynamic.txt"
+done
 # Only JSON metadata leaves the runner, not binaries.
 python3 - "$out" "$repo" <<'PY'
-import hashlib, json, os, pathlib, subprocess, sys
+import hashlib, json, os, pathlib, re, subprocess, sys
 out, repo = map(pathlib.Path, sys.argv[1:])
-names = ("audio_r800", "gps_r800", "sensors_r800", "hwcomposer_r800")
+names = ("audio_r800", "gps_r800", "sensors_r800", "hwcomposer_r800", "lights_r800")
+linked = ("hwcomposer", "gps", "sensors", "lights")
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+libraries = {}
+for name in linked:
+    soname = name + ".r800.so"
+    dynamic = (out / (name + "-dynamic.txt")).read_text()
+    needed = re.findall(r"\(NEEDED\).*?\[([^\]]+)\]", dynamic)
+    actual_soname = re.findall(r"\(SONAME\).*?\[([^\]]+)\]", dynamic)
+    if actual_soname != [soname] or not needed:
+        raise SystemExit("unexpected ELF dynamic metadata: " + soname)
+    unexpected = set(needed) - {"libc.so", "libm.so", "libdl.so", "liblog.so"}
+    if unexpected:
+        raise SystemExit("unexpected dependencies: " + soname + ": " + repr(unexpected))
+    libraries[name] = {
+        "soname": soname,
+        "sha256": sha(out / soname),
+        "exported_hmi_verified": True,
+        "no_undefined_link": True,
+        "needed": needed,
+        "dynamic_section": dynamic,
+    }
 report = {
-    "schema": "galwear-r800-hal-compile-v2",
-    "status": "FOUR_ARM32_OBJECTS_COMPILED_HWC_LINKED",
+    "schema": "galwear-r800-hal-compile-v3",
+    "status": "FIVE_ARM32_OBJECTS_COMPILED_FOUR_HAL_LINKED",
     "commit": subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip(),
     "run_id": os.getenv("GITHUB_RUN_ID"),
     "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
@@ -53,12 +81,10 @@ report = {
                     "object_sha256": sha(out / (n + ".o"))} for n in names},
     "shared_libraries_linked": False,  # not all HALs
     "hwc_shared_library_linked": True,
-    "hwc_shared_library": {
-        "sha256": sha(out / "hwcomposer.r800.so"),
-        "exported_hmi_verified": True,
-        "no_undefined_link": True,
-        "dynamic_section": (out / "hwc-dynamic.txt").read_text(),
-    },
+    "hwc_shared_library": libraries["hwcomposer"],
+    "linked_libraries": libraries,
+    "audio_linked": False,
+    "audio_link_blocker": "hardware-specific tinyalsa sync_ptr patch not available",
     "patched_tinyalsa_linked": False,
     "android_boot_tested": False,
     "hardware_tested": False,

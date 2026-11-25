@@ -61,7 +61,7 @@ jobs:
           git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
           git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
           git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
-      - name: Compile four HALs and link HWC
+      - name: Compile five HALs and link four NDK-only modules
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
