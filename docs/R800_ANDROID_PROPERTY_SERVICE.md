@@ -929,3 +929,38 @@ regressions are committed. The new C/C++ code, tests and actual
 compiled AOSP policies have not been tested in the current
 environment. The exact runtime console and dynamic loading remain
 unverified. No real watch, upstream repository or main branch changes.
+
+
+## Static selected-inventory linker resolution (2026-11-25)
+
+Android 11 Bionic linker.cpp at android-11.0.0_r48 confirms the
+configuration search order (architecture, generated, VNDK-specific,
+then /system/etc/ld.config.txt for these system executables; APEX
+executables and debug builds may use other paths). Library lookup
+also considers previously loaded SONAMEs, LD_LIBRARY_PATH, RUNPATH,
+a bootstrap fallback in non-APEX builds, and namespace paths. The
+diagnostic entry points use an empty environment and reject embedded
+RPATH/RUNPATH in the inspected files. The configured experimental
+namespace searches bootstrap, system, then Runtime Bionic directories.
+This is an explicit restricted model, not a complete emulation of
+the linker or proof that Bionic selected that configuration.
+
+Preflight now retains the inspected ELF metadata and explicit
+selection map. System and preserved APEX reports bind those records
+to verified file digests. The entire original APEX is mounted, so
+the model includes all four already audited APEX ELF files, not only
+the files selected for the staged RAM rootfs. The separate
+r800_ext4_linker_resolution.py checks the exact fallback config,
+resolves the allowed linker alias, walks DT_NEEDED from each of the
+two service/client entry points, and rejects any candidate precedence
+that differs from the chosen path. Every selected ELF must be
+present in the image inventory with matching digest and metadata.
+
+The pipeline records EXT4_LINKER_RESOLUTION_STATIC_ONLY before
+attempting the service. The direct service runner repeats the model
+and includes its result. It does not prove symbol availability,
+symbol versions, relocations, late dlopen, actual namespace
+selection, or the absence of uninspected APEX files. Full image and
+runtime evidence remain separate. Eight synthetic regressions are
+added to CI; not executed here. Rebuild earlier image reports to
+include the new ELF fields. No Android or hardware boot claim.
