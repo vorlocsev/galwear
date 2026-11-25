@@ -12,6 +12,29 @@ class HandoverTests(unittest.TestCase):
         result = subprocess.run(["sh", "-n", str(SCRIPT)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_binder_gate_before_switch_root(self):
+        source = SCRIPT.read_text()
+        handover = source.index("exec $B switch_root /newroot /init")
+        for needle in ('for DEVICE in binder hwbinder vndbinder',
+                       'test -c "/dev/$DEVICE"', 'system/bin/servicemanager',
+                       'vendor/bin/vndservicemanager', 'test -x /newroot/system/bin/app_process32'):
+            self.assertLess(source.index(needle), handover)
+
+    def test_boot_observation_is_bounded_and_read_only(self):
+        helper = ROOT / "payload/android-helper.sh"
+        source = helper.read_text()
+        start = source.index("boot_observe() {")
+        end = source.index("\n}", start) + 2
+        body = source[start:end]
+        self.assertIn("seq 1 120", body)
+        self.assertIn("sleep 2", body)
+        self.assertIn("sys.boot_completed", body)
+        self.assertIn("pidof system_server", body)
+        self.assertNotIn("setprop", body)
+        self.assertNotIn("ctl.start", body)
+        result = subprocess.run(["sh", "-n", str(helper)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_required_command_success(self):
         result = self.run_gate("true")
         self.assertEqual(result.returncode, 0)
