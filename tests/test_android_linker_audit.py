@@ -2407,6 +2407,75 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["nfc_inventory"]["secure_element_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def health_fixture(self):
+        self.put("init.rc", b"service vendor.health /vendor/bin/hw/health-service\n"
+                 b"    interface android.hardware.health@2.1::IHealth default\n")
+        self.put_art_executable("vendor/bin/hw/health-service", "arm")
+        self.put("vendor/lib/libhealthd.so", fixture("arm"))
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"><hal format="hidl"><name>android.hardware.health</name><fqname>@2.1::IHealth/default</fqname></hal></manifest>')
+
+    def inspect_health(self, kernel=None, dtb=None):
+        return audit.r800_health_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel, dtb)
+
+    def test_health_static_candidates(self):
+        self.health_fixture()
+        out = self.inspect_health({"CONFIG_POWER_SUPPLY": "y"})
+        self.assertEqual(len(out["hal_declarations"]), 1)
+        self.assertTrue(out["services"][0]["elf"])
+        self.assertEqual(out["libraries"]["/vendor/lib/libhealthd.so"]["abi"], "arm")
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["charging_safety_verified"])
+
+    def test_health_dt_candidate_classes(self):
+        nodes = {"/": {}, "/battery": {}, "/i2c": {},
+                 "/i2c/wireless-charger": {"compatible": b"fixture,wpc\0"},
+                 "/i2c/pmic": {"compatible": b"fixture,pmic\0"},
+                 "/i2c/fuel-gauge": {"monitored-battery": b"\0\0\0\1"}}
+        out = audit.r800_health_inventory.dt_inventory(nodes)
+        self.assertEqual({k for entry in out for k in entry["kinds"]},
+                         {"battery", "charger", "wireless", "pmic"})
+        self.assertEqual(out[-1]["properties"], ["monitored-battery"])
+
+    def test_health_dt_disabled_parent(self):
+        nodes = {"/": {}, "/i2c": {"status": b"disabled\0"},
+                 "/i2c/wireless-charger": {}}
+        self.assertFalse(audit.r800_health_inventory.dt_inventory(nodes)[0]["enabled"])
+
+    def test_health_power_supply_metadata_only(self):
+        self.health_fixture()
+        self.put("sys/class/power_supply/battery/type", b"Battery\n")
+        self.put("sys/class/power_supply/battery/capacity", b"77\n")
+        self.put("sys/class/power_supply/battery/voltage_now", b"4123456\n")
+        self.put("sys/class/power_supply/wireless/type", b"Wireless\n")
+        out = self.inspect_health()
+        supplies = out["power_supply_snapshot"]
+        self.assertEqual(supplies["/sys/class/power_supply/battery"]["type"], "Battery")
+        self.assertIn("capacity", supplies["/sys/class/power_supply/battery"]["attribute_names"])
+        self.assertEqual(supplies["/sys/class/power_supply/wireless"]["type"], "Wireless")
+        self.assertNotIn("4123456", str(supplies))
+        self.assertFalse(out["wireless_charging_verified"])
+
+    def test_health_unknown_supply_type(self):
+        self.put("sys/class/power_supply/fixture/type", b"unrecognized\n")
+        out = self.inspect_health()
+        self.assertEqual(out["power_supply_snapshot"]["/sys/class/power_supply/fixture"]["type"], "UNRECOGNIZED")
+
+    def test_health_wrong_library_abi(self):
+        self.health_fixture()
+        self.put("vendor/lib/libhealthd.so", fixture("arm64"))
+        out = self.inspect_health()
+        self.assertIsNone(out["libraries"]["/vendor/lib/libhealthd.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_health_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",), kernel_config={"CONFIG_POWER_SUPPLY": "y"})
+        self.assertEqual(out["health_inventory"]["kernel_config"]["CONFIG_POWER_SUPPLY"], "y")
+        self.assertFalse(out["health_inventory"]["charging_safety_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
