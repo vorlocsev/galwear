@@ -23,7 +23,7 @@ MAX_FILES = 30000
 SCRIPTS = ("start.sh", "android-helper.sh", "dockrot.sh", "udhcpc.sh", "repair.sh")
 HALS = ("audio.primary.r800.so", "gps.r800.so", "hwcomposer.r800.so", "sensors.r800.so")
 BINS = ("busybox", "fsfreeze", "loopdio", "r800boost", "r800keys", "ukey", "wpcd") + WIFI_TOOLS
-DIRS = ("fw", "charger", "tzlite", "root", "lib")
+DIRS = ("fw", "charger", "tzlite", "lib")
 SINGLE = ("keepwifi.dex", "gpsbridge", "splash.raw")
 ASSET_SIZES = {"splash.raw": 360*360*4, "charger/pct.rgb": 36*110*3,
                "charger/bolt.rgb": 80*60*3}
