@@ -10,7 +10,7 @@ from pathlib import Path
 from r800_storage_isolation import parse
 from r800_initramfs_spec import validate_init
 
-REQUIRED = ("SMP", "ARM64", "ARM64_4K_PAGES", "ARM_AMBA", "ARM_GIC_V3",
+REQUIRED = ("FUTEX", "POSIX_TIMERS", "MULTIUSER", "ADVISE_SYSCALLS", "SMP", "ARM64", "ARM64_4K_PAGES", "ARM_AMBA", "ARM_GIC_V3",
             "ARM_ARCH_TIMER", "ARM_PSCI_FW", "ARCH_VEXPRESS", "PRINTK",
             "TTY", "SERIAL_AMBA_PL011", "SERIAL_AMBA_PL011_CONSOLE",
             "BINFMT_ELF", "BLK_DEV_INITRD", "INITRAMFS_COMPRESSION_NONE")
