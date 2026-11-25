@@ -3,6 +3,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import os
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
 from r800_peripheral_firmware import audit, check_bytes, REQUIRED, EXCLUDED
 
@@ -46,6 +48,47 @@ class PeripheralTests(unittest.TestCase):
             (root/"fw").mkdir()
             (root/"fw/vts.bin").symlink_to("/etc/passwd")
             self.assertEqual(audit(root)["files"]["fw/vts.bin"]["status"],"REJECTED")
+
+    def test_symlink_loop_rejected_without_aborting_audit(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t)
+            (root/"fw").mkdir()
+            p=root/"fw/vts.bin"
+            p.symlink_to(p.name)
+            r=audit(root)
+            self.assertEqual(r["files"]["fw/vts.bin"]["status"],"REJECTED")
+            self.assertEqual(set(r["files"]),set(REQUIRED))
+            self.assertFalse(r["safe_to_flash"])
+
+    def test_symlink_directory_rejected(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t)
+            (root/"actual").mkdir()
+            (root/"actual/vts.bin").write_bytes(b"synthetic")
+            (root/"fw").symlink_to("actual",target_is_directory=True)
+            self.assertEqual(audit(root)["files"]["fw/vts.bin"]["status"],"REJECTED")
+
+    def test_same_size_and_mtime_replacement_rejected(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t)
+            (root/"fw").mkdir()
+            p=root/"fw/vts.bin"
+            p.write_bytes(b"original")
+            s=p.stat()
+            replacement=root/"replacement"
+            replacement.write_bytes(b"replaced")
+            os.utime(replacement,ns=(s.st_atime_ns,s.st_mtime_ns))
+            real_open=os.open
+
+            def replace_then_open(path,flags,*args,**kwargs):
+                if Path(path)==p and replacement.exists():
+                    replacement.replace(p)
+                return real_open(path,flags,*args,**kwargs)
+
+            with mock.patch("r800_peripheral_firmware.os.open",side_effect=replace_then_open):
+                r=audit(root)
+            self.assertEqual(r["files"]["fw/vts.bin"]["status"],"REJECTED")
+            self.assertFalse(r["safe_to_flash"])
 
 if __name__=="__main__":
     unittest.main()
