@@ -8,12 +8,12 @@
 #include <property_info_parser/property_info_parser.h>
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "usage: galwear_property_info <new property_info file>\n";
+    if (argc != 2 && (argc != 3 || std::string(argv[2]) != "--virt-fixture")) {
+        std::cerr << "usage: galwear_property_info <new property_info file> [--virt-fixture]\n";
         return 2;
     }
     using android::properties::PropertyInfoEntry;
-    const std::string context = "u:object_r:default_prop:s0";
+    const std::string context = argc == 3 ? "user_u:base_r:base_t" : "u:object_r:default_prop:s0";
     const std::vector<PropertyInfoEntry> entries = {
         {"debug.galwear.probe", context, "string", true},
     };
