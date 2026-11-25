@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 import r800_android_linker_audit as audit
 
 
-def fixture(abi="arm64", needed=(), bad_offset=False, unterminated=False):
+def fixture(abi="arm64", needed=(), bad_offset=False, unterminated=False, sonames=()):
     wide = abi == "arm64"
     data = bytearray(512)
     data[:7] = b"\x7fELF" + bytes([2 if wide else 1, 1, 1])
@@ -19,8 +19,13 @@ def fixture(abi="arm64", needed=(), bad_offset=False, unterminated=False):
     for name in needed:
         offsets.append(len(strings))
         strings += name.encode() + b"\0"
+    soname_offsets = []
+    for name in sonames:
+        soname_offsets.append(len(strings))
+        strings += name.encode() + b"\0"
     data[400:400+len(strings)] = strings
     tags = [(1, 9999 if bad_offset else i) for i in offsets]
+    tags += [(14, 9999 if bad_offset else i) for i in soname_offsets]
     tags += [(5, 0x1000 + 400), (10, len(strings)), (1 if unterminated else 0, 0)]
     fmt = "<qQ" if wide else "<iI"
     size = len(tags) * struct.calcsize(fmt)
@@ -138,6 +143,43 @@ class LinkerTests(unittest.TestCase):
         out = audit.audit(self.root, ("/init",))
         self.assertEqual(out["status"], "REVIEW_REQUIRED")
         self.assertEqual(out["unsupported_search_paths"], ["/system/lib64/libx.so"])
+
+    def test_soname_without_needed_on_both_abis(self):
+        for abi in ("arm", "arm64"):
+            with self.subTest(abi=abi):
+                info = audit.inspect(fixture(abi, sonames=["libx.so"]))
+                self.assertEqual(info["soname"], "libx.so")
+                self.assertEqual(info["needed"], [])
+
+    def test_invalid_soname_offset(self):
+        with self.assertRaisesRegex(ValueError, "DT_SONAME offset"):
+            audit.inspect(fixture(sonames=["libx.so"], bad_offset=True))
+
+    def test_duplicate_soname(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate DT_SONAME"):
+            audit.inspect(fixture(sonames=["libx.so", "liby.so"]))
+
+    def test_unsafe_soname(self):
+        with self.assertRaisesRegex(ValueError, "Unsafe dependency name: DT_SONAME"):
+            audit.inspect(fixture(sonames=["../libx.so"]))
+
+    def test_matching_soname(self):
+        self.put("init", fixture(needed=["libx.so"]))
+        self.put("system/lib64/libx.so", fixture(sonames=["libx.so"]))
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["status"], "CANDIDATES_FOUND_ONLY")
+        self.assertEqual(out["soname_mismatches"], [])
+
+    def test_mismatched_soname_is_review_not_missing(self):
+        self.put("init", fixture(needed=["libx.so"]))
+        self.put("system/lib64/libx.so", fixture(sonames=["liby.so"]))
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["missing_candidates"], [])
+        self.assertEqual(out["soname_mismatches"], [{
+            "from": "/init", "needed": "libx.so",
+            "candidate": "/system/lib64/libx.so", "soname": "liby.so"}])
+        self.assertFalse(out["safe_to_flash"])
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
