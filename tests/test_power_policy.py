@@ -48,10 +48,10 @@ class PowerPolicyTests(unittest.TestCase):
                 "/oem/r800dev/android/": str(root) + "/",
                 "/sys/power/wake_lock": str(root / "wake_lock"),
                 "/sys/power/wake_unlock": str(root / "wake_unlock"),
-                "/sys/module/exynos_pm/parameters/r800_allow_system_suspend": str(root / "suspend"),
+                "/sys/module/exynos_pm/parameters/r800_allow_system_suspend": str(root / ("absent-suspend/gate" if missing_suspend else "suspend")),
                 "/sys/module/exynos_pd/parameters/r800_sleep_pd_off": str(root / "pd"),
                 "/sys/module/exynos_pd/parameters/r800_dispaud_sleep_off": str(root / "dispaud"),
-                "/sys/module/cpuidle_exynos64/parameters/r800_allow_deep_idle": str(root / "idle"),
+                "/sys/module/cpuidle_exynos64/parameters/r800_allow_deep_idle": str(root / ("absent-idle/gate" if missing_idle else "idle")),
                 "/sys/devices/system/cpu/cpu$c/cpuidle/state1/disable": str(root) + "/cpu$c/disable",
             }
             for source, target in mapping.items():
