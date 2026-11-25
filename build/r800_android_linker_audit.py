@@ -15,6 +15,93 @@ TARGETS = ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager"
 MAX_NODES = 512
 
 
+DT_VERSYM = 0x6ffffff0
+DT_VERDEF = 0x6ffffffc
+DT_VERDEFNUM = 0x6ffffffd
+DT_VERNEED = 0x6ffffffe
+DT_VERNEEDNUM = 0x6fffffff
+MAX_VERSION_RECORDS = 1024
+
+
+def version_inventory(tags, data, loads, dynamic_name):
+    def single(tag):
+        values = tags.get(tag, [])
+        if len(values) != 1:
+            raise ValueError("Missing or duplicate version tag: " + hex(tag))
+        return values[0]
+
+    def read(addr, fmt):
+        size = struct.calcsize(fmt)
+        offsets = {fo + addr - va for va, fo, fs in loads
+                   if va <= addr and size <= fs - (addr - va)}
+        if len(offsets) != 1:
+            raise ValueError("Version record not uniquely file-backed")
+        return struct.unpack_from(fmt, data, offsets.pop())
+
+    def advance(addr, delta, minimum, more):
+        if not more:
+            if delta:
+                raise ValueError("Unexpected version chain continuation")
+            return addr
+        if delta < minimum or delta % 4:
+            raise ValueError("Invalid version chain offset")
+        return addr + delta
+
+    def count(value):
+        if not 1 <= value <= MAX_VERSION_RECORDS:
+            raise ValueError("Invalid version record count")
+        return value
+
+    needs, definitions = [], []
+    used_indices = set()
+    budget = MAX_VERSION_RECORDS
+    for addr_tag, num_tag, is_need in (
+            (DT_VERNEED, DT_VERNEEDNUM, True),
+            (DT_VERDEF, DT_VERDEFNUM, False)):
+        if addr_tag not in tags and num_tag not in tags:
+            continue
+        addr, total = single(addr_tag), count(single(num_tag))
+        for i in range(total):
+            if is_need:
+                version, naux, file_index, aux_delta, nxt = read(addr, "<HHIII")
+                library = dynamic_name(file_index, "DT_VERNEED file")
+                minimum = 16
+            else:
+                version, flags, index, naux, _, aux_delta, nxt = read(addr, "<HHHHIII")
+                if index == 0 or index >= 0x8000 or index in used_indices:
+                    raise ValueError("Invalid or duplicate version definition index")
+                used_indices.add(index)
+                minimum = 20
+            if version != 1 or aux_delta < minimum or aux_delta % 4:
+                raise ValueError("Invalid version record header")
+            aux = addr + aux_delta
+            names = []
+            for j in range(count(naux)):
+                budget -= 1
+                if budget < 0:
+                    raise ValueError("Version inventory exceeds inspection limit")
+                if is_need:
+                    _, flags, index, name_index, aux_next = read(aux, "<IHHII")
+                    index &= 0x7fff
+                    if index < 2 or index in used_indices:
+                        raise ValueError("Invalid or duplicate version requirement index")
+                    used_indices.add(index)
+                    needs.append({"library": library, "version": dynamic_name(name_index, "DT_VERNEED name"),
+                                  "weak": bool(flags & 2), "index": index})
+                    aux = advance(aux, aux_next, 16, j + 1 < naux)
+                else:
+                    name_index, aux_next = read(aux, "<II")
+                    names.append(dynamic_name(name_index, "DT_VERDEF name"))
+                    aux = advance(aux, aux_next, 8, j + 1 < naux)
+            if not is_need:
+                definitions.append({"version": names[0], "parents": names[1:], "index": index,
+                                    "base": bool(flags & 1)})
+            addr = advance(addr, nxt, minimum, i + 1 < total)
+    if DT_VERSYM in tags:
+        read(single(DT_VERSYM), "<H")
+    return needs, definitions, DT_VERSYM in tags
+
+
 def inspect(data: bytes) -> dict:
     if len(data) < 52 or data[:4] != b"\x7fELF" or data[5:7] != b"\x01\x01":
         raise ValueError("Invalid little-endian ELF")
@@ -53,7 +140,8 @@ def inspect(data: bytes) -> dict:
         raise ValueError("Missing PT_LOAD")
     result = {"abi": "arm64" if cls == 2 else "arm", "needed": [],
               "has_dynamic": dynamic is not None, "custom_search_path": False,
-              "elf_type": "ET_DYN" if etype == 3 else "ET_EXEC", "soname": None}
+              "elf_type": "ET_DYN" if etype == 3 else "ET_EXEC", "soname": None,
+              "version_needs": [], "version_definitions": [], "versym_present": False}
     if dynamic is None:
         return result
     off, size = dynamic
@@ -73,7 +161,7 @@ def inspect(data: bytes) -> dict:
     result["custom_search_path"] = 15 in tags or 29 in tags
     if len(tags.get(14, [])) > 1:
         raise ValueError("Duplicate DT_SONAME")
-    if 1 not in tags and 14 not in tags:
+    if not any(tag in tags for tag in (1, 14, DT_VERNEED, DT_VERNEEDNUM, DT_VERDEF, DT_VERDEFNUM, DT_VERSYM)):
         return result
     if len(tags.get(5, [])) != 1 or len(tags.get(10, [])) != 1:
         raise ValueError("Missing or duplicate dynamic string table")
@@ -100,6 +188,7 @@ def inspect(data: bytes) -> dict:
             result["needed"].append(name)
     if 14 in tags:
         result["soname"] = dynamic_name(tags[14][0], "DT_SONAME")
+    result["version_needs"], result["version_definitions"], result["versym_present"] = version_inventory(tags, data, loads, dynamic_name)
     return result
 
 
@@ -115,6 +204,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
     queue = list(targets)
     seen, errors, unresolved, ambiguous = {}, [], [], []
     unsupported_search_paths, soname_mismatches = [], []
+    version_mismatches, unbound_version_needs = [], []
     while queue:
         name = queue.pop(0)
         if name in seen:
@@ -131,6 +221,9 @@ def audit(root: Path, targets=TARGETS) -> dict:
         seen[name] = info
         if info["custom_search_path"]:
             unsupported_search_paths.append(name)
+        for requirement in info["version_needs"]:
+            if requirement["library"] not in info["needed"]:
+                unbound_version_needs.append({"from": name, **requirement})
         for dep in info["needed"]:
             candidates = {}
             for directory in directories(info["abi"]):
@@ -145,6 +238,11 @@ def audit(root: Path, targets=TARGETS) -> dict:
                         if child["soname"] is not None and child["soname"] != dep:
                             soname_mismatches.append({"from": name, "needed": dep,
                                                      "candidate": path, "soname": child["soname"]})
+                        if str(resolved) not in candidates:
+                            defined = {v["version"] for v in child["version_definitions"] if not v["base"]}
+                            for requirement in info["version_needs"]:
+                                if requirement["library"] == dep and requirement["version"] not in defined:
+                                    version_mismatches.append({"from": name, "candidate": path, **requirement})
                         candidates.setdefault(str(resolved), path)
                 except FileNotFoundError:
                     continue
@@ -164,10 +262,11 @@ def audit(root: Path, targets=TARGETS) -> dict:
             present = False
         apex[name] = {"expanded_tree_present": present}
     return {"schema": "galwear-r800-linker-inventory-v1",
-            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches) else "REVIEW_REQUIRED",
+            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs) else "REVIEW_REQUIRED",
             "objects": seen, "missing_candidates": unresolved, "ambiguous_candidates": ambiguous,
             "errors": errors, "unsupported_search_paths": unsupported_search_paths,
             "soname_mismatches": soname_mismatches,
+            "version_mismatches": version_mismatches, "unbound_version_needs": unbound_version_needs,
             "apex": apex, "android_namespace_resolution_verified": False,
             "symbol_versions_verified": False, "apex_activation_verified": False,
             "android_boot_tested": False, "safe_to_flash": False}
