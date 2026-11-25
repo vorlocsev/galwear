@@ -154,7 +154,10 @@ def audit(root, targets=TARGETS):
         if provider["elf_type"] != "ET_DYN" or not provider["has_dynamic"]:
             problems.append({"path":edge["from"],"needed":edge["needed"],
                              "provider":edge["provider"],"reason":"INVALID_DYNAMIC_PROVIDER"})
-        if provider["interpreter"] is not None:
+        # Glibc libc.so.6 may itself be executable; PT_INTERP on a shared
+        # library is not sufficient grounds for rejection. A loader must
+        # not require another interpreter under this contract.
+        if edge["kind"] == "interpreter" and provider["interpreter"] is not None:
             problems.append({"path":edge["from"],"needed":edge["needed"],
                              "provider":edge["provider"],"reason":"PROVIDER_HAS_INTERPRETER"})
         if edge["kind"] == "library" and provider["soname"] not in (None, edge["needed"]):
