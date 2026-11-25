@@ -296,3 +296,37 @@ mode, or arbitrary relabeling to init_exec. A subsequent test must use a
 legitimate policy-authorized client domain and normal transition, or
 report that the stock policy does not support the diagnostic harness.
 No actual source build, relabel or property-service launch is established.
+
+
+## Dedicated diagnostic client domain (modified policy, not stock)
+
+    bash build/r800_aosp_galwear_policy_build.sh /absolute/disposable-aosp-r48 /absolute/new-fixture-policy
+
+This recipe requires the same pinned clean AOSP checkout and a separate
+output tree. It temporarily adds a private TE fragment and appends exact
+file/property contexts; cleanup restores the original context files.
+Use a disposable checkout only, since abrupt interruption may prevent
+cleanup. It does not change or publish the original AOSP repository.
+The AOSP policy build must retain neverallow checks. The static audit
+checks the dedicated executable mapping and property labels, and rejects
+a client listed as permissive by sepolicy-analyze.
+
+The client enters its own coredomain via init_daemon_domain and verifies
+its actual process context before any socket transaction. The fixture
+permits debug.galwear.service and ro.galwear.service.fixture writes.
+The latter must accept its initial value and reject a subsequent update.
+debug.galwear.denied is seeded by the writer-owned Bionic area before
+the service starts; the client may read it but cannot set it. Its
+existing value must remain unchanged after the negative request.
+ro.property_service.version receives a diagnostic-only exact mapping
+to support reading protocol version 2 without granting broad default_prop
+access. The overlay refuses existing exact keys rather than replacing
+them. This is a deliberate change to platform policy, not a claim of
+stock compatibility.
+
+The build and client tests remain unverified in a real AOSP guest. The
+next experiment must use the modified policy's own contexts, establish
+a legitimate init-to-client transition, validate enforcing mode and
+separate policy denial from read-only protocol errors. Prior stock
+policy reports cannot establish acceptance of this modified policy.
+No flashing, permissive fallback or blanket property write grant.
