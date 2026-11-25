@@ -106,6 +106,46 @@ def symbol_fixture(abi="arm64", malformed=None):
     return data
 
 
+def gnu_fixture(abi="arm64", both=False, malformed=None):
+    data = symbol_fixture(abi)
+    wide = abi == "arm64"
+    word = 8 if wide else 4
+    bits = word * 8
+    h = 5381
+    for b in b"symbol":
+        h = (h * 33 + b) & 0xffffffff
+    mask = (1 << (h % bits)) | (1 << ((h >> 5) % bits))
+    addr = 840
+    struct.pack_into("<IIII", data, addr, 1, 1,
+                     3 if malformed == "dimensions" else 1, 5)
+    struct.pack_into("<Q" if wide else "<I", data, addr + 16,
+                     0 if malformed == "bloom" else mask)
+    struct.pack_into("<II", data, addr + 16 + word,
+                     2 if malformed == "head" else 1,
+                     (h ^ 2) | 1 if malformed == "hash" else h | 1)
+    tags = [(5, 0x1000 + 400), (10, len(b"\0symbol\0")),
+            (audit.DT_SYMTAB, 0x1000 + 600),
+            (audit.DT_SYMENT, 24 if wide else 16),
+            (audit.DT_GNU_HASH, 0x1000 + addr),
+            (audit.DT_VERSYM, 0x1000 + 900)]
+    if both:
+        tags.append((audit.DT_HASH, 0x1000 + 800))
+        if malformed == "count":
+            struct.pack_into("<IIIIII", data, 800, 1, 3, 1, 0, 0, 0)
+    if malformed == "truncated":
+        tags[4] = (audit.DT_GNU_HASH, 0x1000 + 1020)
+    tags.append((0, 0))
+    fmt = "<qQ" if wide else "<iI"
+    size = len(tags) * struct.calcsize(fmt)
+    for i, pair in enumerate(tags):
+        struct.pack_into(fmt, data, 224 + i * struct.calcsize(fmt), *pair)
+    if wide:
+        struct.pack_into("<QQ", data, 152, size, size)
+    else:
+        struct.pack_into("<II", data, 100, size, size)
+    return data
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -308,6 +348,42 @@ class LinkerTests(unittest.TestCase):
     def test_unknown_versym_index(self):
         with self.assertRaisesRegex(ValueError, "unknown version index"):
             audit.inspect(symbol_fixture(malformed="version"))
+
+    def test_gnu_hash_both_abis(self):
+        for abi in ("arm", "arm64"):
+            with self.subTest(abi=abi):
+                result = audit.inspect(gnu_fixture(abi))
+                self.assertEqual(result["dynamic_symbol_count"], 2)
+                self.assertEqual(result["symbol_table_status"], "GNU_STRUCTURE_CHECKED")
+                self.assertTrue(result["versym_indices_checked"])
+
+    def test_both_hash_tables_agree(self):
+        result = audit.inspect(gnu_fixture(both=True))
+        self.assertEqual(result["symbol_table_status"], "SYSV_AND_GNU_STRUCTURE_CHECKED")
+
+    def test_hash_counts_disagree(self):
+        with self.assertRaisesRegex(ValueError, "counts disagree"):
+            audit.inspect(gnu_fixture(both=True, malformed="count"))
+
+    def test_gnu_invalid_dimensions(self):
+        with self.assertRaisesRegex(ValueError, "GNU hash dimensions"):
+            audit.inspect(gnu_fixture(malformed="dimensions"))
+
+    def test_gnu_invalid_bucket_start(self):
+        with self.assertRaisesRegex(ValueError, "noncontiguous"):
+            audit.inspect(gnu_fixture(malformed="head"))
+
+    def test_gnu_wrong_symbol_hash(self):
+        with self.assertRaisesRegex(ValueError, "match symbol name"):
+            audit.inspect(gnu_fixture(malformed="hash"))
+
+    def test_gnu_missing_bloom_bits(self):
+        with self.assertRaisesRegex(ValueError, "Bloom filter"):
+            audit.inspect(gnu_fixture(malformed="bloom"))
+
+    def test_gnu_truncated_header(self):
+        with self.assertRaisesRegex(ValueError, "file-backed"):
+            audit.inspect(gnu_fixture(malformed="truncated"))
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
