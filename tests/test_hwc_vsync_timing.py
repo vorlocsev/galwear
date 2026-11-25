@@ -59,7 +59,7 @@ int main(void) {
     def test_poll_errors_have_timer_fallback(self):
         source = SOURCE.read_text()
         loop = source[source.index("static void *vsync_loop("):
-                      source.index("static int r800_event_control(")]
+                      source.index("static int r800_set_vsync_irq_locked(")]
         self.assertIn("p.revents & POLLPRI", loop)
         self.assertIn("te_poll_lost(pr, p.revents, err)", loop)
         self.assertIn("POLLHUP | POLLNVAL", source)
@@ -115,7 +115,7 @@ int main(void) {
     def test_retry_preserves_timer_and_idle_semantics(self):
         source = SOURCE.read_text()
         loop = source[source.index("static void *vsync_loop("):
-                      source.index("static int r800_event_control(")]
+                      source.index("static int r800_set_vsync_irq_locked(")]
         self.assertIn("te_retry_due(vfd, now, retry_at)", loop)
         self.assertIn("retry_at = mono_ns() + R800_TE_RETRY_NS;", loop)
         self.assertIn("bad_events >= R800_TE_BAD_LIMIT", loop)
