@@ -31,6 +31,7 @@ namespace.default.permitted.paths = /apex/com.android.runtime/lib64/bionic
 """
 DYNAMIC_MARKER = b"r800-dynamic: bionic api=30 dlopen=PASS dlsym=PASS"
 CHILD_MARKER = b"r800-dynamic-pid1: child-exit=0"
+PROPERTY_MARKER = b"r800-property: absent lookup=PASS service=not-started"
 DIRS = ("dev", "proc", "sys", "data", "system", "system/bin", "apex",
         RUNTIME, RUNTIME + "/bin", RUNTIME + "/lib64",
         RUNTIME + "/lib64/bionic", "linkerconfig")
@@ -147,12 +148,18 @@ def inspect_dynamic(log: bytes) -> dict:
         raise ValueError("Missing or duplicate dynamic child evidence")
     if not lines.index(marker) < lines.index(DYNAMIC_MARKER) < lines.index(CHILD_MARKER):
         raise ValueError("Dynamic marker order mismatch")
+    if [line for line in lines if line.startswith(b"r800-property:")] != [PROPERTY_MARKER]:
+        raise ValueError("Missing or unexpected property lookup evidence")
+    if not lines.index(DYNAMIC_MARKER) < lines.index(PROPERTY_MARKER) < lines.index(CHILD_MARKER):
+        raise ValueError("Property lookup marker order mismatch")
     if any(line.startswith(HEARTBEAT_PREFIX) for line in lines[:lines.index(CHILD_MARKER)]):
         raise ValueError("Heartbeat before dynamic child completion")
     if [line for line in lines if line.startswith(b"r800-dynamic:")] != [DYNAMIC_MARKER]:
         raise ValueError("Unexpected dynamic diagnostic")
     return {"dynamic_android_linker_tested": True, "dlopen_dlsym_reported": True,
-            "dynamic_child_exit_zero_reported": True}
+            "dynamic_child_exit_zero_reported": True,
+            "bionic_absent_property_lookup_reported": True,
+            "property_service_started": False, "seeded_property_read_tested": False}
 
 
 def verify_baseline(path: Path, digest: str) -> None:
