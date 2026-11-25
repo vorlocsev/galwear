@@ -234,3 +234,32 @@ proc attr after the policy is loaded is a failed diagnostic, not a reason
 to weaken policy. The next gate must validate original file_contexts and
 the normal kernel-to-init executable transition on an expanded guest.
 Actual stock policy compilation and execution remain unconfirmed.
+
+
+## Stock file_contexts and diagnostic init-domain transition
+
+AOSP Android 11 SetupSelinux restores the label of /system/bin/init and
+execs it to transition from kernel to init. The separate diagnostic
+follows that sequence using the original libselinux and original
+partition file_contexts, without calling setcon or setenforce.
+
+    bash build/r800_aosp_selinux_transition_build.sh /absolute/aosp-r48 /absolute/new-transition-build
+
+    python3 build/r800_qemu_selinux_transition.py \
+      --init /absolute/new-transition-build/init \
+      --compile-evidence /absolute/new-transition-build/initramfs-evidence.json \
+      --kernel /absolute/property-kernel/arch/arm64/boot/Image \
+      --baseline /absolute/property-boot-evidence.json \
+      --config-evidence /absolute/virt-config-evidence.json \
+      --stock-policy-report /absolute/stock-policy-boot.json \
+      --product-out /absolute/product-out --checkfc /absolute/aosp-host/bin/checkfc \
+      --out-dir /absolute/new-transition-boot --report /absolute/transition-boot.json
+
+This independent archive contains the same static diagnostic binary at
+/init and /system/bin/init, not stock init. Original file_contexts are
+checked with host checkfc against the exact policy, then copied verbatim.
+The required labels are u:object_r:init_exec:s0 and u:r:init:s0 after
+exec, with enforcing=1. A failed restorecon, transition, or console
+heartbeat rejects the gate. This does not label the entire Android
+rootfs or launch the Android property service. Actual AOSP linkage,
+ramdisk SELinux labeling, and guest execution remain unconfirmed.
