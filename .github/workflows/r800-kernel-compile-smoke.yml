@@ -123,7 +123,9 @@ jobs:
           grep -Fx 'CONFIG_COMPAT=y' "$out/.config"
           grep -Fx 'CONFIG_SND_PCM=y' "$out/.config"
           test -s "$out/sound/soc/samsung/abox/abox.o"
-          test -s "$out/sound/core/snd-pcm.o"
+          test -s "$out/sound/core/pcm.o"
+          test -s "$out/sound/core/pcm_native.o"
+          test -s "$out/sound/core/pcm_lib.o"
           test -s "$out/arch/arm64/boot/Image"
 
       - name: Verify AArch64 ELF and raw Linux Image header
@@ -251,7 +253,7 @@ jobs:
             echo "run_attempt=$GITHUB_RUN_ATTEMPT"
             echo "source_base=50db73fc799f20a7120a8b5f653b16cc123d856f"
             sha256sum "$GITHUB_WORKSPACE/src/kernel/r800-wearos.patch" "$GITHUB_WORKSPACE/src/kernel/r800.config"
-            for f in .config sound/soc/samsung/abox/abox.o sound/core/snd-pcm.o; do
+            for f in .config sound/soc/samsung/abox/abox.o sound/core/pcm.o sound/core/pcm_native.o sound/core/pcm_lib.o; do
               if [ -s "$RUNNER_TEMP/compiled-kernel/$f" ]; then
                 sha256sum "$RUNNER_TEMP/compiled-kernel/$f"
               fi

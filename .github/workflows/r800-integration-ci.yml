@@ -23,6 +23,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify checkout is exact triggering commit
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install required DTB regression tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends device-tree-compiler
+          command -v dtc
+          command -v fdtget
       - name: Run all offline regression suites
         run: |
           python3 build/r800_integrated_regression.py --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/r800-integrated-regression.json"

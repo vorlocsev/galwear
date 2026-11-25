@@ -30010,3 +30010,16 @@ diff --git a/include/soc/samsung/exynos-pm.h b/include/soc/samsung/exynos-pm.h
  static inline int acpm_get_mif_request(void)
  {
  	return 0;
+diff --git a/arch/arm64/kernel/smp.c b/arch/arm64/kernel/smp.c
+--- a/arch/arm64/kernel/smp.c
++++ b/arch/arm64/kernel/smp.c
+@@ -888,7 +888,9 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
+ 		break;
+ 
+ 	case IPI_CPU_STOP:
++#ifdef CONFIG_DEBUG_SNAPSHOT
+ 		dbg_snapshot_save_context(regs, true);
++#endif
+ 		irq_enter();
+ 		ipi_cpu_stop(cpu);
+ 		irq_exit();
