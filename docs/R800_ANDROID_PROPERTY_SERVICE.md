@@ -96,3 +96,31 @@ another APEX or partition, and identical copies do not establish correct
 namespace selection. No library is chosen automatically on ambiguity.
 DT_NEEDED does not include every dlopen dependency; actual linker config,
 bootstrap transitions, Android property contexts and sepolicy remain required.
+
+
+## Experimental single-namespace rootfs staging
+
+Create a selection JSON based on init-dependencies.json. Example schema
+(the linker must actually exist in the audited candidate inventory):
+
+    {"libraries": {}, "interpreters": {"/system/bin/linker64": "runtime:apex/com.android.runtime/bin/linker64"}}
+
+Specify a library candidate key under libraries for each reachable
+different-content conflict; do not guess the correct version. Every
+PT_INTERP requires an explicit audited linker choice.
+
+    python3 build/r800_android_init_rootfs.py \
+      --product-out /absolute/product-out \
+      --runtime-root /absolute/runtime-root \
+      --choices /absolute/choices.json \
+      --out /absolute/new-staged-rootfs \
+      --report /absolute/rootfs-plan.json
+
+The tool recomputes the candidate graph, traverses selected dependencies,
+checks SHA-256 again before writing, and stages regular non-executable files
+only. Guest linker aliases are recorded as data, not created on the host.
+The linker config is an experimental single namespace; it is not generated
+Android linkerconfig policy and does not reproduce all bootstrap/APEX
+namespace rules. No Android executable is launched. Actual namespace
+behavior, other APEX dependencies, property contexts, sepolicy and guest
+mount preparation remain unverified.
