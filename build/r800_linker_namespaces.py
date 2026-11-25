@@ -145,6 +145,12 @@ def parse(text, abi):
         raise ValueError("Directory maps to undefined namespace section")
     if not result:
         raise ValueError("No linker namespace sections")
+    for section, spaces in result.items():
+        for name, ns in spaces.items():
+            if any(any(ch in path for ch in "${}") for path in ns["search_paths"] + ns["permitted_paths"]):
+                unknown.append(section + ":" + name + ":unexpanded path variable")
+    if any(any(ch in path for ch in "${}") for paths in dirs.values() for path in paths):
+        unknown.append("directory_sections:unexpanded path variable")
     return {"sections": result, "directory_sections": dirs,
             "unsupported_properties": unknown, "runtime_resolution_verified": False}
 
