@@ -4,9 +4,12 @@ on:
   push:
     branches:
       - "development/r800-kernel-source-ci-20261124"
+      - "development/r800-display-error-propagation-20261125"
     paths:
       - ".github/workflows/r800-initramfs-smoke.yml"
       - "build/r800_initramfs_spec.py"
+      - "build/r800_cpio_audit.py"
+      - "tests/test_cpio_audit.py"
       - "build/r800_initramfs_compile_smoke.sh"
       - "tests/test_initramfs_recipe.py"
       - "src/initramfs/init.c"
@@ -22,11 +25,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify synthetic ELF checks and deterministic list
+      - name: Verify exact triggering commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Verify synthetic ELF and CPIO checks and deterministic list
         run: |
-          python3 -m py_compile build/r800_initramfs_spec.py
+          python3 -m py_compile build/r800_initramfs_spec.py build/r800_cpio_audit.py
           sh -n build/r800_initramfs_compile_smoke.sh
           python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
+          python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
 
       - name: Compile freestanding AArch64 init (no kernel, no firmware)
         run: |
