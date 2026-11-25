@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 import r800_qemu_dynamic_android as a
 
-LOG = (a.EXPECTED + a.DYNAMIC_MARKER + b"\n" + a.CHILD_MARKER + b"\n"
+LOG = (a.EXPECTED + a.DYNAMIC_MARKER + b"\n" + a.PROPERTY_MARKER + b"\n" + a.CHILD_MARKER + b"\n"
        + a.HEARTBEAT_PREFIX + b"00000001\n")
 
 
@@ -71,6 +71,18 @@ class DynamicBootTests(unittest.TestCase):
         for marker in (a.DYNAMIC_MARKER, a.CHILD_MARKER):
             with self.assertRaisesRegex(ValueError, "Missing"):
                 a.inspect_dynamic(LOG.replace(marker, b""))
+
+    def test_missing_property_lookup(self):
+        with self.assertRaisesRegex(ValueError, "property lookup"):
+            a.inspect_dynamic(LOG.replace(a.PROPERTY_MARKER, b""))
+
+    def test_seeded_property_not_accepted_as_absent(self):
+        with self.assertRaisesRegex(ValueError, "property lookup"):
+            a.inspect_dynamic(LOG.replace(a.PROPERTY_MARKER, b"r800-property: seeded read-callback=PASS"))
+
+    def test_late_property_marker(self):
+        with self.assertRaisesRegex(ValueError, "Property lookup marker order"):
+            a.inspect_dynamic(LOG.replace(a.PROPERTY_MARKER + b"\n", b"") + a.PROPERTY_MARKER + b"\n")
 
     def test_early_heartbeat(self):
         with self.assertRaisesRegex(ValueError, "Heartbeat before"):
