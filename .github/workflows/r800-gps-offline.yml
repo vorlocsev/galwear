@@ -11,6 +11,8 @@ on:
       - 'build/r800_*.py'
       - 'build/r800_gps_*.sh'
       - 'tests/*gps*'
+      - 'tests/test_r800_gnss_*.py'
+      - 'payload/android-helper.sh'
       - 'tests/*glibc*'
       - 'tests/test_r800_extract_ext4.py'
       - 'tests/test_android_linker_audit.py'
