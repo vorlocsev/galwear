@@ -362,3 +362,40 @@ transaction has been verified by a real guest yet. AOSP build/linkage,
 RAM filesystem labels, inherited console permissions, boot default
 properties, and kernel policy compatibility may still block execution.
 No permissive fallback or production release.
+
+
+## Sequential source-build and boot pipeline
+
+Use a clean GalWear checkout and a clean disposable, already synced
+AOSP Android 11 r48 checkout on Linux x86_64. The build phase creates
+separate output trees for stock and fixture policy and the runtime,
+libinit and diagnostic binaries. It may require substantial disk space.
+The jobs option currently controls the runtime APEX build; the other
+recipes retain their existing four-job defaults.
+
+    python3 build/r800_property_pipeline.py build \
+      --aosp-root /absolute/disposable-aosp-r48 \
+      --out /absolute/new-property-build --jobs 4
+
+Inspect service/init-dependencies.json and prepare an explicit choices
+JSON using the documented rootfs selection contract. Do not choose a
+conflicting library solely to make the run advance.
+
+    python3 build/r800_property_pipeline.py boot \
+      --build-root /absolute/new-property-build --choices /absolute/choices.json \
+      --kernel /absolute/property-kernel/arch/arm64/boot/Image \
+      --baseline /absolute/property-boot-evidence.json \
+      --config-evidence /absolute/virt-config-evidence.json \
+      --prepolicy /absolute/property-probe-evidence.json \
+      --out /absolute/new-property-run
+
+The boot phase requires previously accepted same-kernel property
+baseline and pre-policy reports; kernel building and AOSP syncing are
+not part of this runner. It requires the exact same clean GalWear commit
+as the build phase and checks recorded report digests. Every stage has a
+separate log and pipeline.json records stage status and evidence hash
+where applicable. First failure stops later stages. Output directories
+must not already exist. Re-run boot in a new output directory if inputs
+need correction; automatic resume and full AOSP hosted CI are not enabled.
+Only synthetic orchestration tests are added to lightweight CI.
+No release, device operations, or claim of verified Android boot.
