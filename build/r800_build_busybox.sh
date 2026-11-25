@@ -31,6 +31,9 @@ def set_bool(name,value):
     if n!=1:
         raise SystemExit("Missing or duplicate config key: "+name)
 set_bool("STATIC",True)
+# tc references legacy CBQ structures removed from current Linux UAPI.
+# No R800 startup script calls tc.
+set_bool("TC",False)
 # No network server applets or login/credential tools in this candidate.
 for name in ("TELNETD","HTTPD","FTPD","TFTPD","INETD","NC","LOGIN","PASSWD","SU"):
     if re.search(r"^(?:CONFIG_"+name+r"=.*|# CONFIG_"+name+r" is not set)$",c,re.M):
