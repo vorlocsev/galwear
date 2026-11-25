@@ -470,6 +470,27 @@ def jar_fixture(entries):
     return out.getvalue()
 
 
+def oat_elf_fixture(isa="arm64"):
+    wide = isa == "arm64"
+    data = bytearray(512)
+    data[:7] = b"\x7fELF" + bytes((2 if wide else 1, 1, 1))
+    struct.pack_into("<HH", data, 16, 3, 183 if wide else 40)
+    strings = b"\0.shstrtab\0.rodata\0"
+    data[96:96 + len(strings)] = strings
+    data[128:136] = b"oat\n183\0"
+    if wide:
+        struct.pack_into("<Q", data, 40, 256)
+        struct.pack_into("<6H", data, 52, 64, 0, 0, 64, 3, 1)
+        fmt, step = "<IIQQQQIIQQ", 64
+    else:
+        struct.pack_into("<I", data, 32, 256)
+        struct.pack_into("<6H", data, 40, 52, 0, 0, 40, 3, 1)
+        fmt, step = "<10I", 40
+    struct.pack_into(fmt, data, 256 + step, 1, 3, 0, 0, 96, len(strings), 0, 0, 1, 0)
+    struct.pack_into(fmt, data, 256 + step * 2, 11, 1, 0, 0, 128, 8, 0, 0, 4, 0)
+    return bytes(data)
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -1560,6 +1581,58 @@ class LinkerTests(unittest.TestCase):
         self.assertEqual(out["art_inventory"]["status"], "REVIEW_REQUIRED")
         self.assertFalse(out["art_inventory"]["oat_verified"])
         self.assertFalse(out["android_boot_tested"])
+
+    def test_art_precompiled_boot_group(self):
+        for suffix, head in (("art", b"art\n085\0"), ("oat", b"oat\n183\0"), ("vdex", b"vdex021\0")):
+            self.put("system/framework/arm/boot." + suffix, head)
+        out = audit.r800_art_precompiled.audit(self.root)
+        self.assertEqual(out["status"], "PRECOMPILED_HEADER_INVENTORY_ONLY")
+        self.assertTrue(out["groups"]["/system/framework/arm/boot"]["companion_headers_present"])
+        self.assertFalse(out["boot_image_verified"])
+
+    def test_art_precompiled_missing_companion(self):
+        self.put("system/framework/arm/boot.art", b"art\n085\0")
+        out = audit.r800_art_precompiled.audit(self.root)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["groups"]["/system/framework/arm/boot"]["companion_headers_present"])
+
+    def test_art_precompiled_elf_oat_both_isas(self):
+        for isa in ("arm", "arm64"):
+            with self.subTest(isa=isa):
+                path = "system/framework/" + isa + "/boot.oat"
+                self.put(path, oat_elf_fixture(isa))
+                info = audit.r800_art_precompiled.inspect(self.root / path, ".oat", isa)
+                self.assertEqual(info["version"], "183")
+                self.assertTrue(info["elf_wrapped"])
+                self.assertTrue(info["isa_verified"])
+                self.assertFalse(info["compatibility_verified"])
+
+    def test_art_precompiled_wrong_isa(self):
+        path = "system/framework/arm/boot.oat"
+        self.put(path, oat_elf_fixture("arm64"))
+        with self.assertRaisesRegex(ValueError, "ISA"):
+            audit.r800_art_precompiled.inspect(self.root / path, ".oat", "arm")
+
+    def test_art_precompiled_bad_elf_bounds(self):
+        path = "system/framework/arm64/boot.oat"
+        raw = bytearray(oat_elf_fixture())
+        struct.pack_into("<Q", raw, 40, 99999)
+        self.put(path, raw)
+        with self.assertRaisesRegex(ValueError, "bounds"):
+            audit.r800_art_precompiled.inspect(self.root / path, ".oat", "arm64")
+
+    def test_art_precompiled_invalid_magic(self):
+        self.put("system/framework/arm/boot.vdex", b"vdexabc\0")
+        out = audit.r800_art_precompiled.audit(self.root)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertTrue(out["errors"])
+
+    def test_art_precompiled_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["art_precompiled"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["art_precompiled"]["dex2oat_executed"])
+        self.assertFalse(out["safe_to_flash"])
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
