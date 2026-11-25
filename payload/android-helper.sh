@@ -164,83 +164,76 @@ dev && [ -x /oem/r800dev/memrec.sh ] && /oem/r800dev/memrec.sh &
 TZPL=
 [ -f /oem/r800dev/android/TZTRACE ] && TZPL=/opt/usr/r800dev/lib/openlog.so
 TZE="/usr/bin/env ${TZPL:+LD_PRELOAD=$TZPL}"
-if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ]; then
+if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
+    "$B" timeout 60 /oem/r800dev/tzchroot.sh > "$SLOG" 2>&1; then
     (
-        /oem/r800dev/tzchroot.sh > $SLOG 2>&1
-        $B pkill -f "gpiotool hold gpm13" 2>/dev/null
-        # kernel #20+: sec_gps_bcm477x owns the pin and lhd drives it through
-        # gps_pwr_en (GpioNStdbyPath); older kernels need it held from userspace
+        # This supervisor owns only its direct foreground children.
+        # No global process-name kills or PID files.
+        lhd_pid= gpsd_pid= bridge_pid=
+        stop_child() {
+            [ -n "$1" ] || return 0
+            kill "$1" 2>/dev/null || :
+            wait "$1" 2>/dev/null || :
+        }
+        stop_stack() {
+            stop_child "$bridge_pid"; bridge_pid=
+            stop_child "$gpsd_pid"; gpsd_pid=
+            stop_child "$lhd_pid"; lhd_pid=
+        }
+        trap 'stop_stack; exit 0' HUP INT TERM
+        trap 'stop_stack' EXIT
+        # Existing kernel-owned GPIO remains preferred. The fallback holder
+        # is not restarted/killed by this supervisor.
         [ -e /sys/class/gps/gps/gps_pwr_en ] ||
-            $B setsid /oem/r800dev/bin/gpiotool hold gpm13 0 1 >> $SLOG 2>&1 < /dev/null &
-        $B sleep 1
+            "$B" setsid /oem/r800dev/bin/gpiotool hold gpm13 0 1 >> "$SLOG" 2>&1 < /dev/null &
+        "$B" sleep 1
         n=0
-        while [ $n -lt 20 ]; do
-            k "sensors: starting lhd ($n)"
-            $B chroot /mnt/tz $TZE /usr/bin/lhd /etc/lhd/lhd.conf > /mnt/tz/tmp/lhd.log 2>&1 < /dev/null
+        while [ "$n" -lt 20 ]; do
             n=$((n+1))
-            $B tail -20 /mnt/tz/tmp/lhd.log >> $SLOG
-            $B sleep 5
-        done
-        k "sensors: lhd gave up after $n starts"
-    ) &
-
-    # ---- GPS: Broadcom's gpsd (the GNSS engine) talks to lhd; gpsbridge drives
-    # it through Tizen's libbrcm and serves gps.r800.so on /oem/r800dev/gps.sock.
-    # gpsd exits when its client goes away, so both are respawned (Tizen: systemd
-    # Restart=always). See tools/gps/README.md.
-    if [ -x /oem/r800dev/gpsbridge ]; then
-        (
-            $B sleep 20   # lhd up first
-            $B chroot /mnt/tz $TZE chown -R location:location /opt/gnss
-            while true; do
-                $B chroot /mnt/tz $TZE /usr/bin/gpsd -c /etc/gps-manager/brcm/gpsd.xml > /dev/null 2>&1 < /dev/null
-                # gpsd runs as root here but as "location" on Tizen: a root-owned
-                # /opt/gnss/gldata.sto (mode 600) makes Tizen's gpsd crash-loop and
-                # fill p17 with crash dumps. Hand its state back after every run.
-                $B chroot /mnt/tz $TZE chown -R location:location /opt/gnss
-                $B sleep 1
-            done
-        ) &
-        (
-            $B sleep 25
-            ( $B sleep 60; $B chroot /mnt/tz $TZE chown -R location:location /opt/gnss ) &
-            while true; do
-                $B chroot /mnt/tz $TZE /opt/usr/r800dev/gpsbridge daemon > /oem/r800dev/gpsbridge.out 2>&1 < /dev/null
-                # libbrcm (root here) creates /opt/gnss/.gps.interface.pipe.* when missing;
-                # root-owned, they crash-loop Tizen's gpsd (location) at ~90% CPU.
-                $B chroot /mnt/tz $TZE chown -R location:location /opt/gnss
-                k "gps: gpsbridge exited, restarting"
-                $B sleep 3
-            done
-        ) &
-        # Broadcom LTO (4-day orbit prediction) for gpsbridge to inject: Tizen's lbs
-        # plugin downloads it, which never runs here, and the chroot has no DNS. Fetch
-        # it daily over Android's network (busybox has no resolver config, so resolve
-        # first and send the Host header). Without it every start is a cold start.
-        (
-            L=/mnt/tz/opt/gnss/data
-            S=/oem/r800dev/lto.stamp
-            $B sleep 120
-            while true; do
-                W=3600
-                if [ -z "$($B find $S -mmin -1200 2>/dev/null)" ]; then
-                    IP=$($B nslookup gllto1.glpals.com 1.1.1.1 2>/dev/null | $B awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $2; exit }')
-                    if [ -n "$IP" ] && $B timeout 60 $B wget -q -O $L/.lto.new \
-                            --header "Host: gllto1.glpals.com" http://$IP/4day/v3/latest/lto2.dat &&
-                            [ $($B stat -c %s $L/.lto.new) -gt 20000 ]; then
-                        $B mv $L/.lto.new $L/lto2.dat
-                        $B chown 654:654 $L/lto2.dat   # Tizen's "location" user
-                        $B touch $S
-                        k "gps: LTO refreshed ($($B stat -c %s $L/lto2.dat) bytes)"
+            k "gnss: stack attempt $n"
+            "$B" chroot /mnt/tz $TZE /usr/bin/lhd /etc/lhd/lhd.conf > /mnt/tz/tmp/lhd.log 2>&1 < /dev/null &
+            lhd_pid=$!
+            # Process survival is only a startup heuristic, not hardware readiness.
+            "$B" sleep 20
+            if kill -0 "$lhd_pid" 2>/dev/null; then
+                if [ ! -x /oem/r800dev/gpsbridge ]; then
+                    wait "$lhd_pid" 2>/dev/null || :
+                    lhd_pid=
+                else
+                    # Preserve the existing donor ownership recovery behavior.
+                    # Do not start the GNSS engine if it fails.
+                    if "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss; then
+                        "$B" chroot /mnt/tz $TZE /usr/bin/gpsd -c /etc/gps-manager/brcm/gpsd.xml > /dev/null 2>&1 < /dev/null &
+                        gpsd_pid=$!
+                        "$B" sleep 5
+                        if kill -0 "$lhd_pid" 2>/dev/null && kill -0 "$gpsd_pid" 2>/dev/null; then
+                            # Avoid persistent logs containing network location or coordinates.
+                            "$B" chroot /mnt/tz $TZE /opt/usr/r800dev/gpsbridge daemon > /dev/null 2>&1 < /dev/null &
+                            bridge_pid=$!
+                            while kill -0 "$lhd_pid" 2>/dev/null &&
+                                  kill -0 "$gpsd_pid" 2>/dev/null &&
+                                  kill -0 "$bridge_pid" 2>/dev/null; do
+                                "$B" sleep 3
+                            done
+                        fi
+                        # Stop GPS workers before the hub. No overlapping restarts.
+                        stop_child "$bridge_pid"; bridge_pid=
+                        stop_child "$gpsd_pid"; gpsd_pid=
+                        "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss ||
+                            k "gnss: donor ownership recovery failed"
                     else
-                        $B rm -f $L/.lto.new
-                        W=600   # no network yet: try again sooner
+                        k "gnss: donor ownership preflight failed"
                     fi
                 fi
-                $B sleep $W
-            done
-        ) &
-    fi
+            fi
+            stop_stack
+            k "gnss: stack exited; retry $n/20"
+            "$B" sleep 10
+        done
+        k "gnss: restart budget exhausted"
+    ) &
+    # XTRA is disabled by default in GPS bridge. No unauthenticated automatic
+    # LTO download; a verified donor file may be supplied separately.
 
     # ---- context sensors: the hub's own wrist-up and wear on/off algorithms,
     # driven by Samsung's libsensor-hal inside Tizen's sensord (same chroot).
