@@ -50,9 +50,9 @@ set -u
 printf '%s\n' "$(realpath "$PRODUCT_OUT")" > "$OUT/product-out-path.txt"
 python3 "$TOOLS/r800_android_init_inventory.py" --product-out "$PRODUCT_OUT" --report "$OUT/init-inventory.json"
 if [[ -n "$RUNTIME" ]]; then
-    python3 "$TOOLS/r800_android_init_dependencies.py" --product-out "$PRODUCT_OUT" --runtime-root "$RUNTIME" --report "$OUT/init-dependencies.json"
+    python3 "$TOOLS/r800_android_init_dependencies.py" --product-out "$PRODUCT_OUT" --runtime-root "$RUNTIME" --report "$OUT/init-dependencies.json" --resolved-manifest "$OUT/manifest-resolved.xml"
 else
-    python3 "$TOOLS/r800_android_init_dependencies.py" --product-out "$PRODUCT_OUT" --report "$OUT/init-dependencies.json"
+    python3 "$TOOLS/r800_android_init_dependencies.py" --product-out "$PRODUCT_OUT" --report "$OUT/init-dependencies.json" --resolved-manifest "$OUT/manifest-resolved.xml"
 fi
 git -C system/core rev-parse HEAD > "$OUT/system-core-commit.txt"
 sha256sum system/core/init/property_service.cpp system/core/init/property_service.h \
