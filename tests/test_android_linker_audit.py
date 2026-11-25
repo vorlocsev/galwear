@@ -2275,6 +2275,72 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["gnss_inventory"]["location_service_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def sensor_fixture(self):
+        self.put("init.rc", b"service vendor.sensors /vendor/bin/hw/sensors-service\n"
+                 b"    interface android.hardware.sensors@2.0::ISensors default\n")
+        self.put_art_executable("vendor/bin/hw/sensors-service", "arm")
+        self.put("vendor/lib/hw/sensors.exynos.so", fixture("arm"))
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"><hal format="hidl"><name>android.hardware.sensors</name><fqname>@2.0::ISensors/default</fqname></hal></manifest>')
+
+    def inspect_sensors(self, kernel=None, dtb=None):
+        return audit.r800_sensor_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel, dtb)
+
+    def test_sensor_static_candidates(self):
+        self.sensor_fixture()
+        out = self.inspect_sensors({"CONFIG_IIO": "y"})
+        self.assertEqual(len(out["hal_declarations"]), 1)
+        self.assertTrue(out["services"][0]["elf"])
+        self.assertEqual(out["libraries"]["/vendor/lib/hw/sensors.exynos.so"]["abi"], "arm")
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["sensor_events_verified"])
+
+    def test_sensor_dt_classes(self):
+        nodes = {"/": {}, "/i2c": {}, "/i2c/accelerometer": {},
+                 "/i2c/gyroscope": {}, "/i2c/barometer": {},
+                 "/i2c/light-sensor": {}, "/i2c/heart-rate": {},
+                 "/sensor-hub": {"compatible": b"fixture,ssp\0"}}
+        out = audit.r800_sensor_inventory.dt_inventory(nodes)
+        self.assertEqual({k for entry in out for k in entry["kinds"]},
+                         {"accelerometer", "gyroscope", "barometer", "ambient_light",
+                          "heart_rate", "sensor_hub"})
+
+    def test_sensor_dt_disabled_parent(self):
+        nodes = {"/": {}, "/i2c": {"status": b"disabled\0"}, "/i2c/accelerometer": {}}
+        self.assertFalse(audit.r800_sensor_inventory.dt_inventory(nodes)[0]["enabled"])
+
+    def test_sensor_iio_metadata_without_values(self):
+        self.sensor_fixture()
+        self.put("sys/bus/iio/devices/iio:device0/in_accel_x_raw", b"12345")
+        self.put("sys/bus/iio/devices/iio:device0/in_illuminance_input", b"67890")
+        out = self.inspect_sensors()
+        item = out["iio_snapshot"]["/sys/bus/iio/devices/iio:device0"]
+        self.assertEqual(item["kinds"], ["accelerometer", "ambient_light"])
+        self.assertNotIn("12345", str(item))
+        self.assertNotIn("67890", str(item))
+
+    def test_sensor_wrong_library_abi(self):
+        self.sensor_fixture()
+        self.put("vendor/lib/hw/sensors.exynos.so", fixture("arm64"))
+        out = self.inspect_sensors()
+        self.assertIsNone(out["libraries"]["/vendor/lib/hw/sensors.exynos.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_sensor_fake_device_node(self):
+        self.sensor_fixture()
+        self.put("dev/ssp_sensorhub", b"fake")
+        out = self.inspect_sensors()
+        self.assertFalse(out["device_nodes"]["/dev/ssp_sensorhub"])
+        self.assertTrue(any("not a character device" in e for e in out["errors"]))
+
+    def test_sensor_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["sensor_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["sensor_inventory"]["heart_rate_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
