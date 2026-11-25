@@ -22,3 +22,11 @@ HOLD_RUNTIME_UNVERIFIED and safe_to_flash=false remain mandatory.
 
 Use stdout for the report; redirect outside the checkout so the clean-tree
 check is not affected. The wrapper is not a CI result importer.
+
+## Verified host evidence
+
+Eight aggregator unit tests passed using Python unittest and synthetic subprocess
+responses. Exact tested Git blobs: readiness module 0bb55b2a24d21739e697a1d59bb873f2f527d8e5;
+unit tests 58015a41124d61179ad7186a9e5dc2601fd55d7e. This does not establish
+successful execution of the wrapped GPS suite or donor checks. The complete
+repository could not be cloned in the local environment (DNS resolution failure).
