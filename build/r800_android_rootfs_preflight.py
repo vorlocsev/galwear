@@ -38,7 +38,7 @@ def snapshot(path, limit):
         raise ValueError("File size outside bounds")
     return data
 
-def prepare(staged, product, init, readelf="readelf"):
+def prepare_entries(staged, product, init, readelf="readelf"):
     staged = staged.resolve(strict=True)
     product = product.resolve(strict=True)
     layout = json.loads(snapshot(regular(staged, "guest-layout.json"), 262144),
@@ -129,10 +129,8 @@ def prepare(staged, product, init, readelf="readelf"):
         raise ValueError("Directory collision")
     ordered = [(name, (0o040755, b"", 0, 0)) for name in sorted(dirs, key=lambda n: (n.count("/"), n))]
     ordered += sorted(entries.items())
-    archive = newc(ordered)
-    return archive, {
+    return ordered, {
         "status": "ANDROID_ROOTFS_PREFLIGHT_ARCHIVE_ONLY",
-        "archive_sha256": sha(archive), "archive_bytes": len(archive),
         "entries": len(ordered), "init_sha256": init_info["sha256"],
         "property_contexts_sha256": context_hashes,
         "guest_files": {name: {"mode": item[0], "sha256": sha(item[1])}
@@ -140,6 +138,12 @@ def prepare(staged, product, init, readelf="readelf"):
         "android_init_started": False, "property_service_started": False,
         "selinux_policy_loaded": False, "safe_to_flash": False,
     }
+
+def prepare(staged, product, init, readelf="readelf"):
+    entries, report = prepare_entries(staged, product, init, readelf)
+    archive = newc(entries)
+    return archive, {**report, "archive_sha256": sha(archive), "archive_bytes": len(archive)}
+
 
 def newc(entries):
     out = bytearray()
