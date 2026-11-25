@@ -1,0 +1,70 @@
+name: SM-R800 full AOSP EXT4 experiment (manual, non-release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_disposable_runner:
+        description: Confirm isolated Linux runner and disposable pinned AOSP checkout
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: galwear-aosp-ext4-dedicated
+  cancel-in-progress: false
+
+jobs:
+  aosp-ext4:
+    if: github.repository == 'vorlocsev/galwear' && github.ref == 'refs/heads/development/r800-display-error-propagation-20261125' && inputs.confirm_disposable_runner
+    runs-on: [self-hosted, linux, x64, galwear-aosp]
+    timeout-minutes: 1440
+    env:
+      AOSP_ROOT: ${{ vars.GALWEAR_AOSP_ROOT }}
+      BLOCK_BUNDLE: ${{ vars.GALWEAR_BLOCK_BUNDLE }}
+      LIBRARY_CHOICES: ${{ vars.GALWEAR_LIBRARY_CHOICES }}
+      EVIDENCE_ROOT: ${{ runner.temp }}/galwear-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify dedicated prerequisites and exact commit
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -n "$AOSP_ROOT" && test -n "$BLOCK_BUNDLE" && test -n "$LIBRARY_CHOICES"
+          test -d "$AOSP_ROOT/.repo"
+          test -f "$BLOCK_BUNDLE/Image"
+          test -f "$BLOCK_BUNDLE/block-baseline.json"
+          test -f "$BLOCK_BUNDLE/virt-config-evidence.json"
+          test -f "$LIBRARY_CHOICES"
+          for tool in repo git python3 aarch64-linux-gnu-gcc qemu-system-aarch64 mke2fs e2fsck debugfs matchpathcon readelf; do
+            command -v "$tool" >/dev/null
+          done
+          mkdir "$EVIDENCE_ROOT"
+          df -h "$EVIDENCE_ROOT" "$AOSP_ROOT"
+      - name: Build exact AOSP inputs
+        run: |
+          python3 build/r800_property_pipeline.py build \
+            --aosp-root "$AOSP_ROOT" --out "$EVIDENCE_ROOT/build" --jobs 4
+      - name: Run stock and fixture EXT4 experiment
+        run: |
+          python3 build/r800_ext4_property_pipeline.py \
+            --build-root "$EVIDENCE_ROOT/build" --choices "$LIBRARY_CHOICES" \
+            --kernel "$BLOCK_BUNDLE/Image" --baseline "$BLOCK_BUNDLE/block-baseline.json" \
+            --config-evidence "$BLOCK_BUNDLE/virt-config-evidence.json" \
+            --out "$EVIDENCE_ROOT/boot"
+      - name: Publish bounded non-release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aosp-ext4-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.EVIDENCE_ROOT }}/build/pipeline.json
+            ${{ env.EVIDENCE_ROOT }}/boot/pipeline.json
+            ${{ env.EVIDENCE_ROOT }}/boot/*.json
+            ${{ env.EVIDENCE_ROOT }}/boot/*-boot/generic-console.log
+          if-no-files-found: warn
+          retention-days: 7
