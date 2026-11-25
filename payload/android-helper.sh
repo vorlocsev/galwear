@@ -4,6 +4,36 @@
 # images lack: swap, GPU clock, Wi-Fi with a root telnet shell, one-time setup.
 B=/oem/r800dev/bin/busybox
 k() { echo "<6>r800: $*" > /dev/kmsg; }
+# Bounded boot-stage observation; no service starts, property writes or IPC probes.
+# A running process alone does not establish successful service registration.
+boot_observe() {
+    previous=
+    for attempt in $("$B" seq 1 120); do
+        managers=
+        for service in servicemanager hwservicemanager vndservicemanager zygote; do
+            state=$(/system/bin/getprop "init.svc.$service")
+            case "$state" in running|stopped|restarting|stopping) ;; *) state=unknown;; esac
+            managers="$managers $service=$state"
+        done
+        server=absent
+        "$B" pidof system_server >/dev/null 2>&1 && server=present
+        completed=$(/system/bin/getprop sys.boot_completed)
+        case "$completed" in 1) ;; *) completed=0;; esac
+        current="$managers system_server=$server boot_completed=$completed"
+        if [ "$current" != "$previous" ]; then
+            k "boot-stage:$current"
+            previous=$current
+        fi
+        if [ "$completed" = 1 ]; then
+            k "boot-stage: Android reports boot_completed; hardware acceptance not established"
+            return 0
+        fi
+        "$B" sleep 2
+    done
+    k "boot-stage: observation window expired without boot_completed"
+}
+boot_observe &
+
 # Developer mode: touch /oem/r800dev/android/DEV for the telnet shell, Wi-Fi
 # forced on, the setup wizard skipped and debug logs on p17. Without it the
 # watch runs as a normal user watch.
