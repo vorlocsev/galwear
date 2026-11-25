@@ -24,6 +24,10 @@ HALS = ("audio.primary.r800.so", "gps.r800.so", "hwcomposer.r800.so", "sensors.r
 BINS = ("busybox", "busybox-extras", "fsfreeze", "loopdio", "r800boost", "r800keys", "ukey", "wpcd")
 DIRS = ("fw", "charger", "tzlite", "root", "lib")
 SINGLE = ("keepwifi.dex", "gpsbridge", "splash.raw")
+ASSET_SIZES = {"splash.raw": 360*360*4, "charger/pct.rgb": 36*110*3,
+               "charger/bolt.rgb": 80*60*3}
+ASSET_SIZES.update({"charger/d%d.rgb" % i: 55*110*3 for i in range(10)})
+CHARGER_TOOLS = ("charger/r800charger", "charger/wpcd", "charger/r800wdui")
 RADIO_FILES = ("fw/bcmdhd_sta.bin", "fw/nvram_net.txt", "fw/bcmdhd_clm.blob",
                "fw/bt/BCM43012B0_002.001.021.0153.0156.hcd",
                "fw/bt/bt_vendor.conf", "fw/bt/libbt-vendor.so")
@@ -124,6 +128,20 @@ def inventory(src, release):
                 raise ValueError("Bluetooth configuration differs from repository profile")
     for name in SINGLE:
         add(checked(name), name)
+    for name, size in ASSET_SIZES.items():
+        if name not in entries:
+            raise ValueError("Missing display asset: " + name)
+        path = checked(name)
+        if not stat.S_ISREG(path.lstat().st_mode) or path.stat().st_size != size:
+            raise ValueError("Invalid display asset size: " + name)
+    for name in CHARGER_TOOLS:
+        if name not in entries:
+            raise ValueError("Missing charger tool: " + name)
+        path = checked(name)
+        if not stat.S_ISREG(path.lstat().st_mode) or not path.stat().st_mode & 0o111:
+            raise ValueError("Non-executable charger tool: " + name)
+    if hashlib.sha256(read_regular(checked("charger/wpcd"), 64*1024**2)).digest() != hashlib.sha256(read_regular(checked("bin/wpcd"), 64*1024**2)).digest():
+        raise ValueError("Charger and Android WPCD bytes differ")
     for name in SCRIPTS:
         add(checked("payload/" + name, release), name)
     add(checked("src/tools/sensors/tzchroot.sh", release), "tzchroot.sh")
