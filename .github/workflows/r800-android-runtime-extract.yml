@@ -12,6 +12,8 @@ on:
       - build/r800_aosp_property_info.sh
       - build/r800_aosp_init_service_build.sh
       - build/r800_android_init_inventory.py
+      - build/r800_android_init_dependencies.py
+      - tests/test_android_init_dependencies.py
       - src/android/property-service-harness.cpp
       - src/android/property-service-client.c
       - tests/test_android_init_inventory.py
@@ -44,6 +46,7 @@ jobs:
           bash -n build/r800_aosp_property_info.sh
           bash -n build/r800_aosp_init_service_build.sh
           python3 -m unittest discover -s tests -p 'test_android_init_inventory.py' -v
+          python3 -m unittest discover -s tests -p 'test_android_init_dependencies.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_property_area.py' -v
           command -v debugfs
           command -v mke2fs
