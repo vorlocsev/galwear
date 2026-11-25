@@ -540,3 +540,38 @@ SELinux labels, Android root layout, AVB or service execution.
 The block profile must still be compiled and tested on the pinned
 kernel. Actual image creation, mount support and QEMU runtime are
 unconfirmed. No release or flash artifact.
+
+
+## Effective guest labels on pre-labeled Android mounts
+
+The same read-only VirtIO transport now has a separate diagnostic
+binary, compiled explicitly with GALWEAR_LABEL_PROBE:
+
+    aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static \
+      -DGALWEAR_LABEL_PROBE src/initramfs/virt-readonly-disks.c -o /absolute/label-init
+    python3 build/r800_initramfs_spec.py --init /absolute/label-init \
+      --list /absolute/label-init.list --report /absolute/label-compile.json
+
+Use build/r800_qemu_prelabeled_mounts.py --help. In addition to the
+read-only disk runner arguments it requires the accepted no-policy
+mount report, the matching product output tree and checkfc. The prior
+mount report must identify the exact same kernel, configuration,
+policy identity and ordered image digests/sizes. The new archive adds
+the unmodified audited policy and a bounded exact label manifest.
+The guest mounts system and available context partitions at their
+Android paths and the original Runtime APEX at /apex/com.android.runtime,
+without apexd or AVB activation. All mounts retain read-only, nodev,
+nosuid and noexec flags, verified by statvfs.
+
+After mounts are established, the diagnostic PID1 loads the audited
+policy, requires enforcing=1 and the kernel domain, then compares
+lgetxattr security.selinux on every selected path with the offline
+label reports. No relabeling, setenforce or Android executable is used.
+The unchanged image hashes and exact ordered console evidence are
+required. If the stock kernel domain cannot inspect a mounted label,
+the gate fails; do not widen kernel permissions to force acceptance.
+This is a selected-inode test, not an audit of every filesystem inode.
+The next gate must establish a legitimate init-domain executable
+transition on labeled mounts, with only deliberately enabled execution.
+Actual compilation, stock policy load and effective label readback
+remain unverified.
