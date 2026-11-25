@@ -7,6 +7,8 @@ import subprocess
 
 import r800_qemu_readonly_disks as disks
 from r800_ext4_nosuid_policy_gate import require_ready
+from r800_ext4_console_contract import inspect as inspect_stdout
+from r800_ext4_exec_access_audit import evaluate_blob as audit_exec_access
 import r800_qemu_prelabeled_mounts as labels
 from r800_android_rootfs_preflight import snapshot, sha
 from r800_android_sepolicy_audit import audit, MAX_POLICY
@@ -78,7 +80,10 @@ def inspect_console(log, records, plan):
         raise ValueError("EXT4 handover out of order")
     if any(x.startswith(HEARTBEAT_PREFIX) for x in lines[:lines.index(MARKERS[-1])]):
         raise ValueError("Heartbeat before diagnostic transition")
-    return {**evidence, "current_domain_reported":"u:r:init:s0",
+    stdout = inspect_stdout(log, ("kernel","init"),
+        (disks.EXPECTED.rstrip(b"\n"), MARKERS[0]),
+        (exec_modes[0], MARKERS[1]))
+    return {**evidence, **stdout, "current_domain_reported":"u:r:init:s0",
             "initial_domain_reported":"u:r:kernel:s0","init_domain_entered":True,
             "mount_noexec_requested":False,"only_system_exec_reported":True,
             "diagnostic_pid1_only":True,"original_init_executed":False}
@@ -113,6 +118,7 @@ def run(a):
     if audited["policy_sha256"] != policy or sha(blob) != policy:
         raise ValueError("Policy identity mismatch")
     nosuid = require_ready(blob, "stock", a.seinfo, a.sesearch)
+    access = audit_exec_access(blob,new,extra,runtime,"stock",a.sesearch)
     manifest = "".join(p+" "+v+"\n" for p,v in plan.items()).encode("ascii")
     if len(manifest)>256*1024:
         raise ValueError("Label manifest exceeds bounds")
@@ -120,7 +126,7 @@ def run(a):
         extra_entries=[("galwear-policy",(0o100400,blob,0,0)),
                        ("galwear-labels.list",(0o100400,manifest,0,0))],
         label_parser=lambda log,actual:inspect_console(log,actual,plan))
-    return {**result,"nosuid_policy_prerequisites":nosuid,"original_system_sha256":old["image_sha256"],
+    return {**result,"nosuid_policy_prerequisites":nosuid,"exec_access_advisory":access,"original_system_sha256":old["image_sha256"],
             "diagnostic_system_sha256":new["image_sha256"],
             "diagnostic_init_sha256":info["sha256"],"label_manifest_sha256":sha(manifest),
             "prior_label_archive_sha256":prior["archive_sha256"],
