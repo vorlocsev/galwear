@@ -444,6 +444,32 @@ def check_verity(payload, tree, salt, root, algorithm="sha256", block_size=512):
         len(payload), len(payload), len(tree), block_size, block_size, algorithm, salt, root)
 
 
+def dex_fixture():
+    import hashlib
+    import zlib
+    raw = bytearray(140)
+    raw[:8] = b"dex\n039\0"
+    struct.pack_into("<III", raw, 32, len(raw), 112, 0x12345678)
+    struct.pack_into("<I", raw, 52, 112)
+    struct.pack_into("<II", raw, 104, 28, 112)
+    struct.pack_into("<I", raw, 112, 2)
+    struct.pack_into("<HHII", raw, 116, 0, 0, 1, 0)
+    struct.pack_into("<HHII", raw, 128, 0x1000, 0, 1, 112)
+    raw[12:32] = hashlib.sha1(raw[32:]).digest()
+    struct.pack_into("<I", raw, 8, zlib.adler32(raw[12:]) & 0xffffffff)
+    return bytes(raw)
+
+
+def jar_fixture(entries):
+    import io
+    import zipfile
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for name, data in entries.items():
+            z.writestr(name, data)
+    return out.getvalue()
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -1482,6 +1508,57 @@ class LinkerTests(unittest.TestCase):
         out = audit.audit(self.root, ("/init",))
         self.assertEqual(out["init_inventory"]["status"], "REVIEW_REQUIRED")
         self.assertFalse(out["init_inventory"]["init_execution_verified"])
+        self.assertFalse(out["android_boot_tested"])
+
+    def test_art_dex_header_integrity(self):
+        result = audit.r800_art_inventory.dex_inventory(dex_fixture())
+        self.assertEqual(result["version"], "039")
+        self.assertTrue(result["checksum_matches"])
+        self.assertFalse(result["bytecode_verified"])
+
+    def test_art_dex_corrupt_checksum_and_bounds(self):
+        raw = bytearray(dex_fixture())
+        raw[-1] ^= 1
+        with self.assertRaisesRegex(ValueError, "SHA-1"):
+            audit.r800_art_inventory.dex_inventory(raw)
+        with self.assertRaises(ValueError):
+            audit.r800_art_inventory.dex_inventory(raw[:100])
+
+    def test_art_jar_multidex_and_gap(self):
+        art = audit.r800_art_inventory
+        dex = dex_fixture()
+        result, used = art.jar_inventory(jar_fixture({"classes.dex": dex, "classes2.dex": dex}), 1024)
+        self.assertEqual(len(result["dex"]), 2)
+        self.assertEqual(used, len(dex) * 2)
+        with self.assertRaisesRegex(ValueError, "Noncontiguous"):
+            art.jar_inventory(jar_fixture({"classes.dex": dex, "classes3.dex": dex}), 1024)
+
+    def test_art_jar_budget_and_missing_dex(self):
+        art = audit.r800_art_inventory
+        with self.assertRaisesRegex(ValueError, "budget"):
+            art.jar_inventory(jar_fixture({"classes.dex": dex_fixture()}), 1)
+        result, used = art.jar_inventory(jar_fixture({"META-INF/MANIFEST.MF": b"manifest"}), 1024)
+        self.assertEqual(result["status"], "NO_EMBEDDED_DEX")
+        self.assertEqual(used, 0)
+
+    def test_art_bootclasspath_inventory(self):
+        self.put("init.rc", b"on init\n    export BOOTCLASSPATH /system/framework/core.jar\n")
+        self.put("system/framework/core.jar", jar_fixture({"classes.dex": dex_fixture()}))
+        out = audit.r800_art_inventory.audit(self.root, audit.r800_init_inventory.audit(self.root))
+        self.assertEqual(out["status"], "STATIC_DEX_INVENTORY_ONLY")
+        self.assertFalse(out["art_initialization_verified"])
+
+    def test_art_classpath_missing_and_unresolved(self):
+        self.put("init.rc", b"on init\n    export BOOTCLASSPATH /missing.jar:/$" + b"{ART}/core.jar\n")
+        out = audit.r800_art_inventory.audit(self.root, audit.r800_init_inventory.audit(self.root))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(len(out["errors"]), 2)
+
+    def test_art_report_integrated_without_runtime_claim(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["art_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["art_inventory"]["oat_verified"])
         self.assertFalse(out["android_boot_tested"])
 
     def test_symlink_alias_not_ambiguous(self):
