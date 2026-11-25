@@ -11,7 +11,7 @@ PATHS = ["/system", "/system/bin/init", "/dev/socket"]
 def log(paths=PATHS):
     return (a.EXPECTED + a.START + b"\n" +
             b"".join(a.PREFIX + b"path=" + p.encode() +
-                     b" context=u:object_r:system_file:s0\n" for p in paths) +
+                     b" context="+({"/system/bin/init": b"u:object_r:init_exec:s0", "/dev/socket": b"u:object_r:socket_device:s0"}.get(p, b"u:object_r:system_file:s0"))+b"\n" for p in paths) +
             a.PREFIX + f"PASS count={len(paths)} service=not-started\n".encode() +
             a.HEARTBEAT_PREFIX + b"00000001\n")
 
@@ -34,6 +34,10 @@ class RelabelTests(unittest.TestCase):
     def test_invalid_context(self):
         with self.assertRaisesRegex(ValueError, "Unexpected path"):
             a.inspect_console(log().replace(b"u:object_r:system_file:s0", b"invalid"), PATHS)
+
+    def test_wrong_critical_label(self):
+        with self.assertRaisesRegex(ValueError, "critical label"):
+            a.inspect_console(log().replace(b"init_exec:s0", b"system_file:s0"), PATHS)
 
     def test_early_heartbeat(self):
         value = log().replace(a.START + b"\n", a.START+b"\n"+a.HEARTBEAT_PREFIX+b"00000001\n")
