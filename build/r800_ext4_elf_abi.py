@@ -17,6 +17,7 @@ from r800_android_runtime_extract import dump_file, digest, MAX_PAYLOAD
 from r800_android_system_ext4 import IMAGE_SIZE
 from r800_qemu_readonly_disks import report
 from r800_ext4_linker_resolution import evaluate as resolve
+from r800_elf_relocations import inspect as inspect_relocations
 
 STATUS = "EXT4_ELF_ABI_STATIC_ADVISORY_ONLY"
 ROW = re.compile(r"^\s*(\d+):\s+[0-9a-fA-F]+\s+\d+\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(.*?)\s*$")
@@ -95,7 +96,7 @@ def parse(text):
     if tags & {"REL","RELSZ","RELENT","ANDROID_REL","ANDROID_RELSZ"}:
         raise ValueError("REL encoding incompatible with AArch64 RELA linker")
     types=sorted(set(re.findall(r"\bR_AARCH64_[A-Z0-9_]+\b",text)))
-    return {"imports":imports,"exports":exports,"relocation_tags":sorted(tags),
+    return {"imports":imports,"exports":exports,"dynamic_symbol_count":declared,"relocation_tags":sorted(tags),
             "visible_relocation_types":types}
 
 
@@ -107,6 +108,12 @@ def inspect(path,readelf="readelf"):
     if out.stderr or len(out.stdout)>32*1024*1024:
         raise ValueError("ELF ABI inspection diagnostic or excessive output")
     result=parse(out.stdout)
+    with path.open("rb") as stream:
+        raw=stream.read(MAX_ELF+1)
+    import hashlib
+    if hashlib.sha256(raw).hexdigest()!=before["sha256"]:
+        raise ValueError("ELF changed before relocation inspection")
+    result["relocation_structure"]=inspect_relocations(raw,result["dynamic_symbol_count"])
     if digest(path,MAX_ELF)!=before["sha256"]:
         raise ValueError("ELF changed during ABI inspection")
     return {**result,"sha256":before["sha256"],"soname":before["soname"]}
@@ -157,7 +164,8 @@ def summarize(closure,objects):
                                     "import_count":len(objects[p]["imports"]),
                                     "export_count":len(objects[p]["exports"]),
                                     "relocation_tags":objects[p]["relocation_tags"],
-                                    "visible_relocation_types":objects[p]["visible_relocation_types"]}
+                                    "visible_relocation_types":objects[p]["visible_relocation_types"],
+                                    "relocation_structure":objects[p].get("relocation_structure")}
                                   for p in sorted(paths)}}
     return results
 
@@ -194,7 +202,8 @@ def evaluate(system,runtime,system_image,runtime_image,readelf="readelf"):
     return {"status":STATUS,"policy_sha256":resolution["policy_sha256"],
             "system_sha256":resolution["system_sha256"],"runtime_sha256":resolution["runtime_sha256"],
             "executables":summarize(resolution["executables"],objects),
-            "packed_relocations_decoded":False,"symbol_resolution_tested":False,
+            "packed_relocations_decoded":all(o["relocation_structure"]["packed_relocations_decoded"] for o in objects.values()),
+            "symbol_resolution_tested":False,
             "stub_exclusion_proven":False,"runtime_relocations_tested":False,
             "safe_to_flash":False}
 
