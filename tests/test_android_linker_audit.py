@@ -270,6 +270,53 @@ def inspect_relr(entries, abi="arm64", android=False, malformed=None, writable=T
         [(0x2000, 0x1000, 6 if writable else 4)], 2 if wide else 1, None)
 
 
+def tls_fixture(abi="arm64", malformed=None):
+    data = symbol_fixture(abi)
+    wide = abi == "arm64"
+    old, entsize = (64, 56) if wide else (52, 32)
+    headers = bytes(data[old:old + 2 * entsize])
+    data.extend(headers + bytes(entsize))
+    pos = 1024 + 2 * entsize
+    addr = 0x1000 + 960
+    filesz = 8
+    memsz = 32
+    align = 8
+    if malformed == "alignment":
+        align = 3
+    elif malformed == "file":
+        filesz = 64
+    elif malformed == "memory":
+        memsz = 128
+    elif malformed == "mapping":
+        addr += 8
+    if wide:
+        struct.pack_into("<Q", data, 32, 1024)
+        struct.pack_into("<H", data, 56, 3)
+        struct.pack_into("<IIQQQQQQ", data, pos, 7, 4, 960, addr, 0, filesz, memsz, align)
+        struct.pack_into("<IBBHQQ", data, 624, 1, 0x16, 0, 1,
+                         32 if malformed == "symbol" else 0, 4)
+    else:
+        struct.pack_into("<I", data, 28, 1024)
+        struct.pack_into("<H", data, 44, 3)
+        struct.pack_into("<IIIIIIII", data, pos, 7, 960, addr, 0, filesz, memsz, 4, align)
+        struct.pack_into("<IIIBBH", data, 616, 1,
+                         32 if malformed == "symbol" else 0, 4, 0x16, 0, 1)
+    return data
+
+
+def inspect_tls_relocation(abi, typ, target=0x2000, tls_indices=frozenset({1}),
+                           span=16, sym=1):
+    wide = abi == "arm64"
+    data = (struct.pack("<QQq", target, sym << 32 | typ, 0) if wide else
+            struct.pack("<II", target, sym << 8 | typ))
+    tags = ({audit.DT_RELA: [0x1000], audit.DT_RELASZ: [len(data)],
+             audit.DT_RELAENT: [len(data)]} if wide else
+            {audit.DT_REL: [0x1000], audit.DT_RELSZ: [len(data)],
+             audit.DT_RELENT: [len(data)]})
+    return audit.relocation_inventory(tags, data, [(0x1000, 0, len(data))],
+        [(0x2000, span, 6)], 2 if wide else 1, 2, tls_indices)
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -755,6 +802,48 @@ class LinkerTests(unittest.TestCase):
             audit.relocation_inventory({audit.DT_RELR: [0x1000],
                 audit.DT_RELRSZ: [8], audit.DT_RELRENT: [4]}, data,
                 [(0x1000, 0, 8)], [(0xfffffffc, 4, 6)], 1, None)
+
+    def test_pt_tls_both_abis(self):
+        for abi in ("arm", "arm64"):
+            with self.subTest(abi=abi):
+                out = audit.inspect(tls_fixture(abi))
+                self.assertEqual(out["tls_segment"]["memory_size"], 32)
+                self.assertEqual(out["tls_segment"]["file_size"], 8)
+                self.assertEqual(out["tls_symbol_count"], 1)
+                self.assertNotIn("_tls_indices", out)
+
+    def test_pt_tls_bad_alignment_and_bounds(self):
+        for case in ("alignment", "file", "memory", "mapping", "symbol"):
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                audit.inspect(tls_fixture(malformed=case))
+
+    def test_tlsdesc_both_abis(self):
+        for abi, typ in (("arm", 13), ("arm64", 1031)):
+            with self.subTest(abi=abi):
+                out = inspect_tls_relocation(abi, typ)
+                self.assertEqual(out["tls_count"], 1)
+                self.assertEqual(out["tlsdesc_count"], 1)
+                self.assertTrue(out["tls_symbol_types_checked"])
+
+    def test_tlsdesc_requires_two_words(self):
+        for abi, typ, span in (("arm", 13, 4), ("arm64", 1031, 8)):
+            with self.subTest(abi=abi), self.assertRaisesRegex(ValueError, "outside PT_LOAD"):
+                inspect_tls_relocation(abi, typ, span=span)
+
+    def test_tls_relocation_checks_symbol_kind(self):
+        with self.assertRaisesRegex(ValueError, "non-TLS symbol"):
+            inspect_tls_relocation("arm64", 1028, tls_indices=set())
+        out = inspect_tls_relocation("arm64", 1028, tls_indices=None)
+        self.assertFalse(out["tls_symbol_types_checked"])
+
+    def test_tls_relocation_alignment(self):
+        with self.assertRaisesRegex(ValueError, "Unaligned TLS"):
+            inspect_tls_relocation("arm64", 1031, target=0x2001, span=32)
+
+    def test_tls_relocation_zero_symbol(self):
+        out = inspect_tls_relocation("arm64", 1028, sym=0, tls_indices=None)
+        self.assertTrue(out["tls_symbol_types_checked"])
+        self.assertEqual(out["tls_count"], 1)
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
