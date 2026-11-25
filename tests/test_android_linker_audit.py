@@ -225,6 +225,29 @@ def relocation_fixture(abi="arm64", plt=False, malformed=None):
     return data
 
 
+def sleb128(value):
+    out = bytearray()
+    while True:
+        byte = value & 127
+        value >>= 7
+        done = (value == 0 and not byte & 64) or (value == -1 and byte & 64)
+        out.append(byte if done else byte | 128)
+        if done:
+            return bytes(out)
+
+
+def aps2_fixture(values, signature=b"APS2", trailing=b""):
+    return signature + b"".join(sleb128(v) for v in values) + trailing
+
+
+def inspect_aps2(blob, abi="arm64", rela=True, symbol_count=2):
+    a, s = ((audit.DT_ANDROID_RELA, audit.DT_ANDROID_RELASZ) if rela else
+            (audit.DT_ANDROID_REL, audit.DT_ANDROID_RELSZ))
+    return audit.relocation_inventory({a: [0x1000], s: [len(blob)]},
+        blob, [(0x1000, 0, len(blob))], [(0x2000, 256, 6)],
+        2 if abi == "arm64" else 1, symbol_count)
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -615,6 +638,52 @@ class LinkerTests(unittest.TestCase):
                 out = audit.audit(self.root, ("/init",))
                 self.assertEqual(out["status"], "REVIEW_REQUIRED")
                 self.assertEqual(out["relocation_review_objects"], ["/init"])
+
+    def test_aps2_grouped_arm_and_arm64(self):
+        for abi, typ, rela in (("arm", 23, False), ("arm64", 1027, True)):
+            with self.subTest(abi=abi):
+                blob = aps2_fixture([2, 0x2000, 2, 3, 8, typ])
+                out = inspect_aps2(blob, abi, rela)
+                self.assertEqual(out["tables"][0]["types"], {str(typ): 2})
+                self.assertFalse(out["relocations_applied"])
+                self.assertEqual(out["packed_tags"], [])
+
+    def test_aps2_ungrouped_signed_addends(self):
+        blob = aps2_fixture([2, 0x2000, 2, 8, 8, 1027, -4, 8, 1027, 6])
+        out = inspect_aps2(blob)
+        self.assertEqual(out["tables"][0]["count"], 2)
+
+    def test_aps2_grouped_addends(self):
+        blob = aps2_fixture([2, 0x2000, 2, 15, 8, 1027, -4])
+        self.assertEqual(inspect_aps2(blob)["tables"][0]["count"], 2)
+
+    def test_aps2_invalid_signature_and_truncation(self):
+        with self.assertRaisesRegex(ValueError, "signature"):
+            inspect_aps2(aps2_fixture([0, 0], signature=b"APS1"))
+        with self.assertRaisesRegex(ValueError, "Truncated"):
+            inspect_aps2(b"APS2" + bytes([128]))
+
+    def test_aps2_invalid_group_and_flags(self):
+        for values in ([1, 0x2000, 2, 0], [1, 0x2000, 1, 16],
+                       [1, 0x2000, 1, 4]):
+            with self.subTest(values=values), self.assertRaisesRegex(ValueError, "APS2"):
+                inspect_aps2(aps2_fixture(values))
+
+    def test_aps2_rel_rejects_addends(self):
+        with self.assertRaisesRegex(ValueError, "addend flags"):
+            inspect_aps2(aps2_fixture([1, 0x2000, 1, 8]), "arm", False)
+
+    def test_aps2_checks_symbol_and_target(self):
+        with self.assertRaisesRegex(ValueError, "symbol index"):
+            inspect_aps2(aps2_fixture([1, 0x2000, 1, 3, 8, (2 << 32) | 1026]))
+        with self.assertRaisesRegex(ValueError, "outside PT_LOAD"):
+            inspect_aps2(aps2_fixture([1, 0x2000, 1, 3, 256, 1027]))
+
+    def test_aps2_overflow_and_trailing_bytes(self):
+        with self.assertRaisesRegex(ValueError, "overflow|too long"):
+            inspect_aps2(aps2_fixture([0, 1 << 32]), "arm", False)
+        with self.assertRaisesRegex(ValueError, "trailing"):
+            inspect_aps2(aps2_fixture([0, 0], trailing=b"x"))
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
