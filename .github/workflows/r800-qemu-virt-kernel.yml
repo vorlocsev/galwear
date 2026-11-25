@@ -1,0 +1,86 @@
+name: SM-R800 patched source generic virt kernel (non-release)
+
+on:
+  push:
+    branches:
+      - development/r800-display-error-propagation-20261125
+    paths:
+      - .github/workflows/r800-qemu-virt-kernel.yml
+      - build/r800_qemu_virt_compile.sh
+      - build/r800_qemu_virt_contract.py
+      - tests/test_qemu_virt_contract.py
+      - src/kernel/qemu-virt-minimal.config
+      - build/r800_qemu_system_init.py
+      - build/r800_initramfs_compile_smoke.sh
+      - build/r800_initramfs_spec.py
+      - build/r800_cpio_audit.py
+      - build/r800_storage_isolation.py
+      - build/r800_aosp_source_probe.sh
+      - src/kernel/r800-wearos.patch
+      - src/initramfs/init-readonly.c
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  virt-kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact triggering commit and synthetic contracts
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh -n build/r800_qemu_virt_compile.sh
+          python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_system_init.py' -v
+      - name: Fetch pinned kernel and expand disposable source
+        run: |
+          sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/virt-source" "$RUNNER_TEMP/virt-source-evidence.json"
+          git -C "$RUNNER_TEMP/virt-source" sparse-checkout disable
+      - name: Compile patched source with separate virt configuration
+        run: |
+          docker run --rm --pull=always \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/virt-source:/source" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache clang19=19.1.4-r0 lld=19.1.4-r0 llvm19=19.1.4-r1 \
+                git make bash bc bison flex perl python3 openssl-dev \
+                elfutils-dev build-base linux-headers coreutils findutils
+              git config --global --add safe.directory /source
+              sh /repo/build/r800_initramfs_compile_smoke.sh /repo /scratch/virt-init
+              sh /repo/build/r800_qemu_virt_compile.sh /source /repo /scratch/virt-kernel /scratch/virt-init/initramfs.list
+            '
+      - name: Boot patched virt kernel without external initrd or disks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm
+          python3 build/r800_qemu_system_init.py \
+            --init "$RUNNER_TEMP/virt-init/init" \
+            --compile-evidence "$RUNNER_TEMP/virt-init/initramfs-evidence.json" \
+            --generic-kernel "$RUNNER_TEMP/virt-kernel/arch/arm64/boot/Image" \
+            --embedded-archive "$RUNNER_TEMP/virt-kernel/usr/initramfs_data.cpio" \
+            --out-dir "$RUNNER_TEMP/virt-boot" \
+            --report "$RUNNER_TEMP/virt-boot-evidence.json"
+      - name: Record source and patch identity
+        if: always()
+        run: |
+          printf 'commit=%s\nsource_base=50db73fc799f20a7120a8b5f653b16cc123d856f\nprofile=generic_virt\nsafe_to_flash=false\n' "$GITHUB_SHA" > "$RUNNER_TEMP/virt-identity.txt"
+          sha256sum src/kernel/r800-wearos.patch src/kernel/qemu-virt-minimal.config >> "$RUNNER_TEMP/virt-identity.txt"
+      - name: Upload diagnostics only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-patched-virt-evidence-only
+          path: |
+            ${{ runner.temp }}/virt-identity.txt
+            ${{ runner.temp }}/virt-source-evidence.json
+            ${{ runner.temp }}/virt-init/initramfs-evidence.json
+            ${{ runner.temp }}/virt-kernel/virt-config-evidence.json
+            ${{ runner.temp }}/virt-kernel/virt-cpio-evidence.json
+            ${{ runner.temp }}/virt-boot-evidence.json
+            ${{ runner.temp }}/virt-boot/generic-console.log
+          if-no-files-found: warn
+          retention-days: 7
