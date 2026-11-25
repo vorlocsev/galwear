@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   kernel-patch-preflight:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +21,12 @@ jobs:
           sh -n build/mk_kernel_patch.sh
           sh -n build/mkboot.sh
           sh -n src/initramfs/build.sh
+      - name: Install explicit cross-build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld
+          clang --version
+          ld.lld --version
       - name: Cross-build freestanding AArch64 init (non-release)
         run: |
           sh src/initramfs/build.sh "$RUNNER_TEMP/r800-initramfs"
