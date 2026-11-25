@@ -61,15 +61,24 @@ jobs:
           git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
           git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
           git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
-      - name: Compile five HALs and link four NDK-only modules
+      - name: Compile and link five HALs (Audio experimental)
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+      - name: Compare NDK PCM ABI to pinned Exynos compat source
+        run: |
+          set -euo pipefail
+          base=https://raw.githubusercontent.com/xanderlent/COMBINED_android-kernel-exynos/50db73fc799f20a7120a8b5f653b16cc123d856f
+          curl --fail --location --retry 3 --max-time 90 "$base/sound/core/pcm_compat.c" -o "$RUNNER_TEMP/pcm_compat.c"
+          curl --fail --location --retry 3 --max-time 90 "$base/include/uapi/sound/asound.h" -o "$RUNNER_TEMP/asound.h"
+          python3 build/r800_pcm_compat_audit.py "$RUNNER_TEMP/r800-hal/hal-compile.json" "$RUNNER_TEMP/pcm_compat.c" "$RUNNER_TEMP/asound.h" "$RUNNER_TEMP/r800-hal/pcm-compat.json"
       - name: Upload JSON evidence only
         uses: actions/upload-artifact@v4
         with:
           name: r800-hal-compile-evidence
-          path: ${{ runner.temp }}/r800-hal/hal-compile.json
+          path: |
+            ${{ runner.temp }}/r800-hal/hal-compile.json
+            ${{ runner.temp }}/r800-hal/pcm-compat.json
           if-no-files-found: error
           retention-days: 7
   kernel:
