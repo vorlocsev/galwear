@@ -25,7 +25,6 @@ jobs:
       AOSP_ROOT: ${{ vars.GALWEAR_AOSP_ROOT }}
       BLOCK_BUNDLE: ${{ vars.GALWEAR_BLOCK_BUNDLE }}
       LIBRARY_CHOICES: ${{ vars.GALWEAR_LIBRARY_CHOICES }}
-      EVIDENCE_ROOT: ${{ runner.temp }}/galwear-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,7 +42,9 @@ jobs:
           for tool in repo git python3 aarch64-linux-gnu-gcc qemu-system-aarch64 mke2fs e2fsck debugfs matchpathcon readelf; do
             command -v "$tool" >/dev/null
           done
+          EVIDENCE_ROOT="$RUNNER_TEMP/galwear-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir "$EVIDENCE_ROOT"
+          printf 'EVIDENCE_ROOT=%s\n' "$EVIDENCE_ROOT" >> "$GITHUB_ENV"
           df -h "$EVIDENCE_ROOT" "$AOSP_ROOT"
       - name: Build exact AOSP inputs
         run: |
