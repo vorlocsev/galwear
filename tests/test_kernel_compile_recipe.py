@@ -60,6 +60,19 @@ class CompileRecipeTests(unittest.TestCase):
         )
         self.assertNotIn(header, patch)
 
+    def test_integrated_workflow_uses_readonly_init(self):
+        workflow = (ROOT / ".github/workflows/r800-kernel-compile-smoke.yml").read_text()
+        self.assertIn("src/initramfs/init-readonly.c", workflow)
+        self.assertIn("r800_initramfs_compile_smoke.sh /repo /scratch/r800-integrated-init", workflow)
+        self.assertIn("R800_SMOKE_INITRAMFS_LIST=/scratch/r800-integrated-init/initramfs.list", workflow)
+        self.assertIn('audit["archive_sha256"]', workflow)
+        self.assertIn('mm.find(data, offset + 1)', workflow)
+        self.assertIn('"$EMBEDDED_OUTCOME" = success', workflow)
+        upload = workflow.split("uses: actions/upload-artifact@v4", 1)[1]
+        for forbidden in ("/boot/Image", "/vmlinux", "/initramfs_data.cpio", "/r800-integrated-init/init\n"):
+            self.assertNotIn(forbidden, upload)
+        self.assertIn("embedded-link-evidence.json", upload)
+
     def test_no_arguments_does_not_create_files(self):
         result = subprocess.run(["sh", str(SCRIPT)],
                                 capture_output=True, text=True, timeout=5)
