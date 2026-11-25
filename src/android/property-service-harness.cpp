@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstring>
 #include <selinux/selinux.h>
+#include <selinux/android.h>
+#include <sys/statvfs.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/system_properties.h>
@@ -35,6 +37,15 @@ int main(int argc, char** argv) {
     std::puts("r800-property-service: domain=u:r:init:s0 enforce=1");
     std::fflush(stdout);
     android::base::InitLogging(argv, &android::base::StderrLogger);
+    // Only volatile device directories are relabeled in the init domain.
+    // The immutable EXT4 partitions are never relabeled.
+    if (selinux_android_restorecon("/dev", 0) ||
+        selinux_android_restorecon("/dev/socket", 0)) return 10;
+    char* dir_label = nullptr;
+    if (lgetfilecon("/dev/socket", &dir_label) < 0) return 10;
+    bool dir_ok = strcmp(dir_label, "u:object_r:socket_device:s0") == 0;
+    freecon(dir_label);
+    if (!dir_ok) return 10;
     android::init::PropertyInit();
     // Seed the negative control via the writer-owned property area before clients run.
     // This is not evidence of a socket transaction by init.
