@@ -18,22 +18,38 @@ from r800_initramfs_spec import validate_init
 
 SCHEMA = "galwear-r800-qemu-user-init-v1"
 EXPECTED = b"r800-readonly-init: NON-RELEASE smoke image; no eMMC mount, no Wear OS handover\n"
-TIMEOUT = 8
+TIMEOUT = 22
+HEARTBEAT_PREFIX = b"r800-readonly-init: heartbeat "
+HEARTBEAT_BYTES = len(HEARTBEAT_PREFIX) + 9
+MIN_HEARTBEATS = 2
 TRACE_LINE = re.compile(r"^\s*\d+\s+([A-Za-z_][A-Za-z_0-9]*)\(")
+
+
+def inspect_heartbeats(lines: list[bytes]) -> int:
+    count = 0
+    for line in lines:
+        if not line.startswith(HEARTBEAT_PREFIX):
+            raise ValueError("Unexpected heartbeat output")
+        count += 1
+        expected = HEARTBEAT_PREFIX + f"{count:08x}".encode()
+        if line != expected:
+            raise ValueError("Invalid heartbeat sequence")
+    if count < MIN_HEARTBEATS:
+        raise ValueError("Insufficient completed heartbeats")
+    return count
 
 
 def inspect_trace(stdout: bytes, stderr: bytes, timed_out: bool) -> dict:
     if not timed_out:
         raise ValueError("Minimal init exited instead of remaining idle")
-    if stdout != EXPECTED:
+    if not stdout.startswith(EXPECTED) or not stdout.endswith(b"\n"):
         raise ValueError("Unexpected or missing init console message")
+    count = inspect_heartbeats(stdout[len(EXPECTED):].splitlines())
     trace = stderr.decode("ascii", errors="strict")
+    lines = [line for line in trace.splitlines() if line.strip()]
     calls = []
-    write_ok = False
-    sleep_ok = False
-    for line in trace.splitlines():
-        if not line.strip():
-            continue
+    writes = sleeps = 0
+    for index, line in enumerate(lines):
         match = TRACE_LINE.match(line)
         if not match:
             raise ValueError("Unrecognized QEMU syscall trace line")
@@ -42,18 +58,28 @@ def inspect_trace(stdout: bytes, stderr: bytes, timed_out: bool) -> dict:
             raise ValueError("Unexpected guest syscall: " + name)
         calls.append(name)
         if name == "write":
-            expected = r"^\s*\d+\s+write\(1,[^,]+," + str(len(EXPECTED)) + r"\)\s*=\s*" + str(len(EXPECTED)) + r"\s*$"
+            size = len(EXPECTED) if writes == 0 else HEARTBEAT_BYTES
+            expected = r"^\s*\d+\s+write\(1,[^,]+," + str(size) + r"\)\s*=\s*" + str(size) + r"\s*$"
             if not re.fullmatch(expected, line):
                 raise ValueError("Unexpected write syscall arguments or return")
-            write_ok = True
-        elif re.search(r"\)\s*=\s*0\s*$", line):
-            sleep_ok = True
-        elif "=" in line:
-            raise ValueError("Unexpected nanosleep failure")
-    if not write_ok or not sleep_ok or not calls or calls[0] != "write" or calls.count("write") != 1:
-        raise ValueError("Expected one console write and at least one completed sleep")
+            if writes != sleeps:
+                raise ValueError("Heartbeat write without successful sleep")
+            writes += 1
+        else:
+            if writes != sleeps + 1:
+                raise ValueError("Unexpected sleep sequence")
+            if re.search(r"\)\s*=\s*0\s*$", line):
+                sleeps += 1
+            elif "=" not in line and index == len(lines) - 1:
+                pass  # Host timeout may interrupt the final sleep.
+            else:
+                raise ValueError("Unexpected nanosleep failure")
+    if writes != count + 1 or sleeps not in (count, count + 1):
+        raise ValueError("Heartbeat output and syscall trace disagree")
     return {"console_message_exact": True, "completed_nanosleep": True,
+            "heartbeat_count": count, "heartbeat_sequence_verified": True,
             "observed_guest_syscalls": calls, "terminated_by_host_timeout": True}
+
 
 
 def run(binary: Path, evidence: Path) -> dict:
