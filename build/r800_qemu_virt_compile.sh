@@ -41,3 +41,12 @@ python3 "$REPO/build/r800_qemu_virt_contract.py" --profile "$PROFILE" --config "
 python3 "$REPO/build/r800_cpio_audit.py" --archive "$OUT/usr/initramfs_data.cpio" --init "$(dirname "$LIST")/init" --report "$OUT/virt-cpio-evidence.json"
 test -s "$OUT/arch/arm64/boot/Image"
 sha256sum "$OUT/arch/arm64/boot/Image"
+
+# Bind the effective-config evidence to the exact raw Image just compiled.
+python3 - "$OUT/virt-config-evidence.json" "$OUT/arch/arm64/boot/Image" <<'PY'
+import hashlib, json, pathlib, sys
+report, image = map(pathlib.Path, sys.argv[1:])
+data = json.loads(report.read_text())
+data["compiled_kernel_sha256"] = hashlib.sha256(image.read_bytes()).hexdigest()
+report.write_text(json.dumps(data, indent=2) + "\n")
+PY
