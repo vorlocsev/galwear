@@ -80,3 +80,19 @@ Read-only rejection is not evidence of SELinux authorization denial.
 
 No original init or original property service execution is established by
 the build recipe or inventory alone.
+
+## Recursive native dependency inventory
+
+The init source build recipe accepts an optional third argument: the extracted
+runtime root from R800_AOSP_RUNTIME_BUILD.md. The output init-dependencies.json
+walks DT_NEEDED recursively, including cycles, across system/lib64,
+system/lib64/bootstrap and apex/com.android.runtime/lib64/bionic. It records
+separate candidates and digests, missing libraries, different-content copies
+and available linker executables. It never follows Android absolute symlinks
+into the host. Candidate count and total bytes are bounded.
+
+This is not a linker namespace resolver. A missing candidate may require
+another APEX or partition, and identical copies do not establish correct
+namespace selection. No library is chosen automatically on ambiguity.
+DT_NEEDED does not include every dlopen dependency; actual linker config,
+bootstrap transitions, Android property contexts and sepolicy remain required.
