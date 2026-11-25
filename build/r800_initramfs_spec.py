@@ -52,6 +52,7 @@ def validate_init(path: Path) -> dict:
     if phoff + phentsize * phnum > size:
         raise InitramfsError("ELF program headers exceed file size")
     loads = 0
+    executable_entry = False
     for i in range(phnum):
         offset = phoff + i * phentsize
         ptype = struct.unpack_from("<I", data, offset)[0]
@@ -59,12 +60,21 @@ def validate_init(path: Path) -> dict:
             raise InitramfsError("Dynamic interpreter is forbidden in static init")
         if ptype == PT_LOAD:
             loads += 1
-            file_offset = struct.unpack_from("<Q", data, offset + 8)[0]
-            file_size = struct.unpack_from("<Q", data, offset + 32)[0]
+            flags = struct.unpack_from("<I", data, offset + 4)[0]
+            file_offset, vaddr = struct.unpack_from("<QQ", data, offset + 8)
+            file_size, mem_size = struct.unpack_from("<QQ", data, offset + 32)
             if file_offset + file_size > size:
                 raise InitramfsError("ELF LOAD segment exceeds file size")
+            if file_size > mem_size or vaddr + mem_size > 1 << 64:
+                raise InitramfsError("Invalid ELF LOAD segment memory size")
+            # AArch64 instructions are 4-byte aligned. Require the complete
+            # initial instruction to be file-backed in a PF_X segment.
+            if flags & 1 and vaddr <= entry and entry + 4 <= vaddr + file_size:
+                executable_entry = True
     if not loads:
         raise InitramfsError("AArch64 executable has no loadable segments")
+    if entry % 4 or not executable_entry:
+        raise InitramfsError("ELF entry must be aligned and inside a file-backed executable LOAD segment")
     return {
         "sha256": hashlib.sha256(data).hexdigest(),
         "size_bytes": size,
