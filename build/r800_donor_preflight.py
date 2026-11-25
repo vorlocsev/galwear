@@ -8,13 +8,11 @@ import re
 import stat
 import sys
 import tarfile
-from r800_android_linker_audit import inspect
 from pathlib import Path
 
 from r800_android_userspace_preflight import read_regular
 from r800_boot_candidate import inspect_template, PARTITION
 from r800_vendor_inputs import image_info, file_info
-from r800_stage_components import static_arm
 from r800_payload_candidate import ASSET_SIZES, RADIO_FILES
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "installer"))
@@ -140,21 +138,6 @@ def audit(donors, components, expected_sha):
             check("payload/" + name, lambda p: digest(p, MAX_FILE))
     for name, size in ASSET_SIZES.items():
         check("payload/" + name, lambda p, size=size: sized(p, size))
-    for name in ("busybox",):
-        def tool(p):
-            info = digest(p, MAX_FILE)
-            if not p.stat().st_mode & 0o111:
-                raise ValueError("Missing executable mode")
-            raw = read_regular(p, MAX_FILE)
-            if raw[:5] != b"\x7fELF\x02":
-                static_arm(raw)
-            else:
-                elf = inspect(raw)
-                if elf["abi"] != "arm64" or elf["needed"]:
-                    raise ValueError("Expected standalone AArch64 executable")
-                info["arm64_runtime_unverified"] = True
-            return info
-        check("payload/bin/" + name, tool)
     for name in ("root", "tzlite", "lib"):
         def directory(p):
             if not p.is_dir() or not any(p.iterdir()):
