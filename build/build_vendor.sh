@@ -169,6 +169,21 @@ copy_hidl_group() {
     printf '  %s\n' "$@" >&2
     return 2
 }
+# Candidate Wi-Fi HIDL 1.0 profile: keep service, supplicant and init files
+# from one donor. Transitive system/VNDK dependencies still need validation.
+copy_hidl_group wifi \
+    ./bin/hw/android.hardware.wifi@1.0-service \
+    ./etc/init/android.hardware.wifi@1.0-service.rc \
+    ./bin/hw/wpa_supplicant \
+    ./etc/init/wpa_supplicant.rc \
+    ./lib/android.hardware.wifi@1.0.so \
+    ./lib/android.hardware.wifi.supplicant@1.0.so
+for binary in "$OUT/bin/hw/android.hardware.wifi@1.0-service" \
+              "$OUT/bin/hw/wpa_supplicant"; do
+    llvm-readelf -h "$binary" | grep -Eq 'Class:[[:space:]]*ELF32'
+    llvm-readelf -h "$binary" | grep -Eq 'Machine:[[:space:]]*ARM'
+    llvm-readelf -d "$binary" >> "$WORK/hidl-dependencies.txt"
+done
 copy_hidl_group sensors \
     ./bin/hw/android.hardware.sensors@1.0-service \
     ./lib/hw/android.hardware.sensors@1.0-impl.so \
