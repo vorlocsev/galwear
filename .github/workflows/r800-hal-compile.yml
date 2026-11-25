@@ -1,0 +1,38 @@
+name: SM-R800 legacy Android HAL compile (non-release)
+
+on:
+  push:
+    branches:
+      - "development/r800-android-linker-audit-20261125"
+    paths:
+      - ".github/workflows/r800-hal-compile.yml"
+      - "build/r800_build_hals.sh"
+      - "src/hal/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arm32-hal-compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Android NDK r27c
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+      - name: Compile Android API 28 ARM32 HALs
+        run: |
+          sh -n build/r800_build_hals.sh
+          sh build/r800_build_hals.sh "$ANDROID_HOME/ndk/27.2.12479018" "$RUNNER_TEMP/r800-hal"
+      - name: Upload compiler and ELF evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-hal-evidence-only
+          path: |
+            ${{ runner.temp }}/r800-hal/*.elf.txt
+            ${{ runner.temp }}/r800-hal/toolchain.txt
+          if-no-files-found: warn
+          retention-days: 7
