@@ -1002,3 +1002,42 @@ direct service runner repeats the audit. Nine regression tests
 are added to lightweight CI. Full CI, actual Android libraries,
 Bionic relocations, AOSP compilation and guest execution remain
 unverified. No stub-exclusion or flash acceptance claim.
+
+
+## Binary AArch64 relocation structure audit
+
+The selected ELF ABI inspection now also decodes ordinary RELA,
+PLT RELA, Android APS2 packed RELA, and both standard and Android
+RELR encodings directly from PT_DYNAMIC and PT_LOAD, independent
+of section names and GNU readelf's packed relocation support.
+The Android 11 r48 linker_reloc_iterators.h and linker.cpp define
+the grouping flags, running addend and RELR bitmap semantics.
+The diagnostic decoder is intentionally conservative: bounded
+SLEB128, nonzero bounded groups, exact stream consumption, unique
+file-backed table mappings, supported relocation types, dynsym
+index bounds, and nonoverlapping write targets entirely within
+writable non-executable PT_LOAD segments. It rejects unsupported
+REL, COPY, text relocations and conflicting relocation encodings.
+It never applies a relocation. Some legal but unusual ELF layouts
+may be rejected by these diagnostic restrictions.
+
+Actual native host check: the tested Python module's Git blob
+d43a14f725a16fa1359a0f31608b7184c7da7b3a matches the repository
+blob. Clang/LLD cross-compiled four freestanding AArch64 Android
+API 30 ELF files, and GNU readelf supplied their dynamic symbol
+counts. The module decoded exactly five relocations in every case:
+none (four RELA RELATIVE, one RELA ABS64), android (four APS2
+RELATIVE, one APS2 ABS64), relr (four RELR RELATIVE, one RELA ABS64),
+and android+relr (four RELR RELATIVE, one APS2 ABS64).
+These four actual decoder smoke checks passed. No ELF was executed.
+The new nine-case regression suite, including these four encodings
+in its cross-target test, is wired into CI but the full suite and
+actual AOSP disk image audit have not been executed here.
+
+The ABI report includes structural counters per selected object.
+Successful decoding does not prove runtime relocation arithmetic,
+symbol resolution, IFUNC/TLS behavior, ABI compatibility or stub
+exclusion. API stubs can have plausible dynamic symbol tables.
+The latter requires independently bound implementation build
+provenance and/or runtime behavioral evidence, not a heuristic
+that declares an ELF non-stub because it has relocations.
