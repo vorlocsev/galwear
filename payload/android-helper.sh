@@ -1,7 +1,7 @@
 #!/oem/r800dev/bin/busybox sh
 # SM-R800 Wear OS helper. Runs under Android's init as service r800helper (root).
 # Only static busybox and absolute paths. Keeps the board alive and adds what the
-# images lack: swap, GPU clock, Wi-Fi with a root telnet shell, one-time setup.
+# images lack: swap, GPU clock, Wi-Fi support, one-time setup.
 B=/oem/r800dev/bin/busybox
 k() { echo "<6>r800: $*" > /dev/kmsg; }
 # Bounded boot-stage observation; no service starts, property writes or IPC probes.
