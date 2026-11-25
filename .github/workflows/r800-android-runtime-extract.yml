@@ -16,6 +16,10 @@ on:
       - build/r800_android_init_rootfs.py
       - build/r800_android_rootfs_preflight.py
       - build/r800_android_sepolicy_audit.py
+      - build/r800_aosp_galwear_policy_build.sh
+      - build/r800_galwear_policy_fixture.py
+      - src/android/sepolicy/**
+      - tests/test_galwear_policy_fixture.py
       - build/r800_android_file_contexts.py
       - build/r800_aosp_selinux_transition_build.sh
       - build/r800_qemu_selinux_transition.py
@@ -67,6 +71,8 @@ jobs:
           bash -n build/r800_aosp_property_info.sh
           bash -n build/r800_aosp_init_service_build.sh
           bash -n build/r800_aosp_sepolicy_build.sh
+          bash -n build/r800_aosp_galwear_policy_build.sh
+          python3 -m unittest discover -s tests -p 'test_galwear_policy_fixture.py' -v
           bash -n build/r800_aosp_selinux_transition_build.sh
           python3 -m unittest discover -s tests -p 'test_qemu_selinux_transition.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_rootfs_relabel.py' -v
