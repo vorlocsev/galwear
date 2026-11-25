@@ -72,11 +72,11 @@ def inventory(a):
     return policy,disks
 
 
-def disk_archive(binary, disks):
+def disk_archive(binary, disks, extra_entries=()):
     data = "".join(d["name"]+" "+d["manifest_slot"]+"\n" for d in disks).encode("ascii")
     return newc([(p,(0o040755,b"",0,0)) for p in ("dev","proc","sys","data")]+[
         ("dev/console",(0o020600,b"",5,1)),("init",(0o100755,binary,0,0)),
-        ("galwear-disks.list",(0o100400,data,0,0))])
+        ("galwear-disks.list",(0o100400,data,0,0))]+list(extra_entries))
 
 
 def command(image,archive,disks):
@@ -90,7 +90,7 @@ def command(image,archive,disks):
     return args
 
 
-def inspect_console(log, disks):
+def inspect_console(log, disks, allow_label_probe=False):
     lines = log.replace(b"\r\n",b"\n").splitlines()
     markers = [PREFIX+d["name"].encode()+b" serial=PASS block-ro=1 ext4-ro=1" for d in disks]
     markers += [PREFIX+f"PASS count={len(disks)} policy=not-loaded android=not-started".encode()]
@@ -103,13 +103,15 @@ def inspect_console(log, disks):
         raise ValueError("Heartbeat before disk diagnostics")
     if any(line.startswith((b"r800-property-service:",b"r800-transition:",b"r800-relabel:")) for line in lines):
         raise ValueError("Unexpected Android diagnostics")
+    if not allow_label_probe and any(line.startswith(b"r800-disk-label:") for line in lines):
+        raise ValueError("Unexpected loaded-policy diagnostics")
     return {"block_read_only_reported":True,"ext4_read_only_reported":True,
             "disk_serials_verified":True,"mounted_disk_count":len(disks),
             "selinux_policy_loaded":False,"guest_selinux_labels_verified":False,
             "android_init_started":False,"property_service_started":False}
 
 
-def run(a):
+def run(a, *, expected_inventory=None, extra_entries=(), label_parser=None):
     kernel_sha = verify_baseline(a.baseline,a.kernel)
     cfg = read_bounded_json(a.config_evidence)
     if (cfg.get("status") != "VIRT_CONFIG_STATIC_ONLY" or cfg.get("profile") != "block"
@@ -117,6 +119,8 @@ def run(a):
             or cfg.get("virtio_block_profile") is not True or cfg.get("safe_to_flash") is not False):
         raise ValueError("Matching separate block profile required")
     policy,disks = inventory(a)
+    if expected_inventory is not None and (policy,disks) != expected_inventory:
+        raise ValueError("Disk inventory changed since label audit")
     init = validate_init(a.init)
     spec = read_bounded_json(a.compile_evidence)
     if spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != init:
@@ -124,7 +128,7 @@ def run(a):
     binary = snapshot(a.init,2*1024*1024)
     if sha(binary) != init["sha256"]:
         raise ValueError("Probe changed")
-    archive = disk_archive(binary,disks)
+    archive = disk_archive(binary,disks,extra_entries)
     raw = kernel_bytes(a.kernel)
     if sha(raw) != kernel_sha:
         raise ValueError("Kernel changed")
@@ -158,8 +162,14 @@ def run(a):
         raise ValueError("Kernel changed during boot")
     for d in disks:
         verify_image(d["path"],d["name"],d["sha256"],d["bytes"])
-    return {**observed,**inspect_console(log.read_bytes(),disks),
-            "status":"VIRT_ANDROID_READONLY_BLOCK_MOUNTS_ONLY",
+    console = log.read_bytes()
+    evidence = inspect_console(console,disks,allow_label_probe=label_parser is not None)
+    status = "VIRT_ANDROID_READONLY_BLOCK_MOUNTS_ONLY"
+    if label_parser is not None:
+        evidence.update(label_parser(console,disks))
+        status = "VIRT_ANDROID_PRELABELED_MOUNTS_ONLY"
+    return {**observed,**evidence,
+            "status":status,
             "generic_kernel_sha256":kernel_sha,"config_sha256":cfg["config_sha256"],
             "policy_sha256":policy,"archive_sha256":sha(archive),"init_sha256":init["sha256"],
             "disks":[{**d,"path":str(d["path"])} for d in disks],
