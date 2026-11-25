@@ -51,6 +51,7 @@ on:
       - build/r800_android_apex_payload.py
       - tests/test_android_context_partitions.py
       - tests/test_android_system_ext4.py
+      - tests/test_real_ext4_tools.py
       - build/r800_qemu_system_init.py
       - tests/test_rootfs_relabel_policy_gate.py
       - tests/test_property_pipeline.py
@@ -95,7 +96,7 @@ jobs:
       - name: Install filesystem inspection tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends e2fsprogs android-sdk-libsparse-utils gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          sudo apt-get install -y --no-install-recommends e2fsprogs selinux-utils android-sdk-libsparse-utils gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Verify exact commit and execute synthetic tests
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -111,6 +112,8 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_property_pipeline.py' -v
           python3 -m unittest discover -s tests -p 'test_rootfs_relabel_policy_gate.py' -v
           python3 -m unittest discover -s tests -p 'test_android_system_ext4.py' -v
+          command -v matchpathcon
+          python3 -m unittest discover -s tests -p 'test_real_ext4_tools.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_readonly_disks.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_block_smoke.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_prelabeled_mounts.py' -v
