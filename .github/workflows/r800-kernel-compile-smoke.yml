@@ -28,11 +28,13 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Validate compile recipe only
+        id: recipe
         run: |
           sh -n build/r800_kernel_compile_smoke.sh
           python3 -m unittest discover -s tests -p 'test_kernel_compile_recipe.py' -v
 
       - name: Fetch exact public kernel base and verify patch before any writes
+        id: source
         run: |
           sh build/r800_aosp_source_probe.sh \
             "$GITHUB_WORKSPACE" \
@@ -40,6 +42,7 @@ jobs:
             "$RUNNER_TEMP/r800-source-preflight.json"
 
       - name: Expand scratch source tree for compilation
+        id: expand
         run: |
           git -C "$RUNNER_TEMP/combined-exynos-src" sparse-checkout disable
           test "$(git -C "$RUNNER_TEMP/combined-exynos-src" rev-parse HEAD)" = \
@@ -47,6 +50,7 @@ jobs:
           git -C "$RUNNER_TEMP/combined-exynos-src" status --porcelain
 
       - name: Compile Image with Alpine clang 19.1.4 (NO embedded initramfs)
+        id: compile
         run: |
           docker run --rm --pull=always \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
@@ -63,6 +67,7 @@ jobs:
             '
 
       - name: Verify ABOX and compat PCM actually built
+        id: audio
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/compiled-kernel"
@@ -73,10 +78,52 @@ jobs:
           test -s "$out/sound/core/snd-pcm.o"
           test -s "$out/arch/arm64/boot/Image"
 
+      - name: Verify AArch64 ELF and raw Linux Image header
+        id: arm64
+        run: |
+          python3 - "$RUNNER_TEMP/compiled-kernel" <<'PY'
+          from pathlib import Path
+          import struct
+          import sys
+
+          out = Path(sys.argv[1])
+          with (out / "vmlinux").open("rb") as stream:
+              elf = stream.read(64)
+          if len(elf) != 64 or elf[:4] != b"\x7fELF" or elf[4:7] != b"\x02\x01\x01":
+              raise SystemExit("vmlinux is not a little-endian ELF64 image")
+          if struct.unpack_from("<H", elf, 18)[0] != 183:
+              raise SystemExit("vmlinux e_machine is not AArch64")
+
+          image = out / "arch/arm64/boot/Image"
+          with image.open("rb") as stream:
+              header = stream.read(64)
+          if len(header) != 64 or header[56:60] != b"ARM\x64":
+              raise SystemExit("Missing Linux ARM64 Image magic")
+          text_offset, image_size, flags = struct.unpack_from("<QQQ", header, 8)
+          if not image_size or flags & 1:
+              raise SystemExit("Invalid image size or unexpected big-endian Image")
+          print(f"PASS: AArch64 ELF and Linux Image header; text_offset={text_offset:#x}, image_size={image_size}, flags={flags:#x}, file_size={image.stat().st_size}")
+          PY
+
       - name: Record evidence only, never upload compiled Image
         if: always()
+        env:
+          RECIPE_OUTCOME: ${{ steps.recipe.outcome }}
+          SOURCE_OUTCOME: ${{ steps.source.outcome }}
+          EXPAND_OUTCOME: ${{ steps.expand.outcome }}
+          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
+          AUDIO_OUTCOME: ${{ steps.audio.outcome }}
+          ARM64_OUTCOME: ${{ steps.arm64.outcome }}
         run: |
           {
+            printf 'recipe=%s\nsource=%s\nexpand=%s\ncompile=%s\naudio=%s\narm64=%s\n' \
+              "$RECIPE_OUTCOME" "$SOURCE_OUTCOME" "$EXPAND_OUTCOME" \
+              "$COMPILE_OUTCOME" "$AUDIO_OUTCOME" "$ARM64_OUTCOME"
+            if [ "$RECIPE_OUTCOME/$SOURCE_OUTCOME/$EXPAND_OUTCOME/$COMPILE_OUTCOME/$AUDIO_OUTCOME/$ARM64_OUTCOME" = success/success/success/success/success/success ]; then
+              echo "integrated_kernel_smoke=pass"
+            else
+              echo "integrated_kernel_smoke=not_passed"
+            fi
             echo "galwear_commit=$GITHUB_SHA"
             echo "run_id=$GITHUB_RUN_ID"
             echo "run_attempt=$GITHUB_RUN_ATTEMPT"
@@ -93,6 +140,7 @@ jobs:
             echo "device_contacted=false"
             echo "image_published=false"
             if [ -s "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image" ]; then
+              echo "image_available=true"
               sha256sum "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image"
             else
               echo "image_available=false"
