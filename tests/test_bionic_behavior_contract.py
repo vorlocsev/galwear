@@ -27,7 +27,8 @@ class BionicContractTests(unittest.TestCase):
                         a.inspect(LOG.replace(marker,replacement))
 
     def test_wrong_order(self):
-        self.assertRaises(ValueError,a.inspect,LOG.replace(a.MEMORY,a.TLS).replace(a.TLS,a.MEMORY,1))
+        raw=b"\n".join([a.DOMAIN,a.TLS,a.MEMORY,*a.markers(PROVIDER)[2:],a.FIRST_SET])
+        self.assertRaises(ValueError,a.inspect,raw)
 
     def test_bad_provider(self):
         with self.assertRaises(ValueError):
