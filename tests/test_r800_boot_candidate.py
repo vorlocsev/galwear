@@ -37,6 +37,23 @@ def kernel(size=64):
 
 
 class BootCandidateTests(unittest.TestCase):
+    def test_dtb_component_evidence_without_template(self):
+        report = boot.component_evidence(dtb())
+        self.assertEqual(report["status"], "DTB_STRUCTURE_ONLY")
+        self.assertEqual(report["dtb_nodes"], 1)
+        self.assertFalse(report["template_verified"])
+        self.assertFalse(report["safe_to_flash"])
+
+    def test_compiled_component_minimum_budget(self):
+        report = boot.component_evidence(dtb(), kernel())
+        self.assertEqual(report["minimum_container_bytes"],
+                         boot.HEADER * 2 + boot.DT_OFFSET + boot.DT_SIZE + boot.SIG)
+        self.assertFalse(report["partition_size_verified"])
+
+    def test_compiled_component_overflow(self):
+        with self.assertRaisesRegex(ValueError, "partition budget"):
+            boot.component_evidence(dtb(), kernel(boot.PARTITION))
+
     def test_valid_roundtrip(self):
         ref = template()
         out = boot.build(kernel(), dtb(), ref)
