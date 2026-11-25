@@ -10,7 +10,7 @@ from pathlib import Path
 from r800_storage_isolation import parse
 from r800_initramfs_spec import validate_init
 
-REQUIRED = ("ARM64", "ARM64_4K_PAGES", "ARM_AMBA", "ARM_GIC_V3",
+REQUIRED = ("SMP", "ARM64", "ARM64_4K_PAGES", "ARM_AMBA", "ARM_GIC_V3",
             "ARM_ARCH_TIMER", "ARM_PSCI_FW", "ARCH_VEXPRESS", "PRINTK",
             "TTY", "SERIAL_AMBA_PL011", "SERIAL_AMBA_PL011_CONSOLE",
             "BINFMT_ELF", "BLK_DEV_INITRD", "INITRAMFS_COMPRESSION_NONE")
@@ -26,12 +26,14 @@ def inspect(text: str, source: str) -> dict:
     for key in FORBIDDEN:
         if config.get("CONFIG_" + key, "n") != "n":
             raise ValueError("Unexpected enabled CONFIG_" + key)
+    if config.get("CONFIG_NR_CPUS") != "2":
+        raise ValueError("Virt config must allow exactly two CPUs")
     if config.get("CONFIG_INITRAMFS_SOURCE") != '"' + source + '"':
         raise ValueError("Embedded list changed")
     if config.get("CONFIG_CMDLINE") != '""':
         raise ValueError("Unexpected built-in command line")
     return {"status": "VIRT_CONFIG_STATIC_ONLY", "required": list(REQUIRED),
-            "disabled": list(FORBIDDEN),
+            "disabled": list(FORBIDDEN), "nr_cpus": 2,
             "config_sha256": hashlib.sha256(text.encode()).hexdigest(),
             "r800_hardware_config": False, "safe_to_flash": False}
 
