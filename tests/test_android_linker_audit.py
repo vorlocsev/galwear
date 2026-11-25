@@ -2009,6 +2009,68 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["input_inventory"]["touch_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def audio_fixture(self):
+        self.put("init.rc", b"service audioserver /system/bin/audioserver\n")
+        self.put_art_executable("system/bin/audioserver", "arm")
+        self.put("vendor/lib/hw/audio.primary.exynos.so", fixture("arm"))
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"><hal format="hidl"><name>android.hardware.audio</name><fqname>@6.0::IDevicesFactory/default</fqname></hal></manifest>')
+        self.put("vendor/etc/audio_policy_configuration.xml", b'<audioPolicyConfiguration><modules><module name="primary"><mixPorts><mixPort name="out" role="source"/><mixPort name="in" role="sink"/></mixPorts><devicePorts><devicePort tagName="Speaker" type="AUDIO_DEVICE_OUT_SPEAKER" role="sink"/><devicePort tagName="Mic" type="AUDIO_DEVICE_IN_BUILTIN_MIC" role="source"/></devicePorts><routes><route sink="Speaker" sources="out"/><route sink="in" sources="Mic"/></routes></module></modules></audioPolicyConfiguration>')
+
+    def inspect_audio(self, kernel=None):
+        return audit.r800_audio_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel)
+
+    def test_audio_static_policy_and_hal(self):
+        self.audio_fixture()
+        out = self.inspect_audio({"CONFIG_SND_SOC": "y"})
+        self.assertEqual(out["status"], "STATIC_AUDIO_INVENTORY_ONLY")
+        self.assertTrue(out["speaker_port_declared"])
+        self.assertTrue(out["microphone_port_declared"])
+        self.assertEqual(out["kernel_config"]["CONFIG_SND_SOC"], "y")
+        self.assertFalse(out["speaker_playback_verified"])
+
+    def test_audio_unresolved_route_and_include(self):
+        raw = b'<audioPolicyConfiguration xmlns:xi="http://www.w3.org/2001/XInclude"><modules><module name="primary"><routes><route sink="Speaker" sources="out"/></routes><xi:include href="ports.xml"/></module></modules></audioPolicyConfiguration>'
+        out = audit.r800_audio_inventory.parse_config(raw)
+        self.assertEqual(out["includes"], ["ports.xml"])
+        self.assertEqual(out["routes"][0]["unresolved_ports"], ["Speaker", "out"])
+
+    def test_audio_mixer_inventory(self):
+        out = audit.r800_audio_inventory.parse_config(b'<mixer><path name="speaker"><ctl name="Switch" value="1"/><path name="common"/></path></mixer>')
+        self.assertEqual(out["mixer_paths"][0]["controls"], 1)
+        self.assertEqual(out["mixer_paths"][0]["references"], ["common"])
+
+    def test_audio_wrong_primary_abi(self):
+        self.audio_fixture()
+        self.put("vendor/lib/hw/audio.primary.exynos.so", fixture("arm64"))
+        out = self.inspect_audio()
+        self.assertEqual(out["primary_candidates"], [])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_audio_dt_codec_disabled_parent(self):
+        nodes = {"/": {}, "/sound": {"status": b"disabled\0"},
+                 "/sound/codec": {"compatible": b"fixture,audio-codec\0", "sound-dai": b"\0\0\0\1"}}
+        out = audit.r800_audio_inventory.dt_inventory(nodes)
+        self.assertFalse(out[1]["enabled"])
+        self.assertEqual(out[1]["link_properties"], ["sound-dai"])
+
+    def test_audio_alsa_snapshot_fake_pcm(self):
+        self.audio_fixture()
+        self.put("proc/asound/cards", b"0 [fixture]: fixture\n")
+        self.put("dev/snd/pcmC0D0p", b"fake")
+        out = self.inspect_audio()
+        self.assertIn("/proc/asound/cards", out["alsa_snapshots"])
+        self.assertFalse(out["device_nodes"]["/dev/snd/pcmC0D0p"])
+        self.assertFalse(out["alsa_runtime_verified"])
+
+    def test_audio_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["audio_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["audio_inventory"]["microphone_capture_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
