@@ -357,6 +357,40 @@ def apex_zip(path, manifest=None, aligned=True, ext4=True, compressed=False):
         z.writestr("apex_pubkey", b"key")
 
 
+def avb_fixture(case=None):
+    import hashlib
+    key = struct.pack(">II", 2048, 0) + bytes(512)
+    body = (struct.pack(">IQQQIIIQQ", 1, 4096, 4096, 4096, 4096, 4096, 0, 0, 0)
+            + b"sha256".ljust(32, b"\0") + struct.pack(">IIII", 0, 0, 32, 0)
+            + bytes(60) + bytes(32))
+    if case == "geometry":
+        body = bytearray(body)
+        struct.pack_into(">Q", body, 12, 32768)
+        body = bytes(body)
+    body += bytes((-len(body)) % 8)
+    descriptor = struct.pack(">QQ", 1, len(body)) + body
+    if case == "descriptor":
+        descriptor = struct.pack(">QQ", 1, 9999) + body
+    aux = key + descriptor
+    aux += bytes((-len(aux)) % 64)
+    header = bytearray(256)
+    header[:4] = b"AVB0"
+    struct.pack_into(">IIQQI", header, 4, 1, 0, 320, len(aux), 1)
+    struct.pack_into(">11QII", header, 32, 0, 32, 32, 256, 0, len(key),
+                     0, 0, len(key), len(descriptor), 0, 0, 0)
+    if case == "block":
+        struct.pack_into(">Q", header, 64, len(aux) + 1)
+    digest = hashlib.sha256(header + aux).digest()
+    if case == "digest":
+        digest = bytes(32)
+    blob = bytes(header) + digest + bytes(288) + aux
+    footer = b"AVBf" + struct.pack(">IIQQQ", 1, 0, 4096,
+                                   999999 if case == "footer" else 8192, len(blob)) + bytes(28)
+    payload = bytes(8192) + blob
+    payload += bytes(16384 - 64 - len(payload)) + footer
+    return payload, key
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -1122,6 +1156,60 @@ class LinkerTests(unittest.TestCase):
         apex_zip(path, manifest=b"\x10\x01")
         with self.assertRaises(ValueError):
             audit.r800_apex_inventory.package_inventory(path)
+
+    def test_avb_footer_vbmeta_and_hashtree(self):
+        import io
+        payload, key = avb_fixture()
+        out = audit.r800_apex_inventory.r800_avb_inventory.inspect(io.BytesIO(payload), 0, len(payload), key)
+        self.assertEqual(out["status"], "AVB_STRUCTURE_ONLY")
+        self.assertTrue(out["vbmeta_digest_matches"])
+        self.assertTrue(out["package_key_matches"])
+        self.assertEqual(out["descriptors"][0]["tree_bytes"], 4096)
+        self.assertFalse(out["signature_verified"])
+        self.assertFalse(out["hashtree_verified"])
+
+    def test_avb_digest_or_key_mismatch_requires_review(self):
+        import io
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        payload, key = avb_fixture("digest")
+        out = avb.inspect(io.BytesIO(payload), 0, len(payload), key)
+        self.assertFalse(out["vbmeta_digest_matches"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        payload, _ = avb_fixture()
+        out = avb.inspect(io.BytesIO(payload), 0, len(payload), b"other")
+        self.assertFalse(out["package_key_matches"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_avb_invalid_footer_and_block_bounds(self):
+        import io
+        for case in ("footer", "block"):
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                payload, key = avb_fixture(case)
+                audit.r800_apex_inventory.r800_avb_inventory.inspect(
+                    io.BytesIO(payload), 0, len(payload), key)
+
+    def test_avb_invalid_descriptor_and_geometry(self):
+        import io
+        for case in ("descriptor", "geometry"):
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                payload, key = avb_fixture(case)
+                audit.r800_apex_inventory.r800_avb_inventory.inspect(
+                    io.BytesIO(payload), 0, len(payload), key)
+
+    def test_avb_payload_relative_offset(self):
+        import io
+        payload, key = avb_fixture()
+        out = audit.r800_apex_inventory.r800_avb_inventory.inspect(
+            io.BytesIO(b"prefix" + payload + b"suffix"), 6, len(payload), key)
+        self.assertTrue(out["footer_present"])
+        self.assertEqual(out["vbmeta_offset"], 8192)
+
+    def test_apex_package_without_footer_not_verified(self):
+        path = self.root / "unsigned.apex"
+        apex_zip(path)
+        out = audit.r800_apex_inventory.package_inventory(path)
+        self.assertFalse(out["avb"]["footer_present"])
+        self.assertEqual(out["avb"]["status"], "REVIEW_REQUIRED")
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
