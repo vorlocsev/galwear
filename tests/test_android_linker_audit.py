@@ -1769,6 +1769,57 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["binder_inventory"]["service_registration_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def vintf_fixture(self, optional=False, instance="default"):
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device" version="1.0" target-level="5"><hal format="hidl"><name>android.hardware.graphics.composer</name><transport>hwbinder</transport><fqname>@2.2::IComposer/default</fqname></hal></manifest>')
+        matrix = ('<compatibility-matrix type="framework" version="1.0" level="5"><hal format="hidl" optional="' +
+                  ("true" if optional else "false") + '"><name>android.hardware.graphics.composer</name><version>2.1-3</version><interface><name>IComposer</name><instance>' +
+                  instance + '</instance></interface></hal></compatibility-matrix>')
+        self.put("system/etc/vintf/compatibility_matrix.5.xml", matrix.encode())
+
+    def test_vintf_literal_hidl_range(self):
+        self.vintf_fixture()
+        out = audit.r800_vintf_inventory.audit(self.root)
+        self.assertEqual(out["status"], "LITERAL_INVENTORY_ONLY")
+        self.assertEqual(out["comparisons"][0]["status"], "LITERAL_MATCH")
+        self.assertFalse(out["vintf_compatibility_verified"])
+
+    def test_vintf_missing_required_instance(self):
+        self.vintf_fixture(instance="missing")
+        out = audit.r800_vintf_inventory.audit(self.root)
+        self.assertEqual(out["comparisons"][0]["status"], "NO_LITERAL_MATCH")
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_vintf_missing_optional_instance(self):
+        self.vintf_fixture(optional=True, instance="missing")
+        out = audit.r800_vintf_inventory.audit(self.root)
+        self.assertEqual(out["comparisons"][0]["status"], "OPTIONAL_NOT_FOUND")
+
+    def test_vintf_aidl_fqname(self):
+        raw = b'<manifest type="device"><hal format="aidl"><name>android.hardware.vibrator</name><version>2</version><fqname>IVibrator/default</fqname></hal></manifest>'
+        doc = audit.r800_vintf_inventory.parse(raw, "fixture")
+        self.assertEqual(doc["entries"][0]["version"], [0, 2, 2])
+        self.assertEqual(doc["entries"][0]["interface"], "IVibrator")
+
+    def test_vintf_regex_and_override_require_review(self):
+        raw = b'<manifest type="device"><hal override="true"><name>android.hardware.foo</name><version>1.0</version><interface><name>IFoo</name><regex-instance>.*</regex-instance></interface></hal></manifest>'
+        doc = audit.r800_vintf_inventory.parse(raw, "fixture")
+        self.assertEqual(len(doc["review"]), 2)
+        self.assertEqual(doc["entries"], [])
+
+    def test_vintf_invalid_xml_and_ranges(self):
+        vintf = audit.r800_vintf_inventory
+        with self.assertRaises(ValueError):
+            vintf.parse(b'<!DOCTYPE x><manifest type="device"/>', "fixture")
+        with self.assertRaises(ValueError):
+            vintf.version_range("2.3-1", "hidl")
+
+    def test_vintf_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["vintf_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["vintf_inventory"]["hal_registration_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
