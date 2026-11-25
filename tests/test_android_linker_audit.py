@@ -2142,6 +2142,74 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["bluetooth_inventory"]["hci_transport_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def wifi_fixture(self):
+        self.put("init.rc", b"service vendor.wifi /vendor/bin/hw/wifi-service\n"
+                 b"    interface android.hardware.wifi@1.0::IWifi default\n"
+                 b"service wpa_supplicant /vendor/bin/hw/wpa_supplicant\n")
+        self.put_art_executable("vendor/bin/hw/wifi-service", "arm")
+        self.put_art_executable("vendor/bin/hw/wpa_supplicant", "arm")
+        self.put("vendor/lib/libwifi-hal.so", fixture("arm"))
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"><hal format="hidl"><name>android.hardware.wifi</name><fqname>@1.0::IWifi/default</fqname></hal><hal format="hidl"><name>android.hardware.wifi.supplicant</name><fqname>@1.0::ISupplicant/default</fqname></hal></manifest>')
+        self.put("vendor/firmware/brcm/brcmfmac-test.bin", b"synthetic")
+        self.put("vendor/etc/wifi/wpa_supplicant.conf", b"update_config=1\nnetwork={\nssid=\"synthetic\"\npsk=\"fixture-only\"\n}\n")
+
+    def inspect_wifi(self, kernel=None, dtb=None):
+        return audit.r800_wifi_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel, dtb)
+
+    def test_wifi_static_candidates(self):
+        self.wifi_fixture()
+        out = self.inspect_wifi({"CONFIG_CFG80211": "y"})
+        self.assertEqual(len(out["hal_declarations"]), 2)
+        self.assertEqual(len(out["services"]), 2)
+        self.assertTrue(all(s["elf"] for s in out["services"]))
+        self.assertEqual(out["firmware_candidates"]["/vendor/firmware/brcm/brcmfmac-test.bin"]["bytes"], 9)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["network_verified"])
+
+    def test_wifi_config_excludes_network_secrets(self):
+        mod = audit.r800_wifi_inventory
+        out = mod.config_inventory(b"update_config=1\nctrl_interface=/private/path\nnetwork={\npsk=secret\n}\n")
+        self.assertEqual(out, {"update_config": "1", "ctrl_interface": "PRESENT"})
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            mod.config_inventory(b"ap_scan=1\nap_scan=2\n")
+
+    def test_wifi_dt_sdio_and_firmware(self):
+        nodes = {"/": {}, "/mmc@1000": {"compatible": b"samsung,mmc\0", "bus-width": struct.pack(">I", 4)},
+                 "/mmc@1000/wifi": {"compatible": b"brcm,bcm43xx\0", "firmware-name": b"fixture.bin\0"}}
+        out = audit.r800_wifi_inventory.dt_inventory(nodes)
+        self.assertTrue(out[0]["sdio_candidate"])
+        self.assertEqual(out[0]["bus_width"], 4)
+        self.assertTrue(out[1]["wlan_candidate"])
+        self.assertEqual(out[1]["firmware_names"], ["fixture.bin"])
+
+    def test_wifi_dt_disabled_parent(self):
+        nodes = {"/": {}, "/sdio": {"status": b"disabled\0"},
+                 "/sdio/wifi": {"compatible": b"fixture,wifi\0"}}
+        self.assertFalse(audit.r800_wifi_inventory.dt_inventory(nodes)[1]["enabled"])
+
+    def test_wifi_wrong_library_abi(self):
+        self.wifi_fixture()
+        self.put("vendor/lib/libwifi-hal.so", fixture("arm64"))
+        out = self.inspect_wifi()
+        self.assertIsNone(out["libraries"]["/vendor/lib/libwifi-hal.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_wifi_interface_snapshot_not_runtime_verification(self):
+        self.wifi_fixture()
+        self.put("sys/class/net/wlan0/operstate", b"up\n")
+        out = self.inspect_wifi()
+        self.assertEqual(out["interface_names_snapshot"], ["wlan0"])
+        self.assertFalse(out["association_verified"])
+
+    def test_wifi_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["wifi_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["wifi_inventory"]["sdio_transport_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
