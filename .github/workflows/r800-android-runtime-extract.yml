@@ -29,6 +29,8 @@ on:
       - build/r800_rootfs_relabel_policy_gate.py
       - build/r800_android_system_ext4.py
       - build/r800_qemu_readonly_disks.py
+      - build/r800_qemu_prelabeled_mounts.py
+      - tests/test_qemu_prelabeled_mounts.py
       - build/r800_qemu_virt_contract.py
       - src/kernel/qemu-virt-block.config
       - src/initramfs/virt-readonly-disks.c
@@ -99,8 +101,10 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_rootfs_relabel_policy_gate.py' -v
           python3 -m unittest discover -s tests -p 'test_android_system_ext4.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_readonly_disks.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_prelabeled_mounts.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/virt-readonly-disks.c -o "$RUNNER_TEMP/virt-disk-init"
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -DGALWEAR_LABEL_PROBE src/initramfs/virt-readonly-disks.c -o "$RUNNER_TEMP/virt-label-init"
           python3 -m unittest discover -s tests -p 'test_android_context_partitions.py' -v
           python3 -m unittest discover -s tests -p 'test_android_sepolicy_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_android_stock_policy.py' -v
