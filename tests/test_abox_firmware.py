@@ -8,7 +8,7 @@ PATCH = Path(__file__).resolve().parents[1] / "src/kernel/r800-wearos.patch"
 class AboxFirmwareTests(unittest.TestCase):
     def test_single_request_and_submission_failure(self):
         p = PATCH.read_text()
-        self.assertIn("+\tif (atomic_cmpxchg(&abox_fw_inflight, 0, 1))", p)
+        self.assertIn("atomic_cmpxchg(&abox_fw_inflight, 0, 1)", p)
         self.assertIn("+\tret = request_firmware_nowait(", p)
         self.assertIn("SRAM request submission failed", p)
         self.assertIn("atomic_inc_return(&abox_fw_retries)", p)
@@ -23,6 +23,15 @@ class AboxFirmwareTests(unittest.TestCase):
         self.assertIn("data->firmware_dram->size > DRAM_FIRMWARE_SIZE", part)
         self.assertIn("SZ_512 > data->sram_size - data->bootargs_offset", part)
         self.assertIn("return -EINVAL", part)
+
+    def test_dram_before_sram_publication_and_stop(self):
+        p = PATCH.read_text()
+        start = p.index("/* Publish SRAM only after DRAM")
+        end = p.index("smp_store_release(&data->firmware_sram, fw)", start)
+        self.assertIn("abox_request_firmware(dev, &data->firmware_dram", p[start:end])
+        self.assertIn("goto retry", p[start:end])
+        self.assertIn("cancel_delayed_work_sync(&abox_fw_retry_work)", p)
+        self.assertIn("wait_for_completion(&abox_fw_idle)", p)
 
     def test_poweroff_remains_explicit_opt_in(self):
         p = PATCH.read_text()
