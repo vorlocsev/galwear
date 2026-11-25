@@ -12,7 +12,7 @@ on:
       - "tests/test_cpio_audit.py"
       - "build/r800_initramfs_compile_smoke.sh"
       - "tests/test_initramfs_recipe.py"
-      - "src/initramfs/init.c"
+      - "src/initramfs/init-readonly.c"
   workflow_dispatch:
 
 permissions:
