@@ -16,6 +16,14 @@ static int mounted(const char *path, unsigned long magic)
     return statfs(path, &fs) == 0 && (unsigned long)fs.f_type == magic;
 }
 
+static int regular_mode(const char *path, mode_t permissions)
+{
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+           (st.st_mode & 07777) == permissions && st.st_uid == 0 &&
+           st.st_gid == 0 && st.st_size > 0;
+}
+
 int main(void)
 {
     if (getpid() != 1 || setvbuf(stdout, NULL, _IONBF, 0))
@@ -32,6 +40,10 @@ int main(void)
         return 2;
     puts("r800-rootfs: proc=PASS sys=PASS dev=PASS data=PASS");
     if (mkdir("/dev/socket", 0755) ||
+        !regular_mode("/system/etc/selinux/plat_property_contexts", 0644) ||
+        !regular_mode("/linkerconfig/ld.config.txt", 0644) ||
+        !regular_mode("/system/bin/galwear_property_client", 0755) ||
+        !regular_mode("/system/bin/galwear_property_service", 0755) ||
         access("/system/etc/selinux/plat_property_contexts", R_OK) ||
         access("/system/bin/galwear_property_client", X_OK) ||
         access("/system/bin/galwear_property_service", X_OK))
