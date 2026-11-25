@@ -62,7 +62,7 @@ def component_evidence(dtb, kernel=None):
               "dtb_nodes": len(nodes), "template_verified": False,
               "bootloader_verified": False, "safe_to_flash": False}
     if kernel is not None:
-        if not 64 <= len(kernel) <= PARTITION or kernel[56:60] != b"ARM\\x64":
+        if not 64 <= len(kernel) <= PARTITION or kernel[56:60] != b"ARM\x64":
             raise ValueError("Expected uncompressed ARM64 Linux Image")
         aligned = (len(kernel) + HEADER - 1) & ~(HEADER - 1)
         minimum = HEADER + aligned + DT_OFFSET + DT_SIZE + SIG
