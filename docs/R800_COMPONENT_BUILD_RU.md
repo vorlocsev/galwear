@@ -34,6 +34,24 @@ GPSBridge.o не является исполняемым GPSBridge.
 библиотеки Tizen и отдельный recovery ramdisk остаются необходимыми.
 Совместимость Wi-Fi с реальным драйвером ещё не подтверждена.
 
+## Сведение локальных входов payload
+
+После генерации ресурсов через src/tools/charger/mkassets.sh и извлечения
+радиофайлов из чистого Tizen ext4 через build/r800_extract_ext4.py:
+
+```sh
+python3 build/r800_prepare_payload_inputs.py \
+  --components "$WORK/components" --assets "$WORK/assets" \
+  --radio "$WORK/radio" --output "$WORK/partial-payload" \
+  --source-sha "$(git rev-parse HEAD)"
+```
+
+Проверяются точный SHA исходников, список обязательных собранных файлов,
+размеры, хеши, ELF и DEX. Отчёт payload-inputs-evidence.json указывает
+категорию источника каждого файла. Сценарий не создаёт прошивку, не копирует
+пользовательские данные и не принимает решение о совместимости доноров.
+Для проверки подлинности требуются независимые доказательства происхождения.
+
 ## Что ещё требуется
 
 - Чистые локальные образы Samsung combination, Wear OS system, base vendor и J4 vendor.
