@@ -102,16 +102,25 @@ def audit(root, targets=TARGETS):
             info = inspect(raw)
             if info["abi"] != "arm":
                 raise ValueError("Expected Tizen ARM32 ABI")
+            flags = struct.unpack_from("<I", raw, 36)[0]
+            if flags & 0x400:  # EF_ARM_ABI_FLOAT_HARD
+                raise ValueError("Hard-float ARM ELF incompatible with Tizen soft-float contract")
             interp = interpreter(raw)
             if info["custom_search_path"]:
                 problems.append({"path":guest,"reason":"RPATH/RUNPATH requires review"})
             files[canonical] = {"bytes":len(raw), "sha256":hashlib.sha256(raw).hexdigest(),
                                 "needed":info["needed"], "interpreter":interp,
+                                "elf_type":info["elf_type"], "has_dynamic":info["has_dynamic"],
+                                "soname":info["soname"], "arm_flags":flags,
                                 "version_needs":info["version_needs"],
                                 "version_definitions":info["version_definitions"]}
+            for need in info["version_needs"]:
+                if need["library"] not in info["needed"]:
+                    problems.append({"path":guest,"needed":need["library"],
+                                     "version":need["version"],"reason":"UNBOUND_VERSION_NEED"})
             if interp:
                 queue.append(interp)
-                edges.append({"from":guest,"needed":interp,"provider":interp})
+                edges.append({"from":guest,"needed":interp,"provider":interp,"kind":"interpreter"})
             for dep in info["needed"]:
                 if not re.fullmatch(r"[A-Za-z0-9_.+-]+", dep) or dep in (".",".."):
                     raise ValueError("Unsafe dependency name")
@@ -129,7 +138,7 @@ def audit(root, targets=TARGETS):
                                      "candidates":sorted(providers)})
                     continue
                 provider = next(iter(providers.values()))
-                edges.append({"from":guest,"needed":dep,"provider":provider})
+                edges.append({"from":guest,"needed":dep,"provider":provider,"kind":"library"})
                 queue.append(provider)
         except (OSError, ValueError) as exc:
             problems.append({"path":guest,"reason":str(exc)})
@@ -140,7 +149,18 @@ def audit(root, targets=TARGETS):
         provider = files.get(aliases.get(edge["provider"]))
         if source is None or provider is None:
             continue
-        supplied = {v["version"] for v in provider["version_definitions"]}
+        # Check the provider on every edge, even if its canonical file was
+        # already visited as an independent target or under another alias.
+        if provider["elf_type"] != "ET_DYN" or not provider["has_dynamic"]:
+            problems.append({"path":edge["from"],"needed":edge["needed"],
+                             "provider":edge["provider"],"reason":"INVALID_DYNAMIC_PROVIDER"})
+        if provider["interpreter"] is not None:
+            problems.append({"path":edge["from"],"needed":edge["needed"],
+                             "provider":edge["provider"],"reason":"PROVIDER_HAS_INTERPRETER"})
+        if edge["kind"] == "library" and provider["soname"] not in (None, edge["needed"]):
+            problems.append({"path":edge["from"],"needed":edge["needed"],
+                             "provider":edge["provider"],"reason":"SONAME_MISMATCH"})
+        supplied = {v["version"] for v in provider["version_definitions"] if not v["base"]}
         for need in source["version_needs"]:
             if need["library"] != edge["needed"]:
                 continue
