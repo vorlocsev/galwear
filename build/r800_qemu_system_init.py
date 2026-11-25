@@ -73,7 +73,17 @@ def kernel_bytes(path: Path) -> bytes:
     return raw
 
 
-def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path) -> dict:
+def verify_embedded(raw: bytes, archive: Path, binary: Path) -> dict:
+    evidence = inspect_cpio(archive, binary)
+    data = archive.read_bytes()
+    offset = raw.find(data)
+    if offset < 0 or raw.find(data, offset + 1) >= 0:
+        raise ValueError("Audited CPIO missing or ambiguous in virt Image")
+    return {**evidence, "image_offset": offset}
+
+
+def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
+        embedded_archive: Path | None = None) -> dict:
     elf = validate_init(binary)
     spec = json.loads(compile_evidence.read_text())
     if spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != elf:
@@ -82,9 +92,13 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path) -> dict:
     out.mkdir(exist_ok=False)
     image = out / "generic-Image"
     image.write_bytes(raw)
-    archive = out / "initramfs.cpio"
-    archive.write_bytes(create_archive(binary))
-    cpio = inspect_cpio(archive, binary)
+    if embedded_archive is None:
+        archive = out / "initramfs.cpio"
+        archive.write_bytes(create_archive(binary))
+        cpio = inspect_cpio(archive, binary)
+    else:
+        archive = embedded_archive
+        cpio = verify_embedded(raw, archive, binary)
     if cpio["embedded_init_sha256"] != elf["sha256"]:
         raise ValueError("Archive init hash mismatch")
     version = subprocess.run(["qemu-system-aarch64", "--version"], check=True,
@@ -94,9 +108,11 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path) -> dict:
         "-cpu", "cortex-a53", "-smp", "2", "-m", "512M",
         "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none",
         "-serial", "stdio", "-nic", "none",
-        "-kernel", str(image.resolve()), "-initrd", str(archive.resolve()),
+        "-kernel", str(image.resolve()),
         "-append", "console=ttyAMA0 rdinit=/init ro panic=-1",
     ]
+    if embedded_archive is None:
+        command += ["-initrd", str(archive.resolve())]
     timed_out = False
     log_path = out / "generic-console.log"
     with log_path.open("wb") as stream:
@@ -113,7 +129,9 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path) -> dict:
     if log_path.stat().st_size > 8 * 1024 * 1024:
         raise ValueError("Unexpectedly large virtual console log")
     observed = inspect_console(log_path.read_bytes(), timed_out)
-    return {"schema": SCHEMA, "status": "GENERIC_ARM64_PID1_BOOT_ONLY",
+    return {"schema": SCHEMA, "status": "VIRT_EMBEDDED_PID1_BOOT_ONLY" if embedded_archive else "GENERIC_ARM64_PID1_BOOT_ONLY",
+            "initramfs_mode": "embedded" if embedded_archive else "external",
+            "archive_image_offset": cpio.get("image_offset"),
             "generic_kernel_sha256": hashlib.sha256(raw).hexdigest(),
             "init_sha256": elf["sha256"], "archive_sha256": cpio["archive_sha256"],
             "qemu_version": version, **observed,
@@ -126,11 +144,12 @@ def main() -> int:
     p.add_argument("--init", required=True, type=Path)
     p.add_argument("--compile-evidence", required=True, type=Path)
     p.add_argument("--generic-kernel", required=True, type=Path)
+    p.add_argument("--embedded-archive", type=Path)
     p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--report", required=True, type=Path)
     a = p.parse_args()
     try:
-        report = run(a.init, a.compile_evidence, a.generic_kernel, a.out_dir)
+        report = run(a.init, a.compile_evidence, a.generic_kernel, a.out_dir, a.embedded_archive)
         rc = 0
     except (OSError, ValueError, subprocess.SubprocessError, IndexError, EOFError) as exc:
         report = {"schema": SCHEMA, "status": "REJECT", "reason": str(exc),
