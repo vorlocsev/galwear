@@ -174,3 +174,144 @@ def audit(root):
             "configs": configs, "errors": errors,
             "generated_config_present": CONFIGS[0] in configs,
             "runtime_resolution_verified": False, "safe_to_flash": False}
+
+
+MAX_SCOPE_STATES = 4096
+MAX_SCOPE_PROBES = 32768
+LIST_FILES = {
+    "llndk": ("/system/etc/llndk.libraries.txt",),
+    "vndk_core": ("/system/etc/vndkcore.libraries.txt",),
+    "vndk_sp": ("/system/etc/vndksp.libraries.txt",),
+}
+
+
+def library_lists(root):
+    """Optional legacy list evidence; absence is not proof of incompatibility."""
+    lists, errors = {}, []
+    for category, paths in LIST_FILES.items():
+        for path in paths:
+            try:
+                data = read_regular(guest_path(root, path), MAX_CONFIG).decode("utf-8")
+                names = set()
+                for line in data.splitlines():
+                    name = line.split("#", 1)[0].strip()
+                    if not name:
+                        continue
+                    if not LIB.fullmatch(name) or name in (".", ".."):
+                        raise ValueError("Unsupported library list entry")
+                    names.add(name)
+                    if len(names) > 8192:
+                        raise ValueError("Library list exceeds inspection limit")
+                lists[category] = {"path": path, "libraries": sorted(names)}
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError) as exc:
+                errors.append(path + ": " + str(exc))
+    return {"lists": lists, "errors": errors, "runtime_policy_verified": False}
+
+
+def section_for(config, executable):
+    matches = [(len(directory), section)
+               for section, dirs in config["directory_sections"].items()
+               for directory in dirs
+               if executable.startswith(directory.rstrip("/") + "/")]
+    if not matches:
+        return None
+    longest = max(length for length, _ in matches)
+    sections = {section for length, section in matches if length == longest}
+    return next(iter(sections)) if len(sections) == 1 else None
+
+
+def scope_candidates(root, inventory, seen, edges, targets):
+    """Match configured direct search paths against previously inspected ELF edges.
+
+    No runtime lookup order, global groups, dlopen, ASAN or APEX activation.
+    A file found outside the ELF graph is reported as uninspected, not accepted.
+    """
+    config = inventory["configs"].get(CONFIGS[0])
+    report = {"status": "REVIEW_REQUIRED", "roots": [], "checks": [],
+              "errors": [], "runtime_resolution_verified": False,
+              "legacy_library_lists": library_lists(root)}
+    if not config:
+        report["errors"].append("Generated linker configuration unavailable")
+        return report
+    probes = 0
+    pending = []
+    visited = set()
+    for target in targets:
+        info = seen.get(target)
+        if info is None:
+            report["errors"].append("Uninspected namespace root: " + target)
+            continue
+        parsed = config[info["abi"]]
+        section = section_for(parsed, target)
+        report["roots"].append({"path": target, "section": section})
+        if section is None or parsed["unsupported_properties"]:
+            report["errors"].append("Namespace section or properties require review: " + target)
+            continue
+        pending.append((info["abi"], section, "default", target))
+    while pending:
+        abi, section, namespace, path = pending.pop(0)
+        state = (abi, section, namespace, path)
+        if state in visited:
+            continue
+        if len(visited) >= MAX_SCOPE_STATES:
+            report["errors"].append("Namespace state limit exceeded")
+            break
+        visited.add(state)
+        spaces = config[abi]["sections"][section]
+        ns = spaces[namespace]
+        for dep, candidates in edges.get(path, {}).items():
+            allowed = [namespace]
+            denied = []
+            for dest in ns["links"]:
+                policy = ns["link_policies"].get(dest, {})
+                if policy.get("allow_all_shared_libs") or dep in policy.get("shared_libs", []):
+                    allowed.append(dest)
+                else:
+                    denied.append(dest)
+            known = {}
+            for candidate in candidates:
+                try:
+                    known[str(guest_path(root, candidate))] = candidate
+                except (OSError, ValueError):
+                    continue
+            found, uninspected = [], []
+            for dest in allowed:
+                other = spaces[dest]
+                for directory in other["search_paths"]:
+                    probes += 1
+                    if probes > MAX_SCOPE_PROBES:
+                        report["errors"].append("Namespace probe limit exceeded")
+                        return report
+                    guest = directory.rstrip("/") + "/" + dep
+                    try:
+                        resolved = str(guest_path(root, guest))
+                    except FileNotFoundError:
+                        continue
+                    except (OSError, ValueError) as exc:
+                        report["errors"].append(guest + ": " + str(exc))
+                        continue
+                    candidate = known.get(resolved)
+                    # Isolation and symlink realpath semantics need runtime evidence.
+                    if candidate is None or seen.get(candidate) is None:
+                        uninspected.append({"namespace": dest, "path": guest})
+                        continue
+                    item = {"namespace": dest, "path": guest, "elf_candidate": candidate}
+                    if item not in found:
+                        found.append(item)
+                    next_state = (abi, section, dest, candidate)
+                    if next_state not in visited and next_state not in pending:
+                        pending.append(next_state)
+            report["checks"].append({"from": path, "section": section, "namespace": namespace,
+                                     "needed": dep, "candidates": found,
+                                     "uninspected": uninspected, "denied_links": denied,
+                                     "status": "STATIC_CANDIDATE_ONLY" if len(found) == 1 and not uninspected
+                                     else "REVIEW_REQUIRED"})
+            if len(report["checks"]) >= MAX_SCOPE_PROBES:
+                report["errors"].append("Namespace report limit exceeded")
+                return report
+    if (report["roots"] and not report["errors"] and not report["legacy_library_lists"]["errors"]
+            and all(c["status"] == "STATIC_CANDIDATE_ONLY" for c in report["checks"])):
+        report["status"] = "STATIC_SCOPE_INVENTORY_ONLY"
+    return report
