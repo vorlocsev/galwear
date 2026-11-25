@@ -858,7 +858,9 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
     health_inventory = r800_health_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     power_inventory = r800_power_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     selinux_inventory = r800_selinux_inventory.audit(root, init_inventory, kernel_config)
+    linker_status = "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs or unsupported_symbol_objects or relocation_review_objects or resolution["missing_strong"] or resolution["ambiguous"] or resolution["incomplete"]) else "REVIEW_REQUIRED"
     integration = integration_summary({
+        "elf_linker": {"status": linker_status, "errors": errors},
         "namespace_inventory": namespace_inventory,
         "namespace_scope": namespace_scope,
         "apex_metadata": apex_metadata,
@@ -889,7 +891,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
             present = False
         apex[name] = {"expanded_tree_present": present}
     return {"schema": "galwear-r800-linker-inventory-v1",
-            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs or unsupported_symbol_objects or relocation_review_objects or resolution["missing_strong"] or resolution["ambiguous"] or resolution["incomplete"]) else "REVIEW_REQUIRED",
+            "status": linker_status,
             "objects": seen, "missing_candidates": unresolved, "ambiguous_candidates": ambiguous,
             "errors": errors, "unsupported_search_paths": unsupported_search_paths,
             "soname_mismatches": soname_mismatches,
