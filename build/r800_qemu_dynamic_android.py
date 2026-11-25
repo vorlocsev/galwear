@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import subprocess
 
-from r800_android_dynamic_audit import inventory, inspect_elf, RUNTIME, LIBS, MAX_ELF
+from r800_android_dynamic_audit import inventory, inspect_elf, runtime_file, RUNTIME, LIBS, MAX_ELF
 from r800_initramfs_spec import validate_init
 from r800_qemu_guest_abi import read_bounded_json
 from r800_qemu_system_init import kernel_bytes, observe_boot
@@ -63,6 +63,23 @@ def newc(entries: list[tuple[str, int, bytes, int, int]]) -> bytes:
             entries + [("TRAILER!!!", 0, b"", 0, 0)], 1):
         if "/" in name and name.rsplit("/", 1)[0] not in seen:
             raise ValueError("Archive parent missing")
+        if name in DIRS:
+            required = (0o040755, b"", 0, 0)
+        elif name == "dev/console":
+            required = (0o020600, b"", 5, 1)
+        elif name == "system/bin/linker64":
+            required = (0o120777, ALIAS.encode(), 0, 0)
+        elif name == "linkerconfig/ld.config.txt":
+            required = (0o100644, CONFIG, 0, 0)
+        elif name == "TRAILER!!!":
+            required = (0, b"", 0, 0)
+        else:
+            required = (0o100755 if name in ("init", PROBE_PATH, LINKER_PATH)
+                        else 0o100644, data, 0, 0)
+            if not data:
+                raise ValueError("Empty runtime executable or library")
+        if (mode, data, major, minor) != required:
+            raise ValueError("Unexpected dynamic archive mode or payload: " + name)
         seen.add(name)
         pathname = name.encode("ascii") + b"\0"
         fields = (ino, mode, 0, 0, 2 if mode & 0o170000 == 0o040000 else 1,
@@ -97,7 +114,7 @@ def prepare(init: Path, probe: Path, root: Path, runtime_report: Path, readelf: 
                     ("system/bin/linker64", 0o120777, ALIAS.encode(), 0, 0),
                     ("linkerconfig/ld.config.txt", 0o100644, CONFIG, 0, 0)])
     for relative in sorted(expected_files):
-        path = root / RUNTIME / relative
+        path = runtime_file(root, RUNTIME + "/" + relative)
         actual = inspect_elf(path, readelf)
         if actual != records[relative]:
             raise ValueError("Runtime extraction metadata mismatch: " + relative)
