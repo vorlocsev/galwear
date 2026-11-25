@@ -1,0 +1,4 @@
+debug.galwear.service    u:object_r:galwear_fixture_prop:s0 exact string
+ro.galwear.service.fixture    u:object_r:galwear_fixture_prop:s0 exact string
+debug.galwear.denied    u:object_r:galwear_denied_prop:s0 exact string
+ro.property_service.version    u:object_r:galwear_protocol_prop:s0 exact string
