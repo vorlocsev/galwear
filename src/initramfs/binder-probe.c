@@ -16,6 +16,8 @@ struct binder_version { int32_t protocol_version; };
 #define BINDER_VERSION _IOWR('b', 9, struct binder_version)
 #define BINDER_SET_MAX_THREADS _IOW('b', 5, uint32_t)
 
+extern int binder_roundtrip(void);
+
 int binder_probe(void)
 {
     static const char *const paths[] = {
@@ -65,6 +67,10 @@ int binder_probe(void)
         if (unmap_rc || close_rc)
             goto done;
         printf("r800-binder: %s version=8 mmap=PASS\n", paths[i] + 5);
+    }
+    if (binder_roundtrip() != 0) {
+        fputs("r800-binder: FAIL transaction roundtrip\n", stderr);
+        goto done;
     }
     rc = 0;
 done:
