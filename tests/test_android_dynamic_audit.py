@@ -43,12 +43,13 @@ class DynamicTests(unittest.TestCase):
                 return {"elf_type": 3, "interpreter": None, "needed": [], "soname": None}
             return {"elf_type": 3, "interpreter": None,
                     "needed": ["libm.so"] if path.name == "libc.so" else [],
-                    "soname": path.name}
+                    "soname": path.name, "sha256": "a" * 64}
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(a, "inspect_elf", side_effect=inspect):
                 result = a.inventory(Path("probe"), Path(tmp), "readelf")
         self.assertEqual(set(result["libraries"]), set(a.LIBS))
         self.assertFalse(result["runtime_authenticity_verified"])
+        self.assertEqual(result["planned_guest_paths"][a.INTERP], "/apex/com.android.runtime/bin/linker64")
         self.assertFalse(result["dynamic_android_linker_tested"])
 
     def test_symlinked_runtime_rejected(self):
