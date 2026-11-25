@@ -361,8 +361,9 @@ static void reader(void *arg)
     reader_id = pthread_self();
     reader_id_valid = 1;
     pthread_mutex_unlock(&lock);
-    if (reader_running() && cb->set_capabilities_cb)
+    if (reader_running() && cb->set_capabilities_cb) {
         cb->set_capabilities_cb(GPS_CAPABILITY_SCHEDULING);
+    }
 
 	while (reader_running()) {
 		int fd;
@@ -372,10 +373,15 @@ static void reader(void *arg)
 		fd = sock;
 		pthread_mutex_unlock(&lock);
 		if (fd < 0) {
+			size_t path_len = strnlen(SOCK_PATH, sizeof(a.sun_path));
+			if (path_len == sizeof(a.sun_path)) {
+				LOGE("GPS socket path too long");
+				break;
+			}
 			fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
 			memset(&a, 0, sizeof(a));
 			a.sun_family = AF_UNIX;
-			strncpy(a.sun_path, SOCK_PATH, sizeof(a.sun_path) - 1);
+			memcpy(a.sun_path, SOCK_PATH, path_len + 1);
 			if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0 ||
                 fcntl(fd, F_SETFL, 0) < 0) {
 				if (fd >= 0)

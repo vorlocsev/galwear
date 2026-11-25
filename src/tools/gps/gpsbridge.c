@@ -281,11 +281,11 @@ static GpsUtcTime clk_ms(int id)
 	#ifdef R800_GPS_BRIDGE_HOST_TEST
 	struct timespec ts = { 0, 0 };
 #else
-	struct { long sec, nsec; } ts = { 0, 0 };
+	struct { long tv_sec, tv_nsec; } ts = { 0, 0 };
 #endif
 	if (clock_gettime(id, &ts) != 0)
 		return -1;
-	return (GpsUtcTime)ts.sec * 1000 + ts.nsec / 1000000;
+	return (GpsUtcTime)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 /*
