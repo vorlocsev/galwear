@@ -964,3 +964,41 @@ selection, or the absence of uninspected APEX files. Full image and
 runtime evidence remain separate. Eight synthetic regressions are
 added to CI; not executed here. Rebuild earlier image reports to
 include the new ELF fields. No Android or hardware boot claim.
+
+
+## Static ELF ABI and relocation inventory
+
+r800_ext4_elf_abi.py re-extracts selected ELF objects from the
+read-only system and Runtime EXT4 images via debugfs, checks their
+digests against the previous resolution model, inspects GNU readelf
+dynamic symbols, version needs and relocation tags, and rechecks
+both images after inspection. No full symbol tables are stored in
+the image reports. The audit counts missing strong and weak symbol
+candidates separately and records examples, symbol version provider
+SONAME, default-version compatibility, TLS type mismatch and
+multiple provider candidates. Matching exports are not actual
+Bionic lookup or evidence of a correct symbol address. Missing
+candidate counts are advisory because linker-supplied symbols,
+visibility and lookup scope require runtime interpretation.
+
+The pinned Bionic android-11.0.0_r48 source supports AArch64 RELA,
+Android packed RELA and RELR; REL and text relocations are rejected
+by the static check. The report records numeric Android dynamic
+tags and visible relocation types, but does not decode packed
+relocations, prove relocation correctness or exclude API stubs.
+
+Native container smoke: clang/lld cross-compiled two freestanding
+AArch64 Android-target synthetic shared objects with a versioned
+fixture@GALWEAR_1 import and fixture@@GALWEAR_1 export. GNU readelf
+2.44 showed the version need provider libfixture.so and
+R_AARCH64_JUMP_SLOT. A separate synthetic packed-RELA ELF showed
+OS-specific tags 0x60000011 and 0x60000012 despite readelf saying
+there were no relocations. These tool observations were executed,
+not the new repository suite or actual AOSP image audit.
+
+The pipeline saves EXT4_ELF_ABI_STATIC_ADVISORY_ONLY and the
+direct service runner repeats the audit. Nine regression tests
+(including a real synthetic cross-target ELF compile/readelf test)
+are added to lightweight CI. Full CI, actual Android libraries,
+Bionic relocations, AOSP compilation and guest execution remain
+unverified. No stub-exclusion or flash acceptance claim.
