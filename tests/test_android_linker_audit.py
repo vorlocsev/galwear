@@ -1820,6 +1820,76 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["vintf_inventory"]["hal_registration_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def graphics_fixture(self):
+        self.put("init.rc", b"service surfaceflinger /system/bin/surfaceflinger\n"
+                 b"service vendor.composer /vendor/bin/hw/composer\n"
+                 b"    interface android.hardware.graphics.composer@2.1::IComposer default\n")
+        self.put_art_executable("system/bin/surfaceflinger", "arm")
+        self.put_art_executable("vendor/bin/hw/composer", "arm")
+        hals = "".join('<hal format="hidl"><name>android.hardware.graphics.' + name +
+                       '</name><fqname>@2.1::I' + name.capitalize() +
+                       '/default</fqname></hal>' for name in ("composer", "allocator", "mapper"))
+        self.put("vendor/etc/vintf/manifest.xml", ('<manifest type="device">' + hals + '</manifest>').encode())
+        for name in ("libEGL_mali.so", "libGLESv2_mali.so", "libMali.so"):
+            self.put("vendor/lib/egl/" + name, fixture("arm"))
+
+    def inspect_graphics(self, kernel=None):
+        return audit.r800_graphics_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel)
+
+    def test_graphics_surfaceflinger_hal_and_egl_candidates(self):
+        self.graphics_fixture()
+        out = self.inspect_graphics({"CONFIG_DRM": "y"})
+        self.assertEqual(out["status"], "STATIC_GRAPHICS_INVENTORY_ONLY")
+        self.assertEqual(out["surfaceflinger_abi"], "arm")
+        self.assertEqual(len(out["services"]), 2)
+        self.assertEqual(len(out["candidates"]["arm"]["mali"]), 1)
+        self.assertEqual(out["kernel_config"]["CONFIG_DRM"], "y")
+        self.assertFalse(out["egl_initialized"])
+        self.assertFalse(out["gpu_driver_compatible"])
+
+    def test_graphics_wrong_library_abi(self):
+        self.graphics_fixture()
+        self.put("vendor/lib/egl/libEGL_mali.so", fixture("arm64"))
+        out = self.inspect_graphics()
+        self.assertIsNone(out["libraries"]["/vendor/lib/egl/libEGL_mali.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_graphics_missing_hal(self):
+        self.graphics_fixture()
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"/>')
+        out = self.inspect_graphics()
+        self.assertEqual(out["missing_hal_declarations"], ["composer", "allocator", "mapper"])
+
+    def test_graphics_missing_surfaceflinger(self):
+        self.graphics_fixture()
+        (self.root / "system/bin/surfaceflinger").unlink()
+        out = self.inspect_graphics()
+        self.assertIsNone(out["surfaceflinger_abi"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_graphics_fake_device_node(self):
+        self.graphics_fixture()
+        self.put("dev/mali0", b"not device")
+        out = self.inspect_graphics()
+        self.assertFalse(out["device_nodes"]["/dev/mali0"])
+        self.assertTrue(any("not a character device" in e for e in out["errors"]))
+
+    def test_graphics_legacy_hal_inventory(self):
+        self.graphics_fixture()
+        self.put("vendor/lib/hw/gralloc.exynos.so", fixture("arm"))
+        out = self.inspect_graphics()
+        self.assertIn("/vendor/lib/hw/gralloc.exynos.so", out["candidates"]["arm"]["legacy_hal"])
+        self.assertFalse(out["hal_registration_verified"])
+
+    def test_graphics_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["graphics_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["graphics_inventory"]["display_output_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
