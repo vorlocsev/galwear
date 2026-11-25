@@ -6,7 +6,7 @@
 
 Требуются Android NDK r27c, JDK с javac --release 8, Android API 30
 android.jar, Build Tools 30.0.3, Python 3.10+, git, bash, GCC ARM EABI,
-binutils, libc6-dev-armel-cross и qemu-user.
+binutils, libc6-dev-armel-cross, qemu-user, flex, bison и pkg-config.
 Использовать новые каталоги вне исходного дерева.
 
 ```sh
@@ -15,16 +15,22 @@ sh src/vendor/libbt/build.sh "$NDK" "$WORK/bt"
 sh build/r800_build_tools.sh "$NDK" "$WORK/tools"
 sh src/tools/keepwifi/build.sh "$ANDROID_JAR" "$BUILD_TOOLS" "$WORK/keepwifi"
 sh build/r800_build_busybox.sh "$WORK/busybox"
+sh build/r800_build_wifi_tools.sh "$WORK/wifi"
 python3 build/r800_stage_components.py \
   --hal-dir "$WORK/hal" --vendor-sources src/vendor \
   --tools "$WORK/tools" --bluetooth "$WORK/bt" \
-  --keepwifi "$WORK/keepwifi" --busybox "$WORK/busybox" --output "$WORK/components" \
+  --keepwifi "$WORK/keepwifi" --busybox "$WORK/busybox" --wifi "$WORK/wifi" \
+  --output "$WORK/components" \
   --source-sha "$(git rev-parse HEAD)"
 ```
 
 Результаты: vendor-overlay/, payload/, unlinked/gpsbridge.o и
 component-evidence.json. Последний хранит хеши и размеры файлов.
 GPSBridge.o не является исполняемым GPSBridge.
+Статические Wi-Fi-утилиты в payload/bin заменяют прежние вызовы через musl.
+Поддержка WPA2-PSK проверена только на уровне компиляции и флагов версии;
+ассоциация с точкой доступа, работа драйвера и SELinux не проверены.
+Дерево root пока оставлено в требованиях до отдельного аудита остальных файлов.
 
 ## Что ещё требуется
 
