@@ -736,6 +736,30 @@ def symbol_candidates(seen, edges):
             "ambiguous": ambiguous, "incomplete": incomplete, "limit_exceeded": False}
 
 
+def integration_summary(reports, kernel_config, dtb):
+    """Separate offline evidence from boot acceptance; never infer runtime PASS."""
+    missing = []
+    if kernel_config is None:
+        missing.append("Exact target kernel .config not supplied")
+    if dtb is None:
+        missing.append("Exact target DTB not supplied")
+    stages = {}
+    blockers = []
+    for name, report in reports.items():
+        status = report.get("status")
+        stages[name] = {"static_status": status, "runtime_status": "NOT_TESTED",
+                        "error_count": len(report.get("errors", []))}
+        if status is None or status == "REVIEW_REQUIRED" or status.startswith(("REJECT", "FAIL")):
+            blockers.append(name)
+    return {"status": "REVIEW_REQUIRED" if missing or blockers else "STATIC_EVIDENCE_ONLY",
+            "stages": stages, "static_review_required": blockers,
+            "missing_target_inputs": missing,
+            "runtime_blockers": ["Kernel and init boot not demonstrated",
+                "HAL registration and Android framework boot not demonstrated",
+                "SELinux policy and hardware safety not verified"],
+            "android_boot_verified": False, "safe_to_flash": False}
+
+
 def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
     targets = tuple(targets)
     queue = list(targets)
@@ -834,6 +858,29 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
     health_inventory = r800_health_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     power_inventory = r800_power_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     selinux_inventory = r800_selinux_inventory.audit(root, init_inventory, kernel_config)
+    integration = integration_summary({
+        "namespace_inventory": namespace_inventory,
+        "namespace_scope": namespace_scope,
+        "apex_metadata": apex_metadata,
+        "init_inventory": init_inventory,
+        "art_inventory": art_inventory,
+        "art_precompiled": art_precompiled,
+        "art_launch": art_launch,
+        "binder_inventory": binder_inventory,
+        "vintf_inventory": vintf_inventory,
+        "graphics_inventory": graphics_inventory,
+        "display_inventory": display_inventory,
+        "input_inventory": input_inventory,
+        "audio_inventory": audio_inventory,
+        "bluetooth_inventory": bluetooth_inventory,
+        "wifi_inventory": wifi_inventory,
+        "gnss_inventory": gnss_inventory,
+        "sensor_inventory": sensor_inventory,
+        "nfc_inventory": nfc_inventory,
+        "health_inventory": health_inventory,
+        "power_inventory": power_inventory,
+        "selinux_inventory": selinux_inventory,
+    }, kernel_config, dtb)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -871,6 +918,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
             "health_inventory": health_inventory,
             "power_inventory": power_inventory,
             "selinux_inventory": selinux_inventory,
+            "integration_summary": integration,
             "namespace_inventory": namespace_inventory,
             "namespace_scope": namespace_scope,
             "android_namespace_resolution_verified": False,
