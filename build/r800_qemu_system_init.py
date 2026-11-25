@@ -213,45 +213,8 @@ def verify_embedded(raw: bytes, archive: Path, binary: Path) -> dict:
     return {**evidence, "image_offset": offset}
 
 
-def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
-        embedded_archive: Path | None = None) -> dict:
-    elf = validate_init(binary)
-    if compile_evidence.is_symlink() or not compile_evidence.is_file():
-        raise ValueError("Invalid compile evidence")
-    with compile_evidence.open("rb") as stream:
-        spec_raw = stream.read(65537)
-    if len(spec_raw) > 65536:
-        raise ValueError("Compile evidence too large")
-    spec = json.loads(spec_raw)
-    if not isinstance(spec, dict) or spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != elf:
-        raise ValueError("Init does not match compile evidence")
-    raw = kernel_bytes(kernel)
-    out.mkdir(exist_ok=False)
-    image = out / "generic-Image"
-    image.write_bytes(raw)
-    if embedded_archive is None:
-        archive = out / "initramfs.cpio"
-        archive.write_bytes(create_archive(binary))
-        cpio = inspect_cpio(archive, binary)
-    else:
-        archive = embedded_archive
-        cpio = verify_embedded(raw, archive, binary)
-    if cpio["embedded_init_sha256"] != elf["sha256"]:
-        raise ValueError("Archive init hash mismatch")
-    version = subprocess.run(["qemu-system-aarch64", "--version"], check=True,
-                             capture_output=True, text=True, timeout=5).stdout.splitlines()[0]
-    command = [
-        "qemu-system-aarch64", "-machine", "virt,gic-version=3,accel=tcg",
-        "-cpu", "cortex-a53", "-smp", "2", "-m", "512M",
-        "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none",
-        "-serial", "stdio", "-nic", "none",
-        "-kernel", str(image.resolve()),
-        "-append", "console=ttyAMA0 rdinit=/init ro loglevel=7 panic=-1",
-    ]
-    if embedded_archive is None:
-        command += ["-initrd", str(archive.resolve())]
+def observe_boot(command: list[str], log_path: Path) -> dict:
     timed_out = False
-    log_path = out / "generic-console.log"
     with log_path.open("wb") as stream, log_path.open("rb") as reader:
         monitor = LiveHeartbeat(time.monotonic())
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream,
@@ -290,6 +253,47 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
     if timing["observed_heartbeat_count"] != observed["heartbeat_count"]:
         raise ValueError("Live and final heartbeat counts differ")
     observed.update(timing)
+    return observed
+
+
+def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
+        embedded_archive: Path | None = None) -> dict:
+    elf = validate_init(binary)
+    if compile_evidence.is_symlink() or not compile_evidence.is_file():
+        raise ValueError("Invalid compile evidence")
+    with compile_evidence.open("rb") as stream:
+        spec_raw = stream.read(65537)
+    if len(spec_raw) > 65536:
+        raise ValueError("Compile evidence too large")
+    spec = json.loads(spec_raw)
+    if not isinstance(spec, dict) or spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != elf:
+        raise ValueError("Init does not match compile evidence")
+    raw = kernel_bytes(kernel)
+    out.mkdir(exist_ok=False)
+    image = out / "generic-Image"
+    image.write_bytes(raw)
+    if embedded_archive is None:
+        archive = out / "initramfs.cpio"
+        archive.write_bytes(create_archive(binary))
+        cpio = inspect_cpio(archive, binary)
+    else:
+        archive = embedded_archive
+        cpio = verify_embedded(raw, archive, binary)
+    if cpio["embedded_init_sha256"] != elf["sha256"]:
+        raise ValueError("Archive init hash mismatch")
+    version = subprocess.run(["qemu-system-aarch64", "--version"], check=True,
+                             capture_output=True, text=True, timeout=5).stdout.splitlines()[0]
+    command = [
+        "qemu-system-aarch64", "-machine", "virt,gic-version=3,accel=tcg",
+        "-cpu", "cortex-a53", "-smp", "2", "-m", "512M",
+        "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none",
+        "-serial", "stdio", "-nic", "none",
+        "-kernel", str(image.resolve()),
+        "-append", "console=ttyAMA0 rdinit=/init ro loglevel=7 panic=-1",
+    ]
+    if embedded_archive is None:
+        command += ["-initrd", str(archive.resolve())]
+    observed = observe_boot(command, out / "generic-console.log")
     if validate_init(binary) != elf:
         raise ValueError("Init changed during virtual boot")
     return {"schema": SCHEMA, "status": "VIRT_EMBEDDED_PID1_BOOT_ONLY" if embedded_archive else "GENERIC_ARM64_PID1_BOOT_ONLY",
