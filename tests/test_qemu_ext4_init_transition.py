@@ -9,11 +9,13 @@ import r800_qemu_ext4_init_transition as a
 
 D=[{"name":"system"},{"name":"runtime"}]
 L={"/system/bin/init":"u:object_r:init_exec:s0"}
-LOG=(b"r800-ext4-exec: system noexec=0\nr800-ext4-exec: runtime noexec=1\n"+
+CONSOLE = b" device=5:1 inode=42 filesystem=0:1\n"
+LOG=(a.disks.EXPECTED+b"r800-console: stage=kernel"+CONSOLE+b"r800-ext4-exec: system noexec=0\nr800-ext4-exec: runtime noexec=1\n"+
      a.disks.PREFIX+b"PASS count=2 policy=not-loaded android=not-started\n"+
      a.labels.START+b"\n"+a.labels.PREFIX+b"path=/system/bin/init context=u:object_r:init_exec:s0\n"+
      a.labels.PREFIX+b"PASS count=1 android=not-started\n"+
-     b"\n".join(a.MARKERS)+b"\n"+a.HEARTBEAT_PREFIX+b"00000001\n")
+     a.MARKERS[0]+b"\n"+b"r800-console: stage=init"+CONSOLE+
+     b"\n".join(a.MARKERS[1:])+b"\n"+a.HEARTBEAT_PREFIX+b"00000001\n")
 
 def images():
     old={"policy_sha256":"policy","platform_file_contexts_sha256":"contexts",
@@ -60,6 +62,11 @@ class Ext4TransitionTests(unittest.TestCase):
     def test_wrong_domain_rejected(self):
         with self.assertRaisesRegex(ValueError,"transition sequence"):
             a.inspect_console(LOG.replace(b"domain=u:r:init:s0",b"domain=u:r:kernel:s0"),D,L)
+
+    def test_changed_console_rejected(self):
+        with self.assertRaisesRegex(ValueError,"stdout identity changed"):
+            a.inspect_console(LOG.replace(b"stage=init"+CONSOLE,
+                b"stage=init"+CONSOLE.replace(b"inode=42",b"inode=43")),D,L)
 
     def test_early_heartbeat(self):
         with self.assertRaisesRegex(ValueError,"Heartbeat before diagnostic"):
