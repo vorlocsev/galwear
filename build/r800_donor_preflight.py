@@ -14,6 +14,7 @@ from r800_android_userspace_preflight import read_regular
 from r800_boot_candidate import inspect_template, PARTITION
 from r800_vendor_inputs import image_info, file_info
 from r800_payload_candidate import ASSET_SIZES, RADIO_FILES
+from r800_peripheral_firmware import REQUIRED, check_bytes
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "installer"))
 from r800_build_provenance import validate_combination
@@ -136,6 +137,8 @@ def audit(donors, components, expected_sha):
     for name in RADIO_FILES:
         if name not in ("fw/bt/libbt-vendor.so", "fw/bt/bt_vendor.conf"):
             check("payload/" + name, lambda p: digest(p, MAX_FILE))
+    for name in REQUIRED:
+        check("payload/" + name, lambda p, name=name: check_bytes(name, read_regular(p, MAX_FILE)))
     for name, size in ASSET_SIZES.items():
         check("payload/" + name, lambda p, size=size: sized(p, size))
     for name in ("tzlite", "lib"):
