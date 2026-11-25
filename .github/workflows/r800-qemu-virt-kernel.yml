@@ -11,6 +11,9 @@ on:
       - tests/test_qemu_virt_contract.py
       - src/kernel/qemu-virt-minimal.config
       - build/r800_qemu_system_init.py
+      - build/r800_qemu_user_init.py
+      - tests/test_qemu_system_init.py
+      - tests/test_qemu_user_init.py
       - build/r800_initramfs_compile_smoke.sh
       - build/r800_initramfs_spec.py
       - build/r800_cpio_audit.py
@@ -35,6 +38,7 @@ jobs:
           sh -n build/r800_qemu_virt_compile.sh
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_system_init.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_user_init.py' -v
       - name: Fetch pinned kernel and expand disposable source
         run: |
           sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/virt-source" "$RUNNER_TEMP/virt-source-evidence.json"
