@@ -203,3 +203,34 @@ The optional rootfs report must contain the exact same context hashes.
 Matching partition IDs are not recomputation of the original CIL hashes.
 This is a static check, not evidence of actual kernel policy load,
 file labeling, service permissions, enforcing access or full Android boot.
+
+
+## Stock Android policy load experiment
+
+    aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static \
+      src/initramfs/android-stock-policy-probe.c -o /absolute/stock-policy-init
+    python3 build/r800_initramfs_spec.py \
+      --init /absolute/stock-policy-init --list /absolute/stock-policy-init.list \
+      --report /absolute/stock-policy-compile.json
+
+    python3 build/r800_qemu_android_stock_policy.py \
+      --init /absolute/stock-policy-init --compile-evidence /absolute/stock-policy-compile.json \
+      --kernel /absolute/property-kernel/arch/arm64/boot/Image \
+      --baseline /absolute/property-boot-evidence.json \
+      --config-evidence /absolute/virt-config-evidence.json \
+      --rootfs-report /absolute/rootfs-preflight-boot.json \
+      --rootfs-archive /absolute/preflight.cpio \
+      --product-out /absolute/product-out --checkfc /absolute/aosp-host/bin/checkfc \
+      --out-dir /absolute/new-stock-policy-boot --report /absolute/stock-policy-boot.json
+
+The runner repeats the static stock policy audit and compares contexts and
+the exact previous rootfs archive with same-kernel preflight evidence. It
+boots a separate minimal archive containing the diagnostic PID1 and the
+unmodified audited policy bytes. The expanded Android rootfs is not mounted
+during this test. A successful load must retain enforcing=1 and report
+the initial u:r:kernel:s0 domain. No setenforce, setcon, Android exec or
+file relabel is attempted. Failure to access the console, enforce or
+proc attr after the policy is loaded is a failed diagnostic, not a reason
+to weaken policy. The next gate must validate original file_contexts and
+the normal kernel-to-init executable transition on an expanded guest.
+Actual stock policy compilation and execution remain unconfirmed.
