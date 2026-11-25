@@ -21,6 +21,7 @@
 #include "gps_frame.h"
 #include "gps_command.h"
 #include "gps_lto.h"
+#include "gps_output.h"
 
 typedef unsigned int size_t;
 typedef unsigned short uint16_t;
@@ -60,9 +61,11 @@ long long strtoll(const char *, char **, int);
 double strtod(const char *, char **);
 int open(const char *, int, ...);
 int rename(const char *, const char *);
+int mkstemp(char *);
+int fsync(int);
 #define O_RDONLY 0
 #define O_NONBLOCK 04000
-#define O_NOFOLLOW 0400000
+#define O_NOFOLLOW 0100000 /* Linux ARM UAPI, not asm-generic */
 #define O_WRONLY_CREAT_TRUNC 01101
 int strcmp(const char *, const char *);
 int strncmp(const char *, const char *, size_t);
@@ -155,33 +158,44 @@ typedef struct {
 #define LTO_PATH "/opt/gnss/data/lto2.dat"
 /* last fix "<lat> <lon> <utc_ms>", handed back to the engine as a position seed */
 #define LAST_PATH "/opt/usr/r800dev/gps.last"
-#define LAST_TMP LAST_PATH ".tmp"
+#define LAST_TMP LAST_PATH ".XXXXXX"
 
 static int64_t last_saved;   /* utc ms of the last fix written to LAST_PATH */
+static int save_mtx[8];
 
 static void save_fix(const GpsLocation *l)
 {
-	char b[80];
-	int fd, n;
-	if (!(l->flags & 1) || l->timestamp - last_saved < 60000)
+	char b[80], tmp[] = LAST_TMP;
+	int fd, n, ok;
+	if (!(l->flags & 1) || !gps_valid_seed(l->latitude, l->longitude, l->timestamp))
 		return;
-	last_saved = l->timestamp;
+	pthread_mutex_lock(save_mtx);
+	if (l->timestamp <= last_saved || l->timestamp - last_saved < 60000)
+		goto done;
 	n = snprintf(b, sizeof(b), "%.6f %.6f %lld\n", l->latitude, l->longitude, l->timestamp);
-	fd = open(LAST_TMP, O_WRONLY_CREAT_TRUNC, 0644);
+	if (n <= 0 || n >= (int)sizeof(b))
+		goto done;
+	fd = mkstemp(tmp); /* unique regular file, mode 0600 */
 	if (fd < 0)
-		return;
-	if (n > 0 && n < (int)sizeof(b) && write(fd, b, n) == n) {
-		close(fd);
-		rename(LAST_TMP, LAST_PATH);
-	} else {
-		close(fd);
-	}
+		goto done;
+	ok = write(fd, b, n) == n && fsync(fd) == 0;
+	if (close(fd) != 0)
+		ok = 0;
+	if (ok && rename(tmp, LAST_PATH) == 0)
+		last_saved = l->timestamp;
+	else
+		unlink(tmp);
+done:
+	pthread_mutex_unlock(save_mtx);
 }
 
 static void location_cb(GpsLocation *l)
 {
 	char b[200];
-	int n = snprintf(b, sizeof(b), "FIX %u %.8f %.8f %.2f %.3f %.2f %.2f %lld\n",
+	int n;
+	if (!l || l->size < sizeof(*l) || !gps_valid_seed(l->latitude, l->longitude, l->timestamp))
+		return;
+	n = snprintf(b, sizeof(b), "FIX %u %.8f %.8f %.2f %.3f %.2f %.2f %lld\n",
 			 l->flags, l->latitude, l->longitude, l->altitude, (double)l->speed,
 			 (double)l->bearing, (double)l->accuracy, l->timestamp);
 	if (n > 0 && n < (int)sizeof(b))
@@ -197,6 +211,8 @@ static void location_cb(GpsLocation *l)
 static void status_cb(GpsStatus *s)
 {
 	char b[32];
+	if (!s || s->size < sizeof(*s))
+		return;
 	out(b, snprintf(b, sizeof(b), "STATUS %u\n", s->status));
 	if (daemon_mode)
 		return;
@@ -210,18 +226,19 @@ static void sv_status_cb(void *sv)
 static void nmea_cb(GpsUtcTime t, const char *nmea, int len)
 {
 	char b[300];
-	while (len > 0 && (nmea[len - 1] == '\n' || nmea[len - 1] == '\r'))
-		len--;
-	if (len > 250)
-		len = 250;
-	out(b, snprintf(b, sizeof(b), "NMEA %lld %.*s\n", t, len, nmea));
-	if (daemon_mode)
+	int n;
+	len = gps_nmea_length(nmea, len);
+	if (len <= 0 || t < 0 || t > GPS_UTC_MAX)
 		return;
-	printf("NMEA %.*s", len, nmea);
-	if (len > 0 && nmea[len - 1] != '\n')
-		printf("\n");
-	fflush(0);
+	n = snprintf(b, sizeof(b), "NMEA %lld %.*s\n", t, len, nmea);
+	if (n > 0 && n < (int)sizeof(b))
+		out(b, n);
+	if (!daemon_mode) {
+		printf("NMEA %.*s\n", len, nmea);
+		fflush(0);
+	}
 }
+
 static void caps_cb(uint32_t c)
 {
 	printf("CAPS %x\n", c);
@@ -351,24 +368,22 @@ static void inject_lto(void)
 /* seed the engine with the last fix: accuracy grows with its age */
 static void inject_last(void)
 {
-	char b[96], *e;
+	char b[96];
 	double lat, lon;
-	int64_t t, age;
+	int64_t t, age, now;
 	float acc;
-	int fd = open(LAST_PATH, O_RDONLY), r;
-	long n;
+	int fd = open(LAST_PATH, O_RDONLY | O_NONBLOCK | O_NOFOLLOW), r, n;
 	if (fd < 0)
 		return;
-	n = read(fd, b, sizeof(b) - 1);
+	n = gps_read_lto(lto_read, &fd, b, sizeof(b) - 1);
 	close(fd);
-	if (n <= 0)
+	if (n <= 0 || !gps_parse_seed(b, n, &lat, &lon, &t))
 		return;
-	b[n] = 0;
-	lat = strtod(b, &e);
-	lon = strtod(e, &e);
-	t = strtoll(e, &e, 10);
-	age = clk_ms(0) - t;
-	if (t <= 0 || age < 0 || age > 30LL * 86400000 || (lat == 0 && lon == 0))
+	now = clk_ms(0);
+	if (now < t)
+		return;
+	age = now - t;
+	if (age > 30LL * 86400000 || (lat == 0 && lon == 0))
 		return;
 	acc = age < 86400000 ? 2000.0f : 25000.0f;
 	r = gps->inject_location(lat, lon, acc);
