@@ -155,7 +155,10 @@ def audit(root):
     audio_services = [s for s in services if s["name"] == "audioserver" or
         any("android.hardware.audio" in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
         any(part in s["name"].lower() for part in ("audio", "soundtrigger"))]
-    relevant = [s for s in services if s in graphics_services or s in audio_services or s["name"] in APEX_SERVICES + binder_services or
+    bluetooth_services = [s for s in services if
+        any("android.hardware.bluetooth" in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
+        any(part in s["name"].lower() for part in ("bluetooth", "btattach", "hciattach"))]
+    relevant = [s for s in services if s in graphics_services or s in audio_services or s in bluetooth_services or s["name"] in APEX_SERVICES + binder_services or
                 s["name"].startswith("zygote") or "art" in s["name"].split("-")]
     duplicates = []
     by_name = {}
@@ -199,6 +202,7 @@ def audit(root):
             "binder_commands": binder_commands,
             "graphics_services": graphics_services,
             "audio_services": audio_services,
+            "bluetooth_services": bluetooth_services,
             "art_environment": environment, "duplicate_services": duplicates,
             "unresolved_imports": unresolved, "unknown_top_level": unknown,
             "missing_evidence": missing, "errors": errors,
