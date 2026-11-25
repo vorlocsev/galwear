@@ -23,22 +23,36 @@ static int allowed(const char *name)
     return 0;
 }
 
-static int mount_disk(const char *name, const char *device)
+static int serial_matches(const char *name, const char *device)
 {
-    char serial_path[128], serial[64], target[128];
+    char serial_path[128], serial[64];
     snprintf(serial_path, sizeof(serial_path), "/sys/block/%s/serial", device);
     int fd = open(serial_path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return 1;
+    if (fd < 0) return 0;
     ssize_t n = read(fd, serial, sizeof(serial)-1);
-    if (close(fd) || n <= 0 || n >= (ssize_t)sizeof(serial)-1) return 2;
+    if (close(fd) || n <= 0 || n >= (ssize_t)sizeof(serial)-1) return 0;
     if (serial[n-1] == '\n') --n;
     serial[n] = '\0';
     char expected[64];
     snprintf(expected, sizeof(expected), "galwear-%s", name);
-    if (strcmp(serial, expected)) return 3;
+    return strcmp(serial, expected) == 0;
+}
+
+static int mount_disk(const char *name)
+{
+    char device[] = "vda", candidate[] = "vda", target[128];
+    unsigned matches = 0;
+    for (char c = 'a'; c <= 'f'; ++c) {
+        candidate[2] = c;
+        if (serial_matches(name, candidate)) {
+            device[2] = c;
+            ++matches;
+        }
+    }
+    if (matches != 1) return 3;
     char node[32];
     snprintf(node, sizeof(node), "/dev/%s", device);
-    fd = open(node, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = open(node, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return 4;
     struct stat st;
     int ro = 0;
@@ -75,7 +89,7 @@ int main(void)
         if (!strchr(line, '\n') || sscanf(line, "%31s %15s %c", name, dev, &extra) != 2 ||
             !allowed(name) || count >= 6 ||
             strlen(dev) != 3 || dev[0] != 'v' || dev[1] != 'd' ||
-            dev[2] != (char)('a' + count) || mount_disk(name, dev))
+            dev[2] != (char)('a' + count) || mount_disk(name))
             return 4;
         ++count;
     }
