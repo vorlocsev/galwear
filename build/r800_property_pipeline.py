@@ -64,7 +64,8 @@ class Pipeline:
                   "source_commit": self.source_commit,
                   "safe_to_flash": False, "device_contacted": False,
                   "android_init_started": False,
-                  "property_service_started": self.status == "VIRT_PROPERTY_SERVICE_PIPELINE_ONLY"}
+                  "property_service_started": self.status in ("VIRT_PROPERTY_SERVICE_PIPELINE_ONLY",
+                                                              "VIRT_EXT4_PROPERTY_PIPELINE_ONLY")}
         tmp = self.out/"pipeline.json.tmp"
         tmp.write_text(json.dumps(report, indent=2, sort_keys=True)+"\n")
         tmp.replace(self.out/"pipeline.json")
