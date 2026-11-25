@@ -23,10 +23,25 @@
 #include "gps_lto.h"
 #include "gps_output.h"
 
+#ifdef R800_GPS_BRIDGE_HOST_TEST
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <fcntl.h>
+#include <dlfcn.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define GPS_MUTEX(name) static pthread_mutex_t name = PTHREAD_MUTEX_INITIALIZER
+#define SOCK_PATH "./gps.sock"
+#define GPS_BRIDGE_LIB "./libbrcm-test.so"
+#else
 typedef unsigned int size_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
-typedef long long int64_t;
 typedef unsigned long pthread_t;
 
 /* ---- libc / libdl / libpthread (Tizen glibc 2.24) ---- */
@@ -79,13 +94,16 @@ int pthread_mutex_unlock(void *);
 #define MSG_NOSIGNAL 0x4000
 #define SHUT_RDWR 2
 #define SOCK_PATH "/opt/usr/r800dev/gps.sock"
+#define GPS_BRIDGE_LIB "/usr/lib/libbrcm.so"
+#define GPS_MUTEX(name) static int name[8]
+#endif
 
 /* daemon: the connected gps.r800.so, or -1 */
 static int client = -1;
-static int mtx[8];   /* glibc pthread_mutex_t (24 bytes), zero = default mutex */
+GPS_MUTEX(mtx);   /* target glibc default mutex; native pthread in fixture */
 static void out(const char *line, int len)
 {
-	pthread_mutex_lock(mtx);
+	pthread_mutex_lock(&mtx);
 	if (client >= 0 && len > 0 &&
 	    send(client, line, (size_t)len, MSG_DONTWAIT | MSG_NOSIGNAL) != len) {
 		/* Only the serve loop owns close(c). Shutdown wakes its reader
@@ -93,7 +111,7 @@ static void out(const char *line, int len)
 		shutdown(client, SHUT_RDWR);
 		client = -1;
 	}
-	pthread_mutex_unlock(mtx);
+	pthread_mutex_unlock(&mtx);
 }
 static int daemon_mode;
 
@@ -102,13 +120,17 @@ static int daemon_mode;
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
 
+#ifdef R800_GPS_BRIDGE_HOST_TEST
+#define LTO_PATH "./lto2.dat"
+#define LAST_PATH "./gps.last"
+#else
 #define LTO_PATH "/opt/gnss/data/lto2.dat"
-/* last fix "<lat> <lon> <utc_ms>", handed back to the engine as a position seed */
 #define LAST_PATH "/opt/usr/r800dev/gps.last"
+#endif
 #define LAST_TMP LAST_PATH ".XXXXXX"
 
-static int64_t last_saved;   /* utc ms of the last fix written to LAST_PATH */
-static int save_mtx[8];
+static GpsUtcTime last_saved;   /* utc ms of the last fix written to LAST_PATH */
+GPS_MUTEX(save_mtx);
 
 static void save_fix(const GpsLocation *l)
 {
@@ -116,7 +138,7 @@ static void save_fix(const GpsLocation *l)
 	int fd, n, ok;
 	if (!(l->flags & 1) || !gps_valid_seed(l->latitude, l->longitude, l->timestamp))
 		return;
-	pthread_mutex_lock(save_mtx);
+	pthread_mutex_lock(&save_mtx);
 	if (l->timestamp <= last_saved || l->timestamp - last_saved < 60000)
 		goto done;
 	n = snprintf(b, sizeof(b), "%.6f %.6f %lld\n", l->latitude, l->longitude, l->timestamp);
@@ -133,7 +155,7 @@ static void save_fix(const GpsLocation *l)
 	else
 		unlink(tmp);
 done:
-	pthread_mutex_unlock(save_mtx);
+	pthread_mutex_unlock(&save_mtx);
 }
 
 static void location_cb(GpsLocation *l)
@@ -234,12 +256,16 @@ static const GpsInterface *gps;
 
 /* clock in ms: 0 = REALTIME, 1 = MONOTONIC (libbrcm's elapsed clock), 7 = BOOTTIME
  * (Android's elapsedRealtime) */
-static int64_t clk_ms(int id)
+static GpsUtcTime clk_ms(int id)
 {
+	#ifdef R800_GPS_BRIDGE_HOST_TEST
+	struct timespec ts = { 0, 0 };
+#else
 	struct { long sec, nsec; } ts = { 0, 0 };
+#endif
 	if (clock_gettime(id, &ts) != 0)
 		return -1;
-	return (int64_t)ts.sec * 1000 + ts.nsec / 1000000;
+	return (GpsUtcTime)ts.sec * 1000 + ts.nsec / 1000000;
 }
 
 /*
@@ -249,14 +275,14 @@ static int64_t clk_ms(int id)
  * 00:00, learning the time only from the satellites).
  * boot_ref: Android's elapsedRealtime (CLOCK_BOOTTIME) for utc, or 0 for "now".
  */
-static int inject_utc(int64_t utc, int64_t boot_ref, int unc)
+static int inject_utc(GpsUtcTime utc, GpsUtcTime boot_ref, int unc)
 {
-	int64_t mono = clk_ms(1);
+	GpsUtcTime mono = clk_ms(1);
 	int r;
 	if (utc <= 0 || utc > GPS_UTC_MAX || unc < 0 || mono < 0)
 		return -1;
 	if (boot_ref > 0) {
-		int64_t boot = clk_ms(7);
+		GpsUtcTime boot = clk_ms(7);
 		if (boot < boot_ref || boot - boot_ref > GPS_UTC_MAX - utc)
 			return -1;
 		utc += boot - boot_ref;
@@ -326,7 +352,7 @@ static void inject_last(void)
 {
 	char b[96];
 	double lat, lon;
-	int64_t t, age, now;
+	GpsUtcTime t, age, now;
 	float acc;
 	int fd = open(LAST_PATH, O_RDONLY | O_NONBLOCK | O_NOFOLLOW), r, n;
 	if (fd < 0)
@@ -392,12 +418,13 @@ static int serve(void)
 	int ls = socket(AF_UNIX, SOCK_STREAM, 0), i;
 	const char *p = SOCK_PATH;
 
+	for (i = 0; i < 108; ++i) a.path[i] = 0;
 	a.fam = AF_UNIX;
 	for (i = 0; p[i] && i < 107; i++)
 		a.path[i] = p[i];
 	a.path[i] = 0;
 	unlink(SOCK_PATH);
-	if (ls < 0 || bind(ls, &a, sizeof(a)) < 0 || listen(ls, 2) < 0) {
+	if (ls < 0 || bind(ls, (const void *)&a, sizeof(a)) < 0 || listen(ls, 2) < 0) {
 		printf("cannot listen on %s\n", SOCK_PATH);
 		return 1;
 	}
@@ -411,9 +438,9 @@ static int serve(void)
 		int c = accept(ls, 0, 0);
 		if (c < 0)
 			continue;
-		pthread_mutex_lock(mtx);
+		pthread_mutex_lock(&mtx);
 		client = c;
-		pthread_mutex_unlock(mtx);
+		pthread_mutex_unlock(&mtx);
 		printf("client connected\n");
 		fflush(0);
 		for (;;) {
@@ -434,8 +461,11 @@ static int serve(void)
 					}
 					on = 1;
 				} else if (!strcmp(s, "STOP") && on) {
-					if (session(0) == 0)
-						on = 0;
+					if (session(0) != 0) {
+						fatal = 1;
+						goto disconnected;
+					}
+					on = 0;
 				} else if (!strncmp(s, "TIME ", 5)) {
 					/* TIME <utc_ms> [<elapsedRealtime_ms> <unc_ms>] */
 					struct gps_time_command t;
@@ -457,10 +487,10 @@ static int serve(void)
 			}
 		}
 disconnected:
-		pthread_mutex_lock(mtx);
+		pthread_mutex_lock(&mtx);
 		if (client == c)
 			client = -1;
-		pthread_mutex_unlock(mtx);
+		pthread_mutex_unlock(&mtx);
 		close(c);
 		if (fatal || (on && session(0) != 0)) {
 			/* Unknown engine state: fail closed rather than accept a new client. */
@@ -475,7 +505,7 @@ disconnected:
 int main(int argc, char **argv, char **envp)
 {
 	int secs;
-	void *lib = dlopen("/usr/lib/libbrcm.so", RTLD_NOW);
+	void *lib = dlopen(GPS_BRIDGE_LIB, RTLD_NOW);
 	const GpsInterface *(*get)(void);
 	int r;
 
@@ -493,7 +523,7 @@ int main(int argc, char **argv, char **envp)
 		return 1;
 	}
 	gps = get();
-	printf("GpsInterface %p size %u\n", (void *)gps, gps ? gps->size : 0);
+	printf("GpsInterface %p size %u\n", (void *)gps, gps ? (unsigned)gps->size : 0);
 	fflush(0);
 	if (!gps || gps->size < sizeof(GpsInterface) || !gps->init ||
 	    !gps->start || !gps->stop || !gps->cleanup || !gps->inject_time ||
@@ -523,6 +553,7 @@ int main(int argc, char **argv, char **envp)
 	return 0;
 }
 
+#ifndef R800_GPS_BRIDGE_HOST_TEST
 /* glibc ARM _start: argc/argv from the stack, rtld_fini in r0 */
 __attribute__((naked, noreturn)) void _start(void)
 {
@@ -540,3 +571,5 @@ __attribute__((naked, noreturn)) void _start(void)
 		"bl __libc_start_main\n"
 		"udf #0\n");
 }
+
+#endif /* !R800_GPS_BRIDGE_HOST_TEST */

@@ -2,7 +2,7 @@
 #define R800_GPS_ABI_H
 /* Local legacy GPS ABI contract, not a verified proprietary donor ABI. */
 /* ---- hardware/gps.h (AOSP), 32-bit ARM layout ---- */
-typedef int64_t GpsUtcTime;
+typedef long long GpsUtcTime;
 typedef struct {
 	size_t size;
 	uint16_t flags;
@@ -36,7 +36,7 @@ typedef struct {
 	int (*start)(void);
 	int (*stop)(void);
 	void (*cleanup)(void);
-	int (*inject_time)(GpsUtcTime, int64_t, int);
+	int (*inject_time)(GpsUtcTime, GpsUtcTime, int);
 	int (*inject_location)(double, double, float);
 	void (*delete_aiding_data)(uint16_t);
 	int (*set_position_mode)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
@@ -67,6 +67,7 @@ typedef struct {
 } GpsXtraInterface;
 
 
+#ifndef R800_GPS_BRIDGE_HOST_TEST
 #if !defined(__arm__) || !defined(__ARM_EABI__) || defined(__ARM_PCS_VFP)
 #error R800 GPS requires ARM32 EABI base calling convention (soft/softfp)
 #endif
@@ -122,4 +123,5 @@ GPS_OFFSET(GpsXtraCallbacks,create_thread_cb,4);
 #endif
 #undef GPS_SIZE
 #undef GPS_OFFSET
+#endif /* !R800_GPS_BRIDGE_HOST_TEST */
 #endif
