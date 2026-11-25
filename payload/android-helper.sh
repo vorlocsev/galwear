@@ -618,14 +618,12 @@ fi
     fi
 
     # Developer mode (android/DEV): Wi-Fi forced on with the Wear Wi-Fi mediator
-    # off, the phone's Bluetooth internet proxy (sysproxyd) stopped, and a root
-    # telnet shell on port 23. Without it Wear OS runs Wi-Fi and the phone link
-    # itself, as on a Pixel Watch, and there is no shell.
+    # off. No network shell is provided in either mode. Without DEV, Wear OS
+    # manages Wi-Fi and the phone link itself.
     if [ -f /oem/r800dev/android/DEV ]; then
     W=/dev/r800wpa; $B mkdir -p $W
-    L=/oem/r800dev/root      # musl wpa_supplicant and busybox-extras live here
+    L=/oem/r800dev/root      # musl wpa_supplicant lives here
     inet() { $B ip -4 addr show wlan0 2>/dev/null | $B grep -q inet; }
-    tnet() { $B ps w 2>/dev/null | $B grep -q '[t]elnetd' ||              $L/lib/ld-musl-aarch64.so.1 /oem/r800dev/bin/busybox-extras telnetd -p 23 -l /system/bin/sh; }
     # Android owns Wi-Fi: it gets a real network (apps have internet) and nothing
     # fights over wlan0. Join the Tizen network with the passphrase in wifi.pass.
     SSID=$($B sed -n 's/^[[:space:]]*ssid="\(.*\)"[[:space:]]*$//p' /oem/r800dev/wpa.conf | $B head -1)
@@ -663,11 +661,10 @@ H
         $B udhcpc -i wlan0 -s $W/dhcp.sh -b -t 20 -T 3 -x hostname:galaxywatch > /dev/null 2>&1
         for i in $($B seq 1 30); do inet && break; $B sleep 1; done
     fi
-    # Policy routing: replies to the telnet shell must find the LAN route, which
+    # Policy routing: LAN traffic must find the LAN route, which
     # lives in the main table (helper mode) or the wlan0 table (Android mode).
     /system/bin/ip rule add from all lookup main pref 9999 2>/dev/null
     /system/bin/ip rule add from all lookup wlan0 pref 9998 2>/dev/null
-    tnet
     # Once paired, the Bluetooth companion proxy outranks Wi-Fi (score 100 vs 60) and
     # ConnectivityService tears Wi-Fi down after a ~20 s linger. KeepWifi files a
     # standing Wi-Fi request so it stays up (tools/keepwifi). With sysproxyd stopped
@@ -698,11 +695,10 @@ H
             CLASSPATH=/oem/r800dev/keepwifi.dex $B setsid /system/bin/app_process / KeepWifi > /oem/r800dev/keepwifi.log 2>&1 &
         fi
       done ) &
-    k "wifi($MODE) $($B ip -4 addr show wlan0 | $B grep -o 'inet [0-9.]*'), telnet on 23"
-    # Keep the shell alive; in Android mode re-join if the network is lost.
+    k "wifi($MODE) $($B ip -4 addr show wlan0 | $B grep -o 'inet [0-9.]*'), network shell disabled"
+    # In Android mode re-join if the network is lost.
     ( n=0; while :; do
-        tnet
-        if [ $MODE = android ]; then
+            if [ $MODE = android ]; then
             if inet; then n=0; else n=$((n+1)); fi
             [ $n -eq 4 ] && [ -n "$PASS" ] && /system/bin/cmd wifi connect-network "$SSID" wpa2 "$PASS" > /dev/null 2>&1
             # 2026-11-19: after an AP deauth (reason 6) one connect-network was
