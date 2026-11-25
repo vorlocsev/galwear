@@ -43,20 +43,35 @@ def elf(raw, executable=False):
         if (rel["unsupported_types"] or rel["packed_tags"] or rel["nonwritable_targets"]
                 or not rel["symbol_indices_checked"] or not rel["tls_symbol_types_checked"]):
             raise ValueError("Relocations require review")
-        # DT_RELR and Android packed RELR are not supported by glibc 2.24.
-        phoff = struct.unpack_from("<I", raw, 28)[0]
-        count = struct.unpack_from("<H", raw, 44)[0]
-        for i in range(count):
-            typ, off, _, _, size, _, _, _ = struct.unpack_from("<8I", raw, phoff + i*32)
-            if typ != 2:
-                continue
-            for pos in range(off, off + size, 8):
-                tag, _ = struct.unpack_from("<iI", raw, pos)
-                if tag == 0:
-                    break
-                if tag in (35, 36, 37, 0x6fffe000, 0x6fffe001, 0x6fffe003):
-                    raise ValueError("Unsupported RELR dynamic tag")
+    # Packed Android relocations and RELR are not understood by glibc 2.24.
+    if info["relocations"]["packed_tags"]:
+        raise ValueError("Unsupported packed relocation encoding")
+    # DT_RELR and Android packed RELR are not supported by glibc 2.24.
+    phoff = struct.unpack_from("<I", raw, 28)[0]
+    count = struct.unpack_from("<H", raw, 44)[0]
+    for i in range(count):
+        typ, off, _, _, size, _, _, _ = struct.unpack_from("<8I", raw, phoff + i*32)
+        if typ != 2:
+            continue
+        for pos in range(off, off + size, 8):
+            tag, _ = struct.unpack_from("<iI", raw, pos)
+            if tag == 0:
+                break
+            if tag in (35, 36, 37, 0x6fffe000, 0x6fffe001, 0x6fffe003):
+                raise ValueError("Unsupported RELR dynamic tag")
     return info
+
+
+def compatible_type(required, provided):
+    # STT_NOTYPE is unspecified; TLS must always match TLS.
+    if required == 6 or provided == 6:
+        return required == provided
+    if required == 0 or provided == 0:
+        return True
+    # GNU IFUNC is a callable resolver, not a data export.
+    if required in (2, 10) and provided in (2, 10):
+        return True
+    return required == provided
 
 
 def import_problems(info, providers, internal=False, scope=None):
@@ -76,7 +91,14 @@ def import_problems(info, providers, internal=False, scope=None):
         elif version not in {v["version"] for v in providers.get(name, {}).get(
                 "version_definitions", []) if not v["base"]}:
             problems.append("Version absent from supplied library: " + name + ":" + version)
+    declared_versions = {(v["library"], v["version"]) for v in info["version_needs"]}
     for imp in info["symbol_imports"]:
+        library, version = imp["version_library"], imp["version"]
+        if ((library is None) != (version is None) or
+                (library is not None and (library not in info["needed"] or
+                                          (library, version) not in declared_versions))):
+            problems.append("Unbound symbol version requirement: " + imp["name"])
+            continue
         names = {imp["version_library"]} if imp["version_library"] else set(scope)
         if imp["version"] is not None and not (check_version(imp["version"]) or
                 (internal and imp["version"] == "GLIBC_PRIVATE")):
@@ -84,7 +106,7 @@ def import_problems(info, providers, internal=False, scope=None):
             continue
         matches = [exp for name, exp in index.get(imp["name"], [])
                    if name in names
-                   and (exp["type"] == 6) == (imp["type"] == 6)
+                   and compatible_type(imp["type"], exp["type"])
                    and (exp["version"] == imp["version"] if imp["version"] is not None
                         else not exp["version_hidden"])]
         if not matches and not imp["weak"]:
@@ -132,7 +154,7 @@ def main():
     a = p.parse_args()
     try:
         report = audit(a.binary,a.libdir)
-    except (OSError,ValueError) as exc:
+    except (OSError,ValueError,struct.error) as exc:
         report = {"status":"REVIEW_REQUIRED","problems":[str(exc)],"safe_to_flash":False}
     print(json.dumps(report,indent=2,sort_keys=True))
     return 2 if report["problems"] else 0
