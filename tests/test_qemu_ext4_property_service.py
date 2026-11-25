@@ -9,6 +9,8 @@ import r800_qemu_ext4_property_service as a
 D=[{"name":"system"},{"name":"vendor"},{"name":"runtime"}]
 L={a.SERVICE:a.SERVICE_LABEL,a.FILE:a.LABEL}
 CONSOLE = b" device=5:1 inode=42 filesystem=0:1\n"
+import r800_bionic_behavior_contract as bionic
+PROVIDER = bionic.PROVIDERS[2]
 LOG=(a.disks.EXPECTED+b"r800-console: stage=kernel"+CONSOLE+b"r800-ext4-exec: system noexec=0\nr800-ext4-exec: vendor noexec=1\n"
      b"r800-ext4-exec: runtime noexec=0\n"+
      a.disks.PREFIX+b"PASS count=3 policy=not-loaded android=not-started\n"+
@@ -17,7 +19,7 @@ LOG=(a.disks.EXPECTED+b"r800-console: stage=kernel"+CONSOLE+b"r800-ext4-exec: sy
      a.labels.PREFIX+b"PASS count=2 android=not-started\n"+
      a.EXEC+b"\n"+b"r800-console: stage=init"+CONSOLE+
      b"\n".join(a.MARKERS[:2])+b"\n"+b"r800-console: stage=client"+CONSOLE+
-     b"\n".join(a.MARKERS[2:])+b"\n"+a.HEARTBEAT_PREFIX+b"00000001\n")
+     b"\n".join(a.MARKERS[2:3]+bionic.markers(PROVIDER)+a.MARKERS[3:])+b"\n"+a.HEARTBEAT_PREFIX+b"00000001\n")
 
 def images():
     old={"policy_sha256":"stock","verified_system_entries":{
