@@ -22,7 +22,7 @@ MISSING = ("Samsung combination firmware and verified NZIT template",
            "Complete donor HIDL services and dependency closure; libeffectsconfig.so",
            "Tizen glibc libraries and final linked GPSBridge",
            "BCMDHD STA/NVRAM/CLM and BCM43012 firmware",
-           "Curated busybox, root, tzlite and lib trees",
+           "Curated root, tzlite and lib trees",
            "Original charger digits and bootanimation frame; prepared display assets",
            "Independently prepared required persistent input; no device state copying",
            "PIT and recovery verification; physical acceptance")
@@ -72,9 +72,9 @@ def dex(data):
         raise ValueError("Invalid DEX checksum")
 
 
-def assemble(hal_dir, vendor_sources, tools, bluetooth, keepwifi, output, source_sha):
-    roots = [p.resolve(strict=True) for p in (hal_dir, vendor_sources, tools, bluetooth, keepwifi)]
-    hal_dir, vendor_sources, tools, bluetooth, keepwifi = roots
+def assemble(hal_dir, vendor_sources, tools, bluetooth, keepwifi, output, source_sha, busybox):
+    roots = [p.resolve(strict=True) for p in (hal_dir, vendor_sources, tools, bluetooth, keepwifi, busybox)]
+    hal_dir, vendor_sources, tools, bluetooth, keepwifi, busybox = roots
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise ValueError("Output already exists")
@@ -95,6 +95,13 @@ def assemble(hal_dir, vendor_sources, tools, bluetooth, keepwifi, output, source
                 out.write(raw)
             dest.chmod(mode)
 
+        add(busybox / "bin/busybox", payload / "bin/busybox", static_arm, 0o755)
+        for name in ("busybox-evidence.txt", "applets.txt", "busybox.config"):
+            add(busybox / name, tree / "busybox-evidence" / name)
+        expected_hash = hashlib.sha256((payload / "bin/busybox").read_bytes()).hexdigest()
+        evidence = (tree / "busybox-evidence/busybox-evidence.txt").read_text()
+        if not any(line.split() and line.split()[0] == expected_hash and line.endswith("/bin/busybox") for line in evidence.splitlines()):
+            raise ValueError("BusyBox build evidence hash mismatch")
         for name in TOOLS:
             add(tools / name, payload / name, static_arm, 0o755)
         if (payload / "bin/wpcd").read_bytes() != (payload / "charger/wpcd").read_bytes():
@@ -123,12 +130,12 @@ def assemble(hal_dir, vendor_sources, tools, bluetooth, keepwifi, output, source
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    for arg in ("hal-dir", "vendor-sources", "tools", "bluetooth", "keepwifi", "output"):
+    for arg in ("hal-dir", "vendor-sources", "tools", "bluetooth", "keepwifi", "output", "busybox"):
         p.add_argument("--" + arg, type=Path, required=True)
     p.add_argument("--source-sha", required=True)
     a = p.parse_args()
     print(json.dumps(assemble(a.hal_dir, a.vendor_sources, a.tools, a.bluetooth,
-                              a.keepwifi, a.output, a.source_sha), sort_keys=True))
+                              a.keepwifi, a.output, a.source_sha, a.busybox), sort_keys=True))
 
 
 if __name__ == "__main__":
