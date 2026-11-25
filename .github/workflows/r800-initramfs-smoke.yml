@@ -8,6 +8,8 @@ on:
     paths:
       - ".github/workflows/r800-initramfs-smoke.yml"
       - "build/r800_initramfs_spec.py"
+      - "build/r800_qemu_user_init.py"
+      - "tests/test_qemu_user_init.py"
       - "build/r800_cpio_audit.py"
       - "tests/test_cpio_audit.py"
       - "build/r800_initramfs_compile_smoke.sh"
@@ -34,6 +36,7 @@ jobs:
           sh -n build/r800_initramfs_compile_smoke.sh
           python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
           python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_user_init.py' -v
 
       - name: Compile freestanding AArch64 init (no kernel, no firmware)
         run: |
@@ -47,11 +50,22 @@ jobs:
                 /repo /scratch/r800-initramfs
             '
 
+      - name: Execute compiled init in QEMU user mode
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+          python3 build/r800_qemu_user_init.py \
+            --init "$RUNNER_TEMP/r800-initramfs/init" \
+            --compile-evidence "$RUNNER_TEMP/r800-initramfs/initramfs-evidence.json" \
+            --report "$RUNNER_TEMP/r800-initramfs/qemu-user-evidence.json"
+
       - name: Archive evidence only (never init executable)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: r800-initramfs-evidence
-          path: ${{ runner.temp }}/r800-initramfs/initramfs-evidence.json
+          path: |
+            ${{ runner.temp }}/r800-initramfs/initramfs-evidence.json
+            ${{ runner.temp }}/r800-initramfs/qemu-user-evidence.json
           if-no-files-found: warn
           retention-days: 7
