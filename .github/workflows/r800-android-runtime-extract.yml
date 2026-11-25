@@ -19,6 +19,9 @@ on:
       - build/r800_android_file_contexts.py
       - build/r800_aosp_selinux_transition_build.sh
       - build/r800_qemu_selinux_transition.py
+      - build/r800_qemu_rootfs_relabel.py
+      - src/android/rootfs-relabel-probe.c
+      - tests/test_qemu_rootfs_relabel.py
       - src/android/selinux-transition-probe.c
       - tests/test_qemu_selinux_transition.py
       - build/r800_qemu_android_stock_policy.py
@@ -66,6 +69,7 @@ jobs:
           bash -n build/r800_aosp_sepolicy_build.sh
           bash -n build/r800_aosp_selinux_transition_build.sh
           python3 -m unittest discover -s tests -p 'test_qemu_selinux_transition.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_rootfs_relabel.py' -v
           python3 -m unittest discover -s tests -p 'test_android_sepolicy_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_android_stock_policy.py' -v
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/android-stock-policy-probe.c -o "$RUNNER_TEMP/stock-policy-init"
