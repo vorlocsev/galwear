@@ -24,7 +24,7 @@ jobs:
       - name: Install explicit cross-build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld
+          sudo apt-get install -y --no-install-recommends clang lld device-tree-compiler
           clang --version
           ld.lld --version
       - name: Cross-build freestanding AArch64 init (non-release)
@@ -40,6 +40,18 @@ jobs:
           assert (root / "list.txt").read_text() == f"file /init {root}/init 0755 0 0\n"
           assert (root / "init").stat().st_mode & 0o111
           PY
+      - name: Compile and validate actual SM-R800 device tree
+        run: |
+          dtc -I dts -O dtb -S 133120 -o "$RUNNER_TEMP/r800.dtb" src/dt/r800.dts
+          python3 - "$RUNNER_TEMP/r800.dtb" <<'PY'
+          import json, pathlib, sys
+          sys.path.insert(0, "build")
+          from r800_boot_candidate import component_evidence
+          path = pathlib.Path(sys.argv[1])
+          report = component_evidence(path.read_bytes())
+          path.with_name("r800-dtb-evidence.json").write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, sort_keys=True))
+          PY
       - name: Verify unified diff parses (not applying it)
         run: git apply --numstat src/kernel/r800-wearos.patch > /dev/null
       - name: Compile preflight and synthetic tests
@@ -52,6 +64,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: r800-kernel-static-preflight
-          path: kernel-preflight.json
+          path: |
+            kernel-preflight.json
+            ${{ runner.temp }}/r800-dtb-evidence.json
           if-no-files-found: error
           retention-days: 14
