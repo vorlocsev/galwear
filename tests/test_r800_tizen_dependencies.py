@@ -139,7 +139,7 @@ class TizenDependencyTests(unittest.TestCase):
     def test_executable_shared_library_allowed(self):
         self.put(self.target,fixture("arm",needed=["libx.so"]))
         data=fixture("arm",sonames=["libx.so"])
-        path=b"/lib/ld-linux.so.3\\0"
+        path=b"/lib/ld-linux.so.3\0"
         struct.pack_into("<H",data,44,3)
         struct.pack_into("<8I",data,116,3,160,0,0,len(path),len(path),4,1)
         data[160:160+len(path)]=path
