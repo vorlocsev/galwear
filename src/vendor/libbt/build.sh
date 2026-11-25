@@ -24,7 +24,9 @@ fetch_source() {
 }
 fetch_source hardware/broadcom/libbt "$OUT/src" "$BASE"
 [ "$(git -C "$OUT/src" rev-parse HEAD)" = "$BASE" ]
-fetch_source system/bt "$OUT/bdroid" "refs/tags/$TAG"
+BT_BASE=30098cc2b2fc751f76018ba9e013a86cb883fbd3
+fetch_source system/bt "$OUT/bdroid" "$BT_BASE"
+[ "$(git -C "$OUT/bdroid" rev-parse HEAD)" = "$BT_BASE" ]
 # All generated headers and source checkouts are disposable; repo stays clean.
 cp -R "$S/shim" "$OUT/shim"
 touch "$OUT/shim/bdroid_buildcfg.h"
