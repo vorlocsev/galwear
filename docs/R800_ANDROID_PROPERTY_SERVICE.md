@@ -747,3 +747,31 @@ the runs passed. A successful synthetic block smoke does not establish
 stock SELinux label handling, Android init, APEX activation or Property
 Service. Full AOSP experiment acceptance requires its separate
 VIRT_EXT4_PROPERTY_PIPELINE_ONLY report. No release or flashing.
+
+
+## Native compile audit and guest failure localization
+
+2026-11-25: exact Git blob f932670cdf440380c85e2fc2eaee6ab27bdba738
+(virt-readonly-disks.c) and 46c585f5e7d4e5e5eee4303a8bf667e4a2ed9fce
+(ext4-init-domain-probe.c) were verified against their retrieved source
+bytes and compiled to x86-64 object files using GCC 14.2.0 with
+-std=c11 -Wall -Wextra -Werror -O2 -c. All four valid first-stage
+modes and the separate second stage compiled; service without labels,
+transition without labels, and service plus transition were rejected
+by the compile-time guards. No guest executable was run on the host.
+This establishes native compilation only, not AArch64 compilation,
+linkage with Bionic or a QEMU boot.
+
+The disk probe reports explicit failure stages before exiting PID1.
+Mount codes 3/4/5/6/7 identify serial resolution, device open, block
+read-only verification, mount operation, and filesystem/flags checks.
+Policy/label codes identify setup, policy load, enforcing/domain,
+manifest parsing, xattr read, mismatch and final state. The generic
+live observer rejects both explicit disk and label failure markers
+immediately, preserving the failing diagnostic in the console.
+
+The GitHub connector returned no combined statuses and no
+PR-triggered workflow runs for the original block smoke commit.
+That is not evidence that the push-triggered run is absent or failed.
+Direct Actions retrieval and direct Git cloning were unavailable;
+actual ARM64/EXT4/QEMU CI acceptance remains unverified.
