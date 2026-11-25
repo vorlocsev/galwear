@@ -77,7 +77,8 @@ int main(void)
     if (munmap(w.data, BYTES))
         return fail("munmap");
     puts("r800-abi: mprotect-munmap PASS");
-    if (nanosleep(&delay, NULL) || clock_gettime(CLOCK_MONOTONIC, &after))
+    if (clock_gettime(CLOCK_MONOTONIC, &before) || nanosleep(&delay, NULL)
+            || clock_gettime(CLOCK_MONOTONIC, &after))
         return fail("clock or sleep");
     long long elapsed = (after.tv_sec - before.tv_sec) * 1000000000LL
                       + after.tv_nsec - before.tv_nsec;
