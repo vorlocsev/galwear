@@ -15,6 +15,8 @@ on:
       - build/r800_android_init_dependencies.py
       - build/r800_android_init_rootfs.py
       - build/r800_android_rootfs_preflight.py
+      - build/r800_qemu_rootfs_preflight.py
+      - tests/test_qemu_rootfs_preflight.py
       - src/initramfs/android-rootfs-preflight.c
       - tests/test_android_rootfs_preflight.py
       - tests/test_android_init_rootfs.py
@@ -44,7 +46,7 @@ jobs:
       - name: Install filesystem inspection tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends e2fsprogs android-sdk-libsparse-utils
+          sudo apt-get install -y --no-install-recommends e2fsprogs android-sdk-libsparse-utils gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Verify exact commit and execute synthetic tests
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -54,6 +56,9 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_android_init_dependencies.py' -v
           python3 -m unittest discover -s tests -p 'test_android_init_rootfs.py' -v
           python3 -m unittest discover -s tests -p 'test_android_rootfs_preflight.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_rootfs_preflight.py' -v
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/android-rootfs-preflight.c -o "$RUNNER_TEMP/rootfs-preflight-init"
+          python3 build/r800_initramfs_spec.py --init "$RUNNER_TEMP/rootfs-preflight-init" --list "$RUNNER_TEMP/rootfs-preflight.list" --report "$RUNNER_TEMP/rootfs-preflight-compile.json"
           python3 -m unittest discover -s tests -p 'test_qemu_property_area.py' -v
           command -v debugfs
           command -v mke2fs
