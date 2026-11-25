@@ -248,6 +248,28 @@ def inspect_aps2(blob, abi="arm64", rela=True, symbol_count=2):
         2 if abi == "arm64" else 1, symbol_count)
 
 
+def inspect_relr(entries, abi="arm64", android=False, malformed=None, writable=True):
+    wide = abi == "arm64"
+    word = 8 if wide else 4
+    data = struct.pack("<" + str(len(entries)) + ("Q" if wide else "I"), *entries)
+    a, s, e = ((audit.DT_ANDROID_RELR, audit.DT_ANDROID_RELRSZ, audit.DT_ANDROID_RELRENT)
+               if android else (audit.DT_RELR, audit.DT_RELRSZ, audit.DT_RELRENT))
+    tags = {a: [0x1000], s: [len(data)], e: [word]}
+    if malformed == "size":
+        tags[s] = [len(data) - 1]
+    elif malformed == "entry":
+        tags[e] = [word * 2]
+    elif malformed == "missing":
+        del tags[e]
+    elif malformed == "truncated":
+        tags[s] = [len(data) + word]
+    elif malformed == "both":
+        tags.update({audit.DT_ANDROID_RELR: [0x1000],
+                     audit.DT_ANDROID_RELRSZ: [len(data)], audit.DT_ANDROID_RELRENT: [word]})
+    return audit.relocation_inventory(tags, data, [(0x1000, 0, len(data))],
+        [(0x2000, 0x1000, 6 if writable else 4)], 2 if wide else 1, None)
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -684,6 +706,55 @@ class LinkerTests(unittest.TestCase):
             inspect_aps2(aps2_fixture([0, 1 << 32]), "arm", False)
         with self.assertRaisesRegex(ValueError, "trailing"):
             inspect_aps2(aps2_fixture([0, 0], trailing=b"x"))
+
+    def test_relr_address_and_bitmap_both_abis(self):
+        for abi, typ in (("arm", 23), ("arm64", 1027)):
+            with self.subTest(abi=abi):
+                table = inspect_relr([0x2000, 0b1011], abi)["tables"][0]
+                self.assertEqual(table["count"], 3)
+                self.assertEqual(table["encoded_count"], 2)
+                self.assertEqual(table["types"], {str(typ): 3})
+
+    def test_android_relr(self):
+        out = inspect_relr([0x2000, 3], android=True)
+        self.assertEqual(out["tables"][0]["kind"], "ANDROID_RELR")
+        self.assertEqual(out["tables"][0]["count"], 2)
+        self.assertEqual(out["packed_tags"], [])
+        self.assertFalse(out["relocations_applied"])
+
+    def test_relr_consecutive_bitmaps(self):
+        out = inspect_relr([0x2000, 3, 3])
+        self.assertEqual(out["tables"][0]["count"], 3)
+
+    def test_relr_bitmap_before_address(self):
+        with self.assertRaisesRegex(ValueError, "precedes"):
+            inspect_relr([3])
+
+    def test_relr_bad_alignment_and_duplicate(self):
+        with self.assertRaisesRegex(ValueError, "alignment"):
+            inspect_relr([0x2002])
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            inspect_relr([0x2000, 0x2000])
+
+    def test_relr_invalid_metadata(self):
+        for case in ("size", "entry", "missing", "truncated", "both"):
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                inspect_relr([0x2000], malformed=case)
+
+    def test_relr_target_outside_memory(self):
+        with self.assertRaisesRegex(ValueError, "outside PT_LOAD"):
+            inspect_relr([0x3000])
+
+    def test_relr_nonwritable_targets(self):
+        out = inspect_relr([0x2000, 3], writable=False)
+        self.assertEqual(out["nonwritable_targets"], 2)
+
+    def test_relr_bitmap_cursor_overflow(self):
+        data = struct.pack("<II", 0xfffffffc, 3)
+        with self.assertRaisesRegex(ValueError, "cursor overflow"):
+            audit.relocation_inventory({audit.DT_RELR: [0x1000],
+                audit.DT_RELRSZ: [8], audit.DT_RELRENT: [4]}, data,
+                [(0x1000, 0, 8)], [(0xfffffffc, 4, 6)], 1, None)
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
