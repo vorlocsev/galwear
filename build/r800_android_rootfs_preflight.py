@@ -133,6 +133,8 @@ def prepare_entries(staged, product, init, readelf="readelf"):
         "status": "ANDROID_ROOTFS_PREFLIGHT_ARCHIVE_ONLY",
         "entries": len(ordered), "init_sha256": init_info["sha256"],
         "property_contexts_sha256": context_hashes,
+        "elf_metadata": metadata,
+        "selected_libraries": layout["selected_libraries"],
         "guest_files": {name: {"mode": item[0], "sha256": sha(item[1])}
                         for name, item in ordered if item[0] & 0o170000 != 0o040000},
         "android_init_started": False, "property_service_started": False,
