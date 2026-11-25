@@ -391,6 +391,36 @@ def avb_fixture(case=None):
     return payload, key
 
 
+# Public-only RSA fixture generated independently with cryptography/OpenSSL.
+AVB_RSA_N = int(
+    "d5bb53d50d85fe7ecd6625e37c43693736fbe6d0024f58d14a078c5e65d8b64db154714a851068540a1f764a7ee929bae5a74a157ef727ca8204128518df25b9a8a5f3189dab939b06e5ef228bb71443c193b5f9b18d0432c5c06ad1f60089e00a16fc80f35cc66ec9686fa541b07efe02dacf614f0343d87029e58abaa4a42c12681e591d7f3b3ad3d23414d81c794790ed0d9916bf6403345f4f4328bae4253a6dc3bb3022c1e465e516bc74356b4a923b1be7cdf050891d9ad27ca5ffc2ea9ca75273bcf416e0f67f1e2dfc2c494414a1e9bacfa8dff5bd21c42cfeafd5d8e9a56ab471a62c932f0b59653cbbb24855f18dbe9797cd35d73a570ec9b14f7b", 16)
+AVB_RSA_SIGNATURES = {
+    1: bytes.fromhex("bd658e4ed3f9ae50d4b3c5fb58de22d86facf930f3f6b1ad6474ed0c390f194cc179e66242dc48d8bd85c952108b19be2d935989b6c109694458f2bc4d78bd6daa2ea0d53ba47d13f403c440b5237a73aaec3d0bbd22b5a660cc6313d6c8a83cc331e48340a973c657efa593f4c30a9f1df4376868be7a87190a7d1e7dc921619770c70bbdaf1950362d09c23b48b6ac26c9f46930f90b896971eb9fe9f2c4187f26f6693c56b6370c6dd1a64a6cda9f721272184e6ee83e07219a27f7e1dc9b68add90b4b42b0a7b72dbae50e4c67c87eced894802ec951210366bc0fffa872bcab2a54f9c06450e1f7d9702814c2afd65a458d430e3df07ee60ea495a504bb"),
+    4: bytes.fromhex("c7b5798c8a2c2122f9308d6de38fa840f77e56fe2362507b06aa5a1ea273894ffbb06d0e2cfc3be606de7f6519554795926436faf6feb3e474ca492c7968f711559030b34e496373a27b0c71f031e5b8d573ea2580e89f98974b3fb4a182d5d38f5152af6e93fc3260315ce38a90f1bee2e6f92eaa8bb5922c4496f5de13d6e74f75c73e57e2491eafdc10544f0639a53c27ed5367285c6c1a3568b077ae23538dc6da88f225c7cc7ed06d5de2ba12ab4b206d9adbd18f04c513a05a220da04471aa3c9310cf5b6c44aa2ac9aee06cdc048d327e6371522dddc71edde42895421a1a22ad72f7942162a0faddbf189ac3e752a0da72cbb4576f6cbe87bf4fadb3"),
+}
+
+
+def signed_avb_fixture(algorithm=1):
+    import hashlib
+    payload, _ = avb_fixture()
+    key = (struct.pack(">II", 2048, -pow(AVB_RSA_N, -1, 1 << 32) % (1 << 32)) +
+           AVB_RSA_N.to_bytes(256, "big") +
+           pow(2, 4096, AVB_RSA_N).to_bytes(256, "big"))
+    out = bytearray(payload)
+    header = bytearray(out[8192:8448])
+    hash_name = "sha256" if algorithm == 1 else "sha512"
+    length = hashlib.new(hash_name).digest_size
+    struct.pack_into(">I", header, 28, algorithm)
+    struct.pack_into(">QQ", header, 40, length, length)
+    aux_start = 8448 + 320
+    aux_length = struct.unpack_from(">Q", header, 20)[0]
+    out[aux_start:aux_start + len(key)] = key
+    digest = hashlib.new(hash_name, header + out[aux_start:aux_start + aux_length]).digest()
+    out[8192:8448] = header
+    out[8448:aux_start] = (digest + AVB_RSA_SIGNATURES[algorithm]).ljust(320, bytes(1))
+    return bytes(out), key
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -1210,6 +1240,60 @@ class LinkerTests(unittest.TestCase):
         out = audit.r800_apex_inventory.package_inventory(path)
         self.assertFalse(out["avb"]["footer_present"])
         self.assertEqual(out["avb"]["status"], "REVIEW_REQUIRED")
+
+    def test_avb_rsa_signed_sha256_and_sha512(self):
+        import io
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        for algorithm in (1, 4):
+            with self.subTest(algorithm=algorithm):
+                payload, key = signed_avb_fixture(algorithm)
+                out = avb.inspect(io.BytesIO(payload), 0, len(payload), key)
+                self.assertTrue(out["signature_verified"])
+                self.assertFalse(out["trusted_key_verified"])
+                self.assertFalse(out["hashtree_verified"])
+
+    def test_avb_rsa_invalid_signature(self):
+        import io
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        payload, key = signed_avb_fixture()
+        damaged = bytearray(payload)
+        damaged[8448 + 32] ^= 1
+        out = avb.inspect(io.BytesIO(damaged), 0, len(damaged), key)
+        self.assertTrue(out["vbmeta_digest_matches"])
+        self.assertFalse(out["signature_verified"])
+
+    def test_avb_independent_key_pin(self):
+        import io
+        import hashlib
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        payload, key = signed_avb_fixture()
+        pin = hashlib.sha256(key).hexdigest()
+        out = avb.inspect(io.BytesIO(payload), 0, len(payload), key, pin)
+        self.assertTrue(out["trusted_key_verified"])
+        out = avb.inspect(io.BytesIO(payload), 0, len(payload), key, "00" * 32)
+        self.assertFalse(out["trusted_key_verified"])
+        self.assertTrue(out["signature_verified"])
+        out = avb.inspect(io.BytesIO(payload), 0, len(payload), b"wrong", pin)
+        self.assertFalse(out["trusted_key_verified"])
+
+    def test_avb_rsa_invalid_montgomery_key(self):
+        import hashlib
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        payload, key = signed_avb_fixture()
+        aux_len = struct.unpack_from(">Q", payload, 8192 + 20)[0]
+        digest = hashlib.sha256(payload[8192:8448] + payload[8768:8768 + aux_len]).digest()
+        self.assertTrue(avb.rsa_signature_matches(key, AVB_RSA_SIGNATURES[1], digest, "sha256"))
+        for index in (4, len(key) - 1):
+            damaged = bytearray(key)
+            damaged[index] ^= 1
+            self.assertFalse(avb.rsa_signature_matches(bytes(damaged), AVB_RSA_SIGNATURES[1], digest, "sha256"))
+
+    def test_avb_invalid_pin_rejected(self):
+        import io
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        payload, key = signed_avb_fixture()
+        with self.assertRaisesRegex(ValueError, "fingerprint"):
+            avb.inspect(io.BytesIO(payload), 0, len(payload), key, "not-a-hash")
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
