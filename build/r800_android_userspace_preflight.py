@@ -67,8 +67,9 @@ def read_regular(path: Path, limit: int) -> bytes:
     return data
 
 
-def config_check(path: Path) -> dict:
-    data = read_regular(path, MAX_CONFIG)
+def parse_kernel_config(data: bytes) -> dict:
+    if not 0 < len(data) <= MAX_CONFIG:
+        raise ValueError("Invalid kernel config size")
     values = {}
     for line in data.decode("utf-8").splitlines():
         if line.startswith("CONFIG_") and "=" in line:
@@ -81,6 +82,12 @@ def config_check(path: Path) -> dict:
             if key in values:
                 raise ValueError("Duplicate config key: " + key)
             values[key] = "n"
+    return values
+
+
+def config_check(path: Path) -> dict:
+    data = read_regular(path, MAX_CONFIG)
+    values = parse_kernel_config(data)
     missing = {k: {"expected": v, "actual": values.get(k)}
                for k, v in REQUIRED_CONFIG.items() if values.get(k) != v}
     return {"sha256": hashlib.sha256(data).hexdigest(), "missing_or_wrong": missing}
