@@ -24,6 +24,8 @@ import r800_bluetooth_inventory
 import r800_wifi_inventory
 import r800_gnss_inventory
 import r800_sensor_inventory
+import r800_nfc_inventory
+from r800_android_userspace_preflight import parse_kernel_config, MAX_CONFIG
 
 NAME = re.compile(r"[A-Za-z0-9_.+~-]{1,255}")
 TARGETS = ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager",
@@ -825,6 +827,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
     wifi_inventory = r800_wifi_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     gnss_inventory = r800_gnss_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     sensor_inventory = r800_sensor_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
+    nfc_inventory = r800_nfc_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -858,6 +861,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
             "wifi_inventory": wifi_inventory,
             "gnss_inventory": gnss_inventory,
             "sensor_inventory": sensor_inventory,
+            "nfc_inventory": nfc_inventory,
             "namespace_inventory": namespace_inventory,
             "namespace_scope": namespace_scope,
             "android_namespace_resolution_verified": False,
@@ -870,11 +874,13 @@ def main():
     p.add_argument("--root", required=True, type=Path)
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--dtb", type=Path, help="Optional exact target DTB for static display inventory")
+    p.add_argument("--config", type=Path, help="Optional exact target kernel .config")
     args = p.parse_args()
     if args.output.resolve().is_relative_to(args.root.resolve()):
         p.error("Report must be outside guest root")
     dtb = read_regular(args.dtb, r800_display_inventory.MAX_DTB) if args.dtb else None
-    result = audit(args.root, dtb=dtb)
+    kernel_config = parse_kernel_config(read_regular(args.config, MAX_CONFIG)) if args.config else None
+    result = audit(args.root, kernel_config=kernel_config, dtb=dtb)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(result["status"])
     return 0 if result["status"] == "CANDIDATES_FOUND_ONLY" else 2
