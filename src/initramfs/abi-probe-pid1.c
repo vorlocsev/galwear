@@ -8,6 +8,7 @@
 #include <time.h>
 
 extern int abi_probe_main(void);
+extern int binder_probe(void);
 
 int main(void)
 {
@@ -20,6 +21,8 @@ int main(void)
     int rc = abi_probe_main();
     if (rc != 0)
         return rc;
+    if (binder_probe() != 0)
+        return 4;
     puts("r800-abi-pid1: complete");
     const struct timespec delay = {5, 0};
     unsigned int sequence = 0;
