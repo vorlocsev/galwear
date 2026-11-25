@@ -10,6 +10,11 @@ on:
       - build/r800_android_gsi_import.py
       - build/r800_aosp_runtime_build.sh
       - build/r800_aosp_property_info.sh
+      - build/r800_aosp_init_service_build.sh
+      - build/r800_android_init_inventory.py
+      - src/android/property-service-harness.cpp
+      - src/android/property-service-client.c
+      - tests/test_android_init_inventory.py
       - src/android/property-info-generator.cpp
       - src/initramfs/bionic-property-area.c
       - build/r800_qemu_property_area.py
@@ -37,6 +42,8 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           bash -n build/r800_aosp_property_info.sh
+          bash -n build/r800_aosp_init_service_build.sh
+          python3 -m unittest discover -s tests -p 'test_android_init_inventory.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_property_area.py' -v
           command -v debugfs
           command -v mke2fs
