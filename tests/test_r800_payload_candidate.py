@@ -27,6 +27,10 @@ class PayloadCandidateTests(unittest.TestCase):
             p.chmod(0o755)
         for name in payload.DIRS:
             (self.src / name).mkdir()
+        for name in payload.RADIO_FILES:
+            data = fixture("arm") if name.endswith(".so") else b"synthetic radio input"
+            self.put(self.src, name, data)
+        self.put(self.rel, "src/vendor/libbt/bt_vendor.conf", b"synthetic radio input")
         for name in payload.SINGLE:
             self.put(self.src, name, b"fixture")
         for name in payload.SCRIPTS:
@@ -55,6 +59,22 @@ class PayloadCandidateTests(unittest.TestCase):
             self.assertNotIn("r800dev/android/DEV", names)
             self.assertNotIn("r800dev/android/userdata.img", names)
             self.assertNotIn("r800dev/android/unlisted/private.db", names)
+
+    def test_missing_wifi_firmware(self):
+        (self.src / "fw/bcmdhd_sta.bin").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing radio input"):
+            self.build()
+        self.assertFalse(self.out.exists())
+
+    def test_wrong_bluetooth_abi(self):
+        self.put(self.src, "fw/bt/libbt-vendor.so", fixture("arm64"))
+        with self.assertRaisesRegex(ValueError, "ARM32 Bluetooth"):
+            self.build()
+
+    def test_changed_bluetooth_configuration(self):
+        self.put(self.src, "fw/bt/bt_vendor.conf", b"changed")
+        with self.assertRaisesRegex(ValueError, "repository profile"):
+            self.build()
 
     def test_missing_hal(self):
         (self.src / "hwc/gps.r800.so").unlink()
