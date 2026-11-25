@@ -25,6 +25,12 @@
 
 static const char *const names[] = {"system", "system_ext", "product", "vendor", "odm", "runtime"};
 
+static int fail(const char *stage, int code)
+{
+    fprintf(stderr, "r800-virt-disk: FAIL stage=%s code=%d\n", stage, code);
+    return code;
+}
+
 static int allowed(const char *name)
 {
     for (unsigned i = 0; i < sizeof(names)/sizeof(names[0]); ++i)
@@ -197,9 +203,9 @@ int main(void)
     if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
         mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
         mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID | MS_NOEXEC, NULL) ||
-        mkdir("/mnt", 0755)) return 2;
+        mkdir("/mnt", 0755)) return fail("base-mounts", 2);
     FILE *list = fopen("/galwear-disks.list", "r");
-    if (!list) return 3;
+    if (!list) return fail("disk-manifest-open", 3);
     char name[32], dev[16], line[80];
     unsigned count = 0;
     while (fgets(line, sizeof(line), list)) {
@@ -207,11 +213,16 @@ int main(void)
         if (!strchr(line, '\n') || sscanf(line, "%31s %15s %c", name, dev, &extra) != 2 ||
             !allowed(name) || count >= 6 ||
             strlen(dev) != 3 || dev[0] != 'v' || dev[1] != 'd' ||
-            dev[2] != (char)('a' + count) || mount_disk(name))
+            dev[2] != (char)('a' + count))
+            return fail("disk-manifest-parse", 4);
+        int mount_result = mount_disk(name);
+        if (mount_result) {
+            fprintf(stderr, "r800-virt-disk: FAIL stage=mount name=%s code=%d\n", name, mount_result);
             return 4;
+        }
         ++count;
     }
-    if (ferror(list) || fclose(list) || !count) return 5;
+    if (ferror(list) || fclose(list) || !count) return fail("disk-manifest-end", 5);
     /* No unlisted device is mounted; images stay mounted read-only. */
     printf("r800-virt-disk: PASS count=%u policy=not-loaded android=not-started\n", count);
 #ifdef GALWEAR_SERVICE_PROBE
@@ -219,11 +230,12 @@ int main(void)
      * Existing console descriptors are retained; no device is reopened. */
     if (umount("/dev") || mount("tmpfs", "/dev", "tmpfs", MS_NOSUID | MS_NOEXEC, "size=8m,mode=0755") ||
         mkdir("/dev/socket", 0755) || mount("tmpfs", "/data", "tmpfs",
-        MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=8m,mode=0755")) return 8;
+        MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=8m,mode=0755")) return fail("ram-dev-data", 8);
     puts("r800-ext4-service: ram-dev-data=PASS");
 #endif
 #ifdef GALWEAR_LABEL_PROBE
-    if (policy_and_labels()) return 6;
+    int policy_result = policy_and_labels();
+    if (policy_result) return fail("policy-and-labels", policy_result);
 #endif
 #ifdef GALWEAR_SERVICE_PROBE
     char path[] = "/system/bin/galwear_property_service";
@@ -232,7 +244,7 @@ int main(void)
     char *const env[] = {NULL};
     puts("r800-ext4-service: exec=libinit-harness");
     execve(path, args, env);
-    return 9;
+    return fail("service-exec", 9);
 #endif
 #ifdef GALWEAR_TRANSITION_PROBE
     char path[] = "/system/bin/init";
@@ -241,7 +253,7 @@ int main(void)
     char *const env[] = {NULL};
     puts("r800-ext4-transition: exec=/system/bin/init diagnostic-only");
     execve(path, args, env);
-    return 7;
+    return fail("diagnostic-exec", 7);
 #endif
     const struct timespec delay = {5, 0};
     unsigned sequence = 0;
