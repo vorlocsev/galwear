@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 import r800_payload_candidate as payload
 from test_android_linker_audit import fixture
+from test_r800_stage_components import arm_fixture
 
 
 class PayloadCandidateTests(unittest.TestCase):
@@ -23,7 +24,7 @@ class PayloadCandidateTests(unittest.TestCase):
         for name in payload.HALS:
             self.put(self.src, "hwc/" + name, fixture("arm"))
         for name in payload.BINS:
-            p = self.put(self.src, "bin/" + name, b"fixture")
+            p = self.put(self.src, "bin/" + name, arm_fixture() if name in payload.WIFI_TOOLS else b"fixture")
             p.chmod(0o755)
         for name in payload.DIRS:
             (self.src / name).mkdir()
@@ -63,6 +64,11 @@ class PayloadCandidateTests(unittest.TestCase):
             self.assertNotIn("r800dev/android/DEV", names)
             self.assertNotIn("r800dev/android/userdata.img", names)
             self.assertNotIn("r800dev/android/unlisted/private.db", names)
+
+    def test_wrong_wifi_tool_abi(self):
+        self.put(self.src, "bin/iw", fixture("arm64"))
+        with self.assertRaisesRegex(ValueError, "ARM32 ELF"):
+            self.build()
 
     def test_missing_wifi_firmware(self):
         (self.src / "fw/bcmdhd_sta.bin").unlink()
