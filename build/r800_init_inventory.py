@@ -164,7 +164,10 @@ def audit(root):
     gnss_services = [s for s in services if
         any("android.hardware.gnss" in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
         any(part in s["name"].lower() for part in ("gnss", "gps", "glgps", "loc_launcher"))]
-    relevant = [s for s in services if s in graphics_services or s in audio_services or s in bluetooth_services or s in wifi_services or s in gnss_services or s["name"] in APEX_SERVICES + binder_services or
+    sensor_services = [s for s in services if
+        any("android.hardware.sensors" in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
+        any(part in s["name"].lower() for part in ("sensor", "sensorhub", "ssp"))]
+    relevant = [s for s in services if s in graphics_services or s in audio_services or s in bluetooth_services or s in wifi_services or s in gnss_services or s in sensor_services or s["name"] in APEX_SERVICES + binder_services or
                 s["name"].startswith("zygote") or "art" in s["name"].split("-")]
     duplicates = []
     by_name = {}
@@ -211,6 +214,7 @@ def audit(root):
             "bluetooth_services": bluetooth_services,
             "wifi_services": wifi_services,
             "gnss_services": gnss_services,
+            "sensor_services": sensor_services,
             "art_environment": environment, "duplicate_services": duplicates,
             "unresolved_imports": unresolved, "unknown_top_level": unknown,
             "missing_evidence": missing, "errors": errors,
