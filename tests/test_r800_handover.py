@@ -35,6 +35,17 @@ class HandoverTests(unittest.TestCase):
         result = subprocess.run(["sh", "-n", str(helper)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_radio_bind_before_android_handover(self):
+        source = SCRIPT.read_text()
+        handover = source.index("exec $B switch_root /newroot /init")
+        for needle in ('android_require "radio firmware bind"',
+                       'android_require "Broadcom vendor library bind"',
+                       'bcmdhd_sta.bin', 'nvram_net.txt', 'bcmdhd_clm.blob'):
+            self.assertLess(source.index(needle), handover)
+        helper = (ROOT / "payload/android-helper.sh").read_text()
+        self.assertNotIn("mount --bind $BT/libbt-vendor.so", helper)
+        self.assertNotIn("mount --bind /oem/r800dev/fw /vendor/data/r800dev/fw", helper)
+
     def test_required_command_success(self):
         result = self.run_gate("true")
         self.assertEqual(result.returncode, 0)
