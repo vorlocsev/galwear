@@ -13,6 +13,7 @@ import tempfile
 
 from r800_android_linker_audit import inspect
 from r800_stage_components import static_arm, WIFI_TOOLS
+from r800_peripheral_firmware import REQUIRED, check_bytes
 from r800_android_userspace_preflight import read_regular
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "installer"))
@@ -129,6 +130,10 @@ def inventory(src, release):
             expected = read_regular(checked("src/vendor/libbt/bt_vendor.conf", release), 65536)
             if raw != expected:
                 raise ValueError("Bluetooth configuration differs from repository profile")
+    for name in REQUIRED:
+        if name not in entries:
+            raise ValueError("Missing peripheral firmware: " + name)
+        check_bytes(name, read_regular(checked(name), 64*1024**2))
     for name in SINGLE:
         add(checked(name), name)
     for name, size in ASSET_SIZES.items():
