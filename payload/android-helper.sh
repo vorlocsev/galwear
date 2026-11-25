@@ -206,9 +206,12 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
             stop_child "$gpsd_pid" || return 1; gpsd_pid=
             stop_child "$lhd_pid" || return 1; lhd_pid=
         }
-        # $ in a subshell can be the parent shell PID; obtain actual PPid
-        # from an immediate /proc reader whose parent is this supervisor.
-        supervisor_pid=$("$B" awk '/^PPid:/ {print $2; exit}' /proc/self/status)
+        # Shell PID variables may identify the parent shell. Read /proc/self
+        # using a builtin in this subshell rather than an external command.
+        supervisor_pid=
+        while read -r key value rest; do
+            if [ "$key" = Pid: ]; then supervisor_pid=$value; break; fi
+        done < /proc/self/status
         case "$supervisor_pid" in ''|*[!0-9]*) exit 1;; esac
         trap 'trap - EXIT HUP INT TERM; stop_stack; exit 0' HUP INT TERM
         trap 'stop_stack' EXIT
