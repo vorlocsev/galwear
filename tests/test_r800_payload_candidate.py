@@ -32,6 +32,8 @@ class PayloadCandidateTests(unittest.TestCase):
             data = fixture("arm") if name.endswith(".so") else b"synthetic radio input"
             self.put(self.src, name, data)
         self.put(self.rel, "src/vendor/libbt/bt_vendor.conf", b"synthetic radio input")
+        for name in payload.REQUIRED:
+            self.put(self.src, name, b"synthetic patch\0" if name.endswith(".txt") else b"synthetic firmware")
         for name in payload.SINGLE:
             self.put(self.src, name, b"fixture")
         for name, size in payload.ASSET_SIZES.items():
@@ -76,6 +78,11 @@ class PayloadCandidateTests(unittest.TestCase):
         self.assertFalse(report["safe_to_flash"])
         with tarfile.open(self.out) as tar:
             self.assertFalse(any(n.startswith("r800dev/root/") for n in tar.getnames()))
+
+    def test_missing_peripheral_firmware(self):
+        (self.src / "fw/vts.bin").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing peripheral firmware"):
+            self.build()
 
     def test_missing_wifi_firmware(self):
         (self.src / "fw/bcmdhd_sta.bin").unlink()
