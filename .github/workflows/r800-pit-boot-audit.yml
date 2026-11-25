@@ -1,0 +1,31 @@
+name: SM-R800 PIT boot layout offline audit
+
+on:
+  push:
+    branches:
+      - development/r800-display-error-propagation-20261125
+    paths:
+      - .github/workflows/r800-pit-boot-audit.yml
+      - build/r800_pit_boot_audit.py
+      - tests/test_pit_boot_audit.py
+      - installer/r800_safety.py
+      - installer/r800_geometry.py
+      - installer/r800_recovery_readiness.py
+      - installer/r800_preflight_report.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-pit-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Compile Python source and run synthetic PIT tests
+        run: |
+          python3 -m py_compile build/r800_pit_boot_audit.py
+          python3 -m unittest discover -s tests -p 'test_pit_boot_audit.py' -v
