@@ -9,10 +9,11 @@
 int main(int c, char **v)
 {
 	int fd, r;
-	if (c != 3) { fprintf(stderr, "usage: fsfreeze -f|-u <mnt>\n"); return 2; }
+	if (c != 3 || (strcmp(v[1], "-f") && strcmp(v[1], "-u"))) { fprintf(stderr, "usage: fsfreeze -f|-u <mnt>\n"); return 2; }
 	fd = open(v[2], O_RDONLY);
 	if (fd < 0) { perror("open"); return 1; }
 	r = ioctl(fd, strcmp(v[1], "-f") ? FITHAW : FIFREEZE, 0);
 	if (r) perror("ioctl");
+	close(fd);
 	return r ? 1 : 0;
 }
