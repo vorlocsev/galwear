@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 import r800_qemu_guest_abi as a
 
-LOG = (a.EXPECTED + a.START + b"\n" + a.ABI_EXPECTED + a.END + b"\n"
+LOG = (a.EXPECTED + a.START + b"\n" + a.ABI_EXPECTED + b"\n".join(a.BINDER_EXPECTED) + b"\n" + a.END + b"\n"
        + a.HEARTBEAT_PREFIX + b"00000001\n")
 
 
@@ -34,6 +34,18 @@ class GuestAbiTests(unittest.TestCase):
     def test_abi_failure_rejected(self):
         with self.assertRaisesRegex(ValueError, "sequence"):
             a.inspect_abi(LOG.replace(a.END, b"r800-abi: FAIL mmap\n" + a.END))
+
+    def test_missing_binder_device(self):
+        with self.assertRaisesRegex(ValueError, "Binder diagnostic sequence"):
+            a.inspect_abi(LOG.replace(a.BINDER_EXPECTED[1], b""))
+
+    def test_wrong_binder_version(self):
+        with self.assertRaisesRegex(ValueError, "Binder diagnostic sequence"):
+            a.inspect_abi(LOG.replace(b"version=8", b"version=7", 1))
+
+    def test_binder_after_completion(self):
+        with self.assertRaisesRegex(ValueError, "outside ABI completion"):
+            a.inspect_abi(LOG.replace(a.END + b"\n", b"").replace(a.BINDER_EXPECTED[0], a.END + b"\n" + a.BINDER_EXPECTED[0]))
 
     def test_baseline_kernel_hash_and_status(self):
         with tempfile.TemporaryDirectory() as tmp:
