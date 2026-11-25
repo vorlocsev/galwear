@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/statvfs.h>
 #include <sys/vfs.h>
 #include <time.h>
@@ -199,6 +200,17 @@ static int policy_and_labels(void)
 int main(void)
 {
     if (getpid() != 1 || setvbuf(stdout, NULL, _IONBF, 0)) return 1;
+    struct stat console_stat;
+    if (fstat(STDOUT_FILENO, &console_stat) == 0 && S_ISCHR(console_stat.st_mode)) {
+        printf("r800-console: stage=kernel device=%u:%u inode=%llu filesystem=%u:%u\n",
+               (unsigned)major(console_stat.st_rdev), (unsigned)minor(console_stat.st_rdev),
+               (unsigned long long)console_stat.st_ino,
+               (unsigned)major(console_stat.st_dev), (unsigned)minor(console_stat.st_dev));
+        fflush(stdout);
+    } else {
+        fputs("r800-console: stage=kernel descriptor-unavailable\n", stderr);
+        fflush(stderr);
+    }
     puts("r800-readonly-init: NON-RELEASE smoke image; no eMMC mount, no Wear OS handover");
     if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
         mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
