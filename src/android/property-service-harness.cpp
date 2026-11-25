@@ -9,6 +9,7 @@
 #include <selinux/android.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
@@ -34,6 +35,17 @@ int main(int argc, char** argv) {
         lstat("/dev/socket/property_service", &st) == 0 || errno != ENOENT ||
         lstat("/dev/socket", &st) != 0 || !S_ISDIR(st.st_mode))
         return 3;
+    struct stat console_stat;
+    if (fstat(STDOUT_FILENO, &console_stat) == 0 && S_ISCHR(console_stat.st_mode)) {
+        printf("r800-console: stage=init device=%u:%u inode=%llu filesystem=%u:%u\n",
+               (unsigned)major(console_stat.st_rdev), (unsigned)minor(console_stat.st_rdev),
+               (unsigned long long)console_stat.st_ino,
+               (unsigned)major(console_stat.st_dev), (unsigned)minor(console_stat.st_dev));
+        fflush(stdout);
+    } else {
+        fputs("r800-console: stage=init descriptor-unavailable\n", stderr);
+        fflush(stderr);
+    }
     std::puts("r800-property-service: domain=u:r:init:s0 enforce=1");
     std::fflush(stdout);
     android::base::InitLogging(argv, &android::base::StderrLogger);
