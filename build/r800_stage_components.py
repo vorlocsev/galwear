@@ -14,7 +14,7 @@ from r800_android_userspace_preflight import read_regular
 from r800_stage_hals import stage as stage_hals
 from r800_vendor_inputs import file_info
 
-TOOLS = ("bin/loopdio", "bin/r800boost", "bin/r800keys", "bin/ukey",
+TOOLS = ("bin/fsfreeze", "bin/loopdio", "bin/r800boost", "bin/r800keys", "bin/ukey",
          "bin/gpiotool", "bin/wpcd", "charger/r800charger",
          "charger/r800wdui", "charger/wpcd")
 MISSING = ("Samsung combination firmware and verified NZIT template",
@@ -22,7 +22,7 @@ MISSING = ("Samsung combination firmware and verified NZIT template",
            "Complete donor HIDL services and dependency closure; libeffectsconfig.so",
            "Tizen glibc libraries and final linked GPSBridge",
            "BCMDHD STA/NVRAM/CLM and BCM43012 firmware",
-           "Curated busybox, busybox-extras, fsfreeze, root, tzlite and lib trees",
+           "Curated busybox, busybox-extras, root, tzlite and lib trees",
            "Original charger digits and bootanimation frame; prepared display assets",
            "Independently prepared required persistent input; no device state copying",
            "PIT and recovery verification; physical acceptance")
