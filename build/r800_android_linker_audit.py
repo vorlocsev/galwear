@@ -372,12 +372,81 @@ def directories(abi):
             f"/apex/com.android.runtime/{lib}/bionic"]
 
 
+def symbol_candidates(seen, edges):
+    """Potential providers in dependency closure, not Android lookup order."""
+    missing, weak_missing, ambiguous, incomplete = [], [], [], []
+    matched = 0
+    budget = 4000000
+    # Index exports once; the closure and version constraints are applied below.
+    by_name = {}
+    for path, info in seen.items():
+        if info is not None:
+            for symbol in info["symbol_exports"]:
+                by_name.setdefault((info["abi"], symbol["name"]), []).append((path, symbol))
+
+    def closure(start):
+        reached, pending = set(), [start]
+        while pending:
+            path = pending.pop()
+            if path in reached:
+                continue
+            reached.add(path)
+            pending.extend(p for group in edges.get(path, {}).values() for p in group
+                           if p not in reached)
+        return reached
+
+    def compatible(required, provided):
+        # NOTYPE is deliberately permissive; TLS cannot match non-TLS.
+        if (required["type"] == 6) != (provided["type"] == 6):
+            return False
+        if required["version"] is not None:
+            return required["version"] == provided["version"]
+        return not provided["version_hidden"]
+
+    for path, info in seen.items():
+        if info is None or not info["symbol_imports"]:
+            continue
+        reachable = closure(path)
+        uncertain = any(seen.get(p) is None or
+                        (seen[p]["has_dynamic"] and seen[p]["dynamic_symbol_count"] is None)
+                        for p in reachable)
+        uncertain |= any(not group for p in reachable for group in edges.get(p, {}).values())
+        for required in info["symbol_imports"]:
+            record = {"from": path, **required}
+            allowed = reachable
+            if required["version_library"] is not None:
+                allowed = set(edges.get(path, {}).get(required["version_library"], ()))
+            providers = {}
+            for provider, symbol in by_name.get((info["abi"], required["name"]), ()):
+                budget -= 1
+                if budget < 0:
+                    return {"matched": matched, "missing_strong": missing, "missing_weak": weak_missing,
+                            "ambiguous": ambiguous, "incomplete": incomplete, "limit_exceeded": True}
+                if provider in allowed and compatible(required, symbol):
+                    providers[provider] = providers.get(provider, True) and symbol["weak"]
+            if not providers:
+                if uncertain:
+                    incomplete.append(record)
+                elif required["weak"]:
+                    weak_missing.append(record)
+                else:
+                    missing.append(record)
+            elif len(providers) > 1:
+                ambiguous.append({**record, "providers": sorted(providers),
+                                  "strong_providers": sorted(p for p in providers if not providers[p])})
+            else:
+                matched += 1
+    return {"matched": matched, "missing_strong": missing, "missing_weak": weak_missing,
+            "ambiguous": ambiguous, "incomplete": incomplete, "limit_exceeded": False}
+
+
 def audit(root: Path, targets=TARGETS) -> dict:
     queue = list(targets)
     seen, errors, unresolved, ambiguous = {}, [], [], []
     unsupported_search_paths, soname_mismatches = [], []
     version_mismatches, unbound_version_needs = [], []
     unsupported_symbol_objects = []
+    edges = {}
     inventory_records = 0
     inventory_name_bytes = 0
     while queue:
@@ -400,6 +469,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
             errors.append("Aggregate symbol inventory exceeds reporting limit")
             break
         seen[name] = info
+        edges[name] = {}
         if info["unsupported_symbols"]:
             unsupported_symbol_objects.append(name)
         if info["custom_search_path"]:
@@ -432,11 +502,15 @@ def audit(root: Path, targets=TARGETS) -> dict:
                 except (OSError, ValueError) as exc:
                     errors.append(path + ": " + str(exc))
             paths = sorted(candidates.values())
+            edges[name][dep] = paths
             if not paths:
                 unresolved.append({"from": name, "needed": dep, "abi": info["abi"]})
             elif len(paths) > 1:
                 ambiguous.append({"from": name, "needed": dep, "candidates": paths})
             queue.extend(p for p in paths if p not in seen and p not in queue)
+    resolution = symbol_candidates(seen, edges)
+    if resolution["limit_exceeded"]:
+        errors.append("Symbol candidate comparison exceeds inspection limit")
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -445,12 +519,13 @@ def audit(root: Path, targets=TARGETS) -> dict:
             present = False
         apex[name] = {"expanded_tree_present": present}
     return {"schema": "galwear-r800-linker-inventory-v1",
-            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs or unsupported_symbol_objects) else "REVIEW_REQUIRED",
+            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs or unsupported_symbol_objects or resolution["missing_strong"] or resolution["ambiguous"] or resolution["incomplete"]) else "REVIEW_REQUIRED",
             "objects": seen, "missing_candidates": unresolved, "ambiguous_candidates": ambiguous,
             "errors": errors, "unsupported_search_paths": unsupported_search_paths,
             "soname_mismatches": soname_mismatches,
             "version_mismatches": version_mismatches, "unbound_version_needs": unbound_version_needs,
             "unsupported_symbol_objects": unsupported_symbol_objects,
+            "dependency_edges": edges, "symbol_candidates": resolution,
             "symbol_resolution_verified": False,
             "apex": apex, "android_namespace_resolution_verified": False,
             "symbol_versions_verified": False, "apex_activation_verified": False,
