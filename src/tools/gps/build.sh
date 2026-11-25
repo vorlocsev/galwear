@@ -24,14 +24,14 @@ OUT=$PARENT/$(basename -- "$OUT")
 TMP=$(mktemp -d "$PARENT/.gpsbridge.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
 trap 'exit 1' HUP INT TERM
-sha256sum "$SR/libc.so.6" "$SR/libdl.so.2" "$SR/libpthread.so.0" "$SR/ld-linux.so.3" > "$TMP/input.txt"
+(cd "$SR" && sha256sum libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3) > "$TMP/input.txt"
 mkdir "$TMP/libs"
 for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
     cp -- "$SR/$lib" "$TMP/libs/$lib"
     cmp -- "$SR/$lib" "$TMP/libs/$lib"
 done
-sha256sum -c "$TMP/input.txt"
-(cd "$TMP/libs" && sha256sum libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3) > "$TMP/snapshot.txt"
+(cd "$SR" && sha256sum -c "$TMP/input.txt")
+(cd "$TMP/libs" && sha256sum -c "$TMP/input.txt")
 "$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
     -DR800_XTRA_ABI="$XTRA_ABI" -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
     -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
@@ -42,8 +42,8 @@ grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
 grep -Fq '/lib/ld-linux.so.3' "$TMP/elf.txt"
 python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "$TMP/libs"
-(cd "$TMP/libs" && sha256sum -c "$TMP/snapshot.txt")
-sha256sum -c "$TMP/input.txt"
+(cd "$TMP/libs" && sha256sum -c "$TMP/input.txt")
+(cd "$SR" && sha256sum -c "$TMP/input.txt")
 ln -- "$TMP/gpsbridge" "$OUT"
 sha256sum "$OUT"
 echo "R800_XTRA_ABI=$XTRA_ABI (0=disabled; 1=legacy; 2=sized vendor candidate)"
