@@ -18,6 +18,7 @@ from r800_qemu_user_init import EXPECTED, HEARTBEAT_PREFIX
 
 START = b"r800-abi-pid1: guest PID=1"
 END = b"r800-abi-pid1: complete"
+BINDER_EXPECTED = [b"r800-binder: " + name + b" version=8 mmap=PASS" for name in (b"binder", b"hwbinder", b"vndbinder")] + [b"r800-binder: PASS"]
 
 
 def inspect_abi(log: bytes) -> dict:
@@ -35,7 +36,15 @@ def inspect_abi(log: bytes) -> dict:
         raise ValueError("ABI stages outside PID1 marker window")
     if any(line.startswith(HEARTBEAT_PREFIX) for line in lines[:end]):
         raise ValueError("Heartbeat before ABI completion")
-    return {"guest_pid1_reported": True, "abi_completed_before_heartbeat": True,
+    binder_lines = [line for line in lines if line.startswith(b"r800-binder:")]
+    if binder_lines != BINDER_EXPECTED:
+        raise ValueError("Unexpected Binder diagnostic sequence")
+    abi_end = lines.index(ABI_EXPECTED.splitlines()[-1])
+    if not abi_end < lines.index(binder_lines[0]) < lines.index(binder_lines[-1]) < end:
+        raise ValueError("Binder stages outside ABI completion window")
+    return {"binder_version_reported": 8, "binder_devices_checked": ["binder", "hwbinder", "vndbinder"],
+            "binder_buffer_mapping_reported": True, "binder_transactions_tested": False,
+            "bionic_tested": False, "guest_pid1_reported": True, "abi_completed_before_heartbeat": True,
             **inspect_result(b"\n".join(abi_lines) + b"\n", b"", 0)}
 
 
