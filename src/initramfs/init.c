@@ -72,8 +72,11 @@ void _start(void) {
   unsigned char var[160], fix[80]; unsigned int *pix = 0;
   unsigned int xres = 0, yres = 0, bpp = 0, line = 0, smem = 0;
   if (fb >= 0) {
-    kv("FBIOGET_VSCREENINFO: ", sc(29, fb, 0x4600, (s64)var, 0, 0));
-    kv("FBIOGET_FSCREENINFO: ", sc(29, fb, 0x4602, (s64)fix, 0, 0));
+    s64 vr = sc(29, fb, 0x4600, (s64)var, 0, 0);
+    s64 fr = sc(29, fb, 0x4602, (s64)fix, 0, 0);
+    kv("FBIOGET_VSCREENINFO: ", vr);
+    kv("FBIOGET_FSCREENINFO: ", fr);
+    if (vr == 0 && fr == 0) {
     xres = *(unsigned int *)(var + 0); yres = *(unsigned int *)(var + 4);
     bpp = *(unsigned int *)(var + 24);
     smem = *(unsigned int *)(fix + 24); line = *(unsigned int *)(fix + 48);
@@ -82,9 +85,20 @@ void _start(void) {
     kv("blue.offset ", *(unsigned int *)(var + 56));
     { char id[17]; for (int k = 0; k < 16; k++) id[k] = fix[k]; id[16] = 0; klog(id); }
     kv("FBIOBLANK unblank: ", sc(29, fb, 0x4611, 0, 0, 0));
-    s64 m = smem ? sc6(222, 0, smem, 3, 1, fb, 0) : -22;
-    kv("mmap: ", (m < 0 && m > -4096) ? m : 1);
-    if (!(m < 0 && m > -4096)) pix = (unsigned int *)m;
+    /* A failed ioctl or unsupported geometry must not prevent handover. */
+    if (bpp == 32 && xres == 360 && yres == 360 &&
+        line >= (u64)xres * 4 && (line % 4) == 0 &&
+        (u64)(yres - 1) * line + (u64)xres * 4 <= smem &&
+        smem <= 64U * 1024U * 1024U) {
+      s64 m = sc6(222, 0, smem, 3, 1, fb, 0);
+      kv("mmap: ", (m < 0 && m > -4096) ? m : 1);
+      if (m > 0) pix = (unsigned int *)m;
+    } else {
+      klog("framebuffer geometry unsupported; skipping splash");
+    }
+    } else {
+      klog("framebuffer metadata unavailable; skipping splash");
+    }
   }
   unsigned int cols[3] = { 0xffff0000, 0xff00ff00, 0xff0000ff };
   /* ---- hand over to /data/r800dev/start.sh ---- */
@@ -95,7 +109,8 @@ void _start(void) {
    * replayed stale metadata over everything Android had written to p17 (run 112:
    * helper updates and the STAY flag silently rolled back).
    */
-  kv("mount p17 rw: ", sc(40, (s64)"/dev/mmcblk0p17", (s64)"/data", (s64)"ext4", 0, 0));
+  s64 data_mount = sc(40, (s64)"/dev/mmcblk0p17", (s64)"/data", (s64)"ext4", 0, 0);
+  kv("mount p17 rw: ", data_mount);
   /*
    * Boot splash: /data/r800dev/splash.raw (xres*yres XRGB, made from param's
    * logo.jpg, the "Galaxy Watch" S-Boot shows), so the screen stays on the logo
@@ -107,7 +122,7 @@ void _start(void) {
       unsigned int *row = (unsigned int *)((char *)pix + (u64)y * line);
       for (unsigned int x = 0; x < xres; x++) row[x] = 0xff000000;
     }
-    s64 sf = openat("/data/r800dev/splash.raw", 0);
+    s64 sf = data_mount == 0 ? openat("/data/r800dev/splash.raw", 0) : -1;
     if (sf >= 0) {
       for (unsigned int y = 0; y < yres; y++)
         if (read(sf, (char *)pix + (u64)y * line, xres * 4) != (s64)(xres * 4)) break;
@@ -116,7 +131,7 @@ void _start(void) {
     kv("splash: ", sf);
     sc(29, fb, 0x4606, (s64)var, 0, 0);
   }
-  {
+  if (data_mount == 0) {
     char *argv[] = { "sh", "/data/r800dev/start.sh", 0 };
     char *envp[] = { "PATH=/bin:/sbin:/data/r800dev/bin", "HOME=/", "TERM=vt100", 0 };
     kv("execve start.sh: ", sc(221, (s64)"/data/r800dev/bin/busybox", (s64)argv, (s64)envp, 0, 0));
