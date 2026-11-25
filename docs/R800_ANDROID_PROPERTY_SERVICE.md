@@ -619,3 +619,49 @@ checks; do not weaken the policy to make the test pass.
 Actual image creation, compilation and guest execution remain
 unverified. The next gate is a dynamic libinit service fixture with
 its dedicated policy and separately audited executable mounts.
+
+
+## Dynamic original Property Service on pre-labeled EXT4
+
+The separate service fixture uses the previously built diagnostic
+client policy, not the stock policy. Rebuild all image reports
+against that policy (system, context partitions, preserved original
+APEX payload). Use the same staged ELF files as the stock control.
+The system image builder takes --service-fixture, mutually exclusive
+with --transition-init, and adds the exact experimental single-namespace
+config at /system/etc/ld.config.txt, the Android 11 linker fallback.
+It requires explicit diagnostic client and init_exec service labels.
+This is not generated Android linkerconfig; linker fallback selection
+is not independently proven by the console markers.
+
+    aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static \
+      -DGALWEAR_LABEL_PROBE -DGALWEAR_SERVICE_PROBE \
+      src/initramfs/virt-readonly-disks.c -o /absolute/ext4-service-first-stage
+
+Generate its initramfs spec as usual. Run
+build/r800_qemu_ext4_property_service.py --help for the complete
+arguments. A successful stock EXT4 static init-domain transition
+report and original system image report are mandatory controls.
+The runner compares the system binary/library inventory (including
+aliases and modes) and the original APEX payload digest; the fixture
+policy must differ from the stock policy. Audit the fixture with
+checkfc and sepolicy-analyze, reject permissive init/kernel/client,
+and require the exact fixture file/property context hashes.
+
+All attached images remain read-only, nodev and nosuid. Both system
+and runtime APEX need executable mappings for the dynamic linker
+and libraries; other partitions retain noexec. After mounting disks
+the first stage replaces devtmpfs with private RAM /dev and mounts
+RAM /data, loads the fixture policy and checks all selected effective
+labels. Only the fixed libinit harness is executed. The init-domain
+harness restores the volatile /dev and /dev/socket labels, not
+immutable disk files. The original property service and isolated
+client must report all eight ordered protocol markers, including
+distinct read-only and MAC errors, and then heartbeat.
+
+The expected status is VIRT_GALWEAR_EXT4_PROPERTY_SERVICE_ONLY.
+No full Android init, genuine generated linkerconfig, apexd, AVB,
+physical watch or flash acceptance is implied. AOSP linkage, volatile
+directory labeling, inherited console access, and service runtime
+remain real-guest blockers until verified. Do not grant broad
+permissions or relax enforcing mode to force the test to pass.
