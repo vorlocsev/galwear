@@ -1,0 +1,36 @@
+name: SM-R800 GPS offline compile gate (NON-RELEASE)
+
+on:
+  push:
+    branches:
+      - development/r800-gps-ci-20261125
+    paths:
+      - '.github/workflows/r800-gps-offline.yml'
+      - 'src/tools/gps/**'
+      - 'build/r800_*.py'
+      - 'build/r800_gps_*.sh'
+      - 'tests/*gps*'
+      - 'tests/*glibc*'
+      - 'tests/test_r800_extract_ext4.py'
+      - 'tests/test_android_linker_audit.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-gps:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host compilers and fixture tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc clang binutils e2fsprogs
+      - name: Run exact-head offline checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh build/r800_gps_offline_checks.sh
