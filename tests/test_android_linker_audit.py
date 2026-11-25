@@ -100,6 +100,45 @@ class LinkerTests(unittest.TestCase):
         self.assertEqual(out["status"], "REVIEW_REQUIRED")
         self.assertEqual(len(out["ambiguous_candidates"][0]["candidates"]), 2)
 
+    def test_executable_is_not_library_candidate(self):
+        self.put("init", fixture(needed=["libx.so"]))
+        child = fixture()
+        struct.pack_into("<H", child, 16, 2)
+        self.put("system/lib64/libx.so", child)
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["missing_candidates"][0]["needed"], "libx.so")
+        self.assertTrue(any("ET_DYN" in error for error in out["errors"]))
+
+    def test_static_shared_object_is_not_library_candidate(self):
+        self.put("init", fixture(needed=["libx.so"]))
+        child = fixture()
+        struct.pack_into("<H", child, 56, 1)
+        self.put("system/lib64/libx.so", child)
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["missing_candidates"][0]["needed"], "libx.so")
+
+    def test_unmodeled_rpath_and_runpath_require_review(self):
+        for tag in (15, 29):
+            with self.subTest(tag=tag):
+                child = fixture()
+                struct.pack_into("<qQ", child, 224, tag, 0)
+                self.put("init", child)
+                out = audit.audit(self.root, ("/init",))
+                self.assertEqual(out["status"], "REVIEW_REQUIRED")
+                self.assertEqual(out["unsupported_search_paths"], ["/init"])
+                self.assertFalse(out["safe_to_flash"])
+
+    def test_transitive_runpath_requires_review(self):
+        self.put("init", fixture(needed=["libx.so"]))
+        child = fixture()
+        struct.pack_into("<qQ", child, 224, 29, 0)
+        self.put("system/lib64/libx.so", child)
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["unsupported_search_paths"], ["/system/lib64/libx.so"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
