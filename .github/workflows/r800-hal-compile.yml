@@ -11,6 +11,7 @@ on:
       - "src/tools/**"
       - "build/r800_tinyalsa_sync_test.py"
       - "build/r800_stage_hals.py"
+      - "build/r800_stage_components.py"
       - "build/r800_vendor_inputs.py"
       - "src/vendor/**"
       - "src/vendor/audio/tinyalsa-2.0.0-sync-ptr.patch"
@@ -72,6 +73,14 @@ jobs:
           d8=$(find "$PWD/tools" -name d8 -type f)
           cd "$GITHUB_WORKSPACE"
           sh src/tools/keepwifi/build.sh "$jar" "$(dirname "$d8")" "$RUNNER_TEMP/r800-keepwifi"
+      - name: Assemble partial compiled component tree
+        run: |
+          python3 build/r800_stage_components.py --hal-dir "$RUNNER_TEMP/r800-hal" \
+            --vendor-sources src/vendor --tools "$RUNNER_TEMP/r800-tools" \
+            --bluetooth "$RUNNER_TEMP/r800-bt" --keepwifi "$RUNNER_TEMP/r800-keepwifi" \
+            --output "$RUNNER_TEMP/r800-components" --source-sha "$GITHUB_SHA"
+          test ! -e "$RUNNER_TEMP/r800-components/payload/gpsbridge"
+          test ! -e "$RUNNER_TEMP/r800-components/payload/android/system.img"
       - name: Upload compiler and ELF evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -86,5 +95,6 @@ jobs:
             ${{ runner.temp }}/r800-bt/bt-build-evidence.txt
             ${{ runner.temp }}/r800-tools/evidence/*.txt
             ${{ runner.temp }}/r800-keepwifi/*-evidence.txt
+            ${{ runner.temp }}/r800-components/component-evidence.json
           if-no-files-found: warn
           retention-days: 7
