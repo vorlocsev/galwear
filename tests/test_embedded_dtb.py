@@ -56,6 +56,28 @@ class DeltaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside"):
             a.remove_external_initrd(SOURCE.replace('    model =', '    linux,initrd-start = <0x84000000>;\n    model ='))
 
+    def test_minimal_profile_exact_delta(self):
+        source = SOURCE.replace("console=ttySAC0 root=/dev/ram0", a.HISTORICAL_BOOTARGS)
+        expected = a.remove_external_initrd(source).replace(a.HISTORICAL_BOOTARGS, a.MINIMAL_BOOTARGS)
+        self.assertEqual(a.derive(source, True), expected)
+        self.assertNotIn("selinux=permissive", expected)
+        self.assertIn("rdinit=/init ro", expected)
+
+    def test_unexpected_bootargs_rejected(self):
+        with self.assertRaisesRegex(ValueError, "historical bootargs"):
+            a.derive(SOURCE, True)
+
+    @unittest.skipUnless(shutil.which("dtc") and shutil.which("fdtget"), "DTC tools required")
+    def test_compiled_minimal_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "source.dts"
+            src.write_text(SOURCE.replace("console=ttySAC0 root=/dev/ram0", a.HISTORICAL_BOOTARGS))
+            report = a.generate(src, root / "derived", minimal=True)
+            self.assertEqual(report["derived_bootargs"], a.MINIMAL_BOOTARGS)
+            self.assertTrue(report["all_other_canonical_properties_equal"])
+            self.assertFalse(report["safe_to_flash"])
+
     @unittest.skipUnless(shutil.which("dtc") and shutil.which("fdtget"), "DTC tools required")
     def test_compile_and_compare_full_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
