@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "development/r800-kernel-source-ci-20261124"
+      - "development/r800-display-error-propagation-20261125"
     paths:
       - ".github/workflows/r800-kernel-compile-smoke.yml"
       - "build/r800_kernel_compile_smoke.sh"
@@ -22,6 +23,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify exact triggering commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Validate compile recipe only
         run: |
@@ -58,11 +62,32 @@ jobs:
                 /source /repo /scratch/compiled-kernel
             '
 
+      - name: Verify ABOX and compat PCM actually built
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/compiled-kernel"
+          grep -Fx 'CONFIG_SND_SOC_SAMSUNG_ABOX=y' "$out/.config"
+          grep -Fx 'CONFIG_COMPAT=y' "$out/.config"
+          grep -Fx 'CONFIG_SND_PCM=y' "$out/.config"
+          test -s "$out/sound/soc/samsung/abox/abox.o"
+          test -s "$out/sound/core/snd-pcm.o"
+          test -s "$out/arch/arm64/boot/Image"
+
       - name: Record evidence only, never upload compiled Image
         if: always()
         run: |
           {
+            echo "galwear_commit=$GITHUB_SHA"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
             echo "source_base=50db73fc799f20a7120a8b5f653b16cc123d856f"
+            sha256sum "$GITHUB_WORKSPACE/src/kernel/r800-wearos.patch" "$GITHUB_WORKSPACE/src/kernel/r800.config"
+            for f in .config sound/soc/samsung/abox/abox.o sound/core/snd-pcm.o; do
+              if [ -s "$RUNNER_TEMP/compiled-kernel/$f" ]; then
+                sha256sum "$RUNNER_TEMP/compiled-kernel/$f"
+              fi
+            done
+            echo "safe_to_flash=false"
             echo "build_kind=smoke_non_release"
             echo "embedded_initramfs=disabled_in_temporary_config"
             echo "device_contacted=false"
