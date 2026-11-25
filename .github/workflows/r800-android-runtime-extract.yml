@@ -36,6 +36,9 @@ on:
       - build/r800_qemu_ext4_property_service.py
       - build/r800_ext4_property_pipeline.py
       - build/r800_ext4_nosuid_policy_gate.py
+      - build/r800_ext4_exec_access_audit.py
+      - build/r800_ext4_console_contract.py
+      - tests/test_ext4_exec_access_audit.py
       - tests/test_ext4_nosuid_policy_gate.py
       - tests/test_ext4_property_pipeline.py
       - tests/test_ext4_evidence_boundaries.py
@@ -123,6 +126,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_qemu_ext4_property_service.py' -v
           python3 -m unittest discover -s tests -p 'test_ext4_property_pipeline.py' -v
           python3 -m unittest discover -s tests -p 'test_ext4_nosuid_policy_gate.py' -v
+          python3 -m unittest discover -s tests -p 'test_ext4_exec_access_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_ext4_evidence_boundaries.py' -v
           python3 -m compileall -q build tests
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
