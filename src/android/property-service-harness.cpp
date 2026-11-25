@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <selinux/selinux.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/system_properties.h>
@@ -14,8 +15,16 @@
 
 extern "C" int __system_property_add(const char*, unsigned int, const char*, unsigned int);
 
+static bool context_is(const char* expected) {
+    char* actual = nullptr;
+    if (getcon(&actual) < 0) return false;
+    bool match = strcmp(actual, expected) == 0;
+    freecon(actual);
+    return match;
+}
+
 int main(int argc, char** argv) {
-    if (argc != 2 || strcmp(argv[1], "--virt-property-service") || getpid() != 1)
+    if (argc != 2 || strcmp(argv[1], "--virt-property-service") || getpid() != 1 || !context_is("u:r:init:s0") || security_getenforce() != 1)
         return 2;
     // Never initialize properties on an existing Android installation.
     struct stat st {};
@@ -23,7 +32,7 @@ int main(int argc, char** argv) {
         lstat("/dev/socket/property_service", &st) == 0 || errno != ENOENT ||
         lstat("/dev/socket", &st) != 0 || !S_ISDIR(st.st_mode))
         return 3;
-    std::puts("r800-readonly-init: NON-RELEASE smoke image; no eMMC mount, no Wear OS handover");
+    std::puts("r800-property-service: domain=u:r:init:s0 enforce=1");
     std::fflush(stdout);
     android::base::InitLogging(argv, &android::base::StderrLogger);
     android::init::PropertyInit();
@@ -35,9 +44,16 @@ int main(int argc, char** argv) {
         return 7;
     int init_socket = -1;
     android::init::StartPropertyService(&init_socket);
+    // No init event loop in this harness: suppress property-change dispatch.
+    android::init::StopSendingMessages();
     if (init_socket < 0 || lstat("/dev/socket/property_service", &st) ||
         !S_ISSOCK(st.st_mode))
         return 4;
+    char* socket_label = nullptr;
+    if (lgetfilecon("/dev/socket/property_service", &socket_label) < 0) return 8;
+    bool socket_ok = strcmp(socket_label, "u:object_r:property_socket:s0") == 0;
+    freecon(socket_label);
+    if (!socket_ok) return 8;
     // This is only service startup evidence, not client transaction evidence.
     std::puts("r800-property-service: original-libinit socket-created");
     std::fflush(stdout);
@@ -58,6 +74,7 @@ int main(int argc, char** argv) {
     } while (waited < 0 && errno == EINTR);
     if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status))
         return 6;
+    if (security_getenforce() != 1 || !context_is("u:r:init:s0")) return 9;
     std::puts("r800-property-service: client-exit=0");
     std::fflush(stdout);
     // Keep libinit's service thread and internal socket alive. This harness
