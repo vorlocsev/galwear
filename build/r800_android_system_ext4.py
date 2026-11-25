@@ -32,7 +32,7 @@ def system_entries(entries, contexts):
     for name, item in entries:
         if name != "system" and not name.startswith("system/"):
             continue
-        if not PATH.fullmatch(name) or ".." in Path(name).parts:
+        if not PATH.fullmatch(name) or str(Path(name)) != name or ".." in Path(name).parts:
             raise ValueError("Unexpected system entry")
         if item[0] & 0o170000 not in MODES:
             raise ValueError("Unsupported system inode type")
@@ -142,6 +142,9 @@ def build(a):
     if sha(policy_data) != policy["policy_sha256"]:
         raise ValueError("Policy changed")
     entries, rootfs = prepare_entries(a.staged, root, a.preflight_init, a.readelf)
+    if rootfs["property_contexts_sha256"] != policy["property_contexts_sha256"]:
+        raise ValueError("Property contexts changed since policy audit")
+    prepared = entries
     fc = snapshot(regular(root, FILE_CONTEXTS[0]), MAX_CONTEXTS)
     if b"\0" in fc:
         raise ValueError("Expected text file_contexts")
@@ -153,7 +156,7 @@ def build(a):
             raise ValueError("Service and static transition modes are exclusive")
         # Android 11 linker falls back to /system/etc/ld.config.txt when
         # generated /linkerconfig/ld.config.txt is absent.
-        configs = [v for n,v in prepare_entries(a.staged, root, a.preflight_init, a.readelf)[0]
+        configs = [v for n,v in prepared
                    if n == "linkerconfig/ld.config.txt"]
         if len(configs) != 1 or "system/etc/ld.config.txt" in entries:
             raise ValueError("Missing or conflicting experimental linker config")
