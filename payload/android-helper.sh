@@ -172,15 +172,45 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
         lhd_pid= gpsd_pid= bridge_pid=
         stop_child() {
             [ -n "$1" ] || return 0
-            kill "$1" 2>/dev/null || :
+            # Only PIDs from this shell's foreground children; confirm PPid
+            # before each signal. This is not a pidfd and has a small race.
+            child_alive() {
+                [ "$("$B" awk '/^PPid:/ {print $2; exit}' "/proc/$1/status" 2>/dev/null)" = "$supervisor_pid" ] &&
+                    kill -0 "$1" 2>/dev/null
+            }
+            if child_alive "$1"; then
+                kill -TERM "$1" 2>/dev/null || :
+                grace=0
+                while child_alive "$1" && [ "$grace" -lt 5 ]; do
+                    "$B" sleep 1
+                    grace=$((grace+1))
+                done
+                if child_alive "$1"; then
+                    kill -KILL "$1" 2>/dev/null || :
+                    grace=0
+                    while child_alive "$1" && [ "$grace" -lt 5 ]; do
+                        "$B" sleep 1
+                        grace=$((grace+1))
+                    done
+                fi
+                if child_alive "$1"; then
+                    k "gnss: child did not terminate; no restart"
+                    return 1
+                fi
+            fi
+            # No wait on a process that may still be blocked.
             wait "$1" 2>/dev/null || :
         }
         stop_stack() {
-            stop_child "$bridge_pid"; bridge_pid=
-            stop_child "$gpsd_pid"; gpsd_pid=
-            stop_child "$lhd_pid"; lhd_pid=
+            stop_child "$bridge_pid" || return 1; bridge_pid=
+            stop_child "$gpsd_pid" || return 1; gpsd_pid=
+            stop_child "$lhd_pid" || return 1; lhd_pid=
         }
-        trap 'stop_stack; exit 0' HUP INT TERM
+        # $ in a subshell can be the parent shell PID; obtain actual PPid
+        # from an immediate /proc reader whose parent is this supervisor.
+        supervisor_pid=$("$B" awk '/^PPid:/ {print $2; exit}' /proc/self/status)
+        case "$supervisor_pid" in ''|*[!0-9]*) exit 1;; esac
+        trap 'trap - EXIT HUP INT TERM; stop_stack; exit 0' HUP INT TERM
         trap 'stop_stack' EXIT
         # Existing kernel-owned GPIO remains preferred. The fallback holder
         # is not restarted/killed by this supervisor.
@@ -217,8 +247,8 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
                             done
                         fi
                         # Stop GPS workers before the hub. No overlapping restarts.
-                        stop_child "$bridge_pid"; bridge_pid=
-                        stop_child "$gpsd_pid"; gpsd_pid=
+                        stop_child "$bridge_pid" || exit 1; bridge_pid=
+                        stop_child "$gpsd_pid" || exit 1; gpsd_pid=
                         "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss ||
                             k "gnss: donor ownership recovery failed"
                     else
@@ -226,7 +256,7 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
                     fi
                 fi
             fi
-            stop_stack
+            stop_stack || exit 1
             k "gnss: stack exited; retry $n/20"
             "$B" sleep 10
         done

@@ -66,6 +66,21 @@ class BridgeIntegration(unittest.TestCase):
         self.assertIn("unc 50 -> 0",evidence)
         self.assertIsNone(proc.poll())
 
+    def test_existing_file_preserved(self):
+        with tempfile.TemporaryDirectory(prefix="r800-gps-existing-") as temp:
+            cwd=Path(temp)
+            shutil.copy2(self.bin/"libbrcm-test.so",cwd/"libbrcm-test.so")
+            marker=cwd/"gps.sock"
+            marker.write_bytes(b"preserve")
+            run=subprocess.run([str(self.bin/"gpsbridge"),"daemon"],cwd=cwd,
+                               capture_output=True,timeout=5)
+            self.assertEqual(run.returncode,1)
+            self.assertEqual(marker.read_bytes(),b"preserve")
+
+    def test_socket_mode(self):
+        cwd,proc,log=self.launch("normal")
+        self.assertEqual((cwd/"gps.sock").stat().st_mode & 0o777,0o660)
+
     def test_reinit_failure_closes_service(self):
         cwd,proc,log=self.launch("fail-reinit")
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:

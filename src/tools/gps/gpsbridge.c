@@ -36,6 +36,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #define GPS_MUTEX(name) static pthread_mutex_t name = PTHREAD_MUTEX_INITIALIZER
+#define GPS_PEER_UID ((unsigned int)getuid())
+#define GPS_PEER_GID ((unsigned int)getgid())
 #define SOCK_PATH "./gps.sock"
 #define GPS_BRIDGE_LIB "./libbrcm-test.so"
 #else
@@ -72,6 +74,12 @@ long read(int, void *, size_t);
 long write(int, const void *, size_t);
 int unlink(const char *);
 int chmod(const char *, unsigned int);
+int chown(const char *, unsigned int, unsigned int);
+unsigned int umask(unsigned int);
+unsigned int getuid(void);
+int getsockopt(int, int, int, void *, unsigned int *);
+#define SOL_SOCKET 1
+#define SO_PEERCRED 17
 long long strtoll(const char *, char **, int);
 double strtod(const char *, char **);
 int open(const char *, int, ...);
@@ -96,6 +104,14 @@ int pthread_mutex_unlock(void *);
 #define SOCK_PATH "/opt/usr/r800dev/gps.sock"
 #define GPS_BRIDGE_LIB "/usr/lib/libbrcm.so"
 #define GPS_MUTEX(name) static int name[8]
+#ifndef R800_GPS_PEER_UID
+#define R800_GPS_PEER_UID -1
+#endif
+#ifndef R800_GPS_PEER_GID
+#define R800_GPS_PEER_GID -1
+#endif
+#define GPS_PEER_UID ((unsigned int)R800_GPS_PEER_UID)
+#define GPS_PEER_GID ((unsigned int)R800_GPS_PEER_GID)
 #endif
 
 /* daemon: the connected gps.r800.so, or -1 */
@@ -412,10 +428,22 @@ static int session(int on)
 	return r;
 }
 
+static int peer_allowed(int fd)
+{
+    struct { int pid; unsigned int uid, gid; } peer;
+    unsigned int len = sizeof(peer);
+    return getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &len) == 0 &&
+           len == sizeof(peer) && peer.pid > 0 && peer.uid == GPS_PEER_UID;
+}
+
 static int serve(void)
 {
 	struct { unsigned short fam; char path[108]; } a;
-	int ls = socket(AF_UNIX, SOCK_STREAM, 0), i;
+	int ls, i;
+	unsigned int previous_mask;
+	if (GPS_PEER_UID == (unsigned int)-1 || GPS_PEER_GID == (unsigned int)-1)
+		return 1;
+	ls = socket(AF_UNIX, SOCK_STREAM, 0);
 	const char *p = SOCK_PATH;
 
 	for (i = 0; i < 108; ++i) a.path[i] = 0;
@@ -423,12 +451,24 @@ static int serve(void)
 	for (i = 0; p[i] && i < 107; i++)
 		a.path[i] = p[i];
 	a.path[i] = 0;
-	unlink(SOCK_PATH);
-	if (ls < 0 || bind(ls, (const void *)&a, sizeof(a)) < 0 || listen(ls, 2) < 0) {
-		printf("cannot listen on %s\n", SOCK_PATH);
+	if (ls < 0)
+		return 1;
+	/* Create owner-only first. Never unlink an existing filesystem entry.
+	 * The parent must be trusted and not writable by untrusted processes. */
+	previous_mask = umask(0177);
+	int bound = bind(ls, (const void *)&a, sizeof(a));
+	umask(previous_mask);
+	if (bound < 0) {
+		printf("cannot bind %s (existing path or permission failure)\n", SOCK_PATH);
+		close(ls);
 		return 1;
 	}
-	chmod(SOCK_PATH, 0666);
+	if (chown(SOCK_PATH, getuid(), GPS_PEER_GID) != 0 ||
+	    chmod(SOCK_PATH, 0660) != 0 || listen(ls, 2) != 0) {
+		printf("cannot secure/listen on %s\n", SOCK_PATH);
+		close(ls);
+		return 1;
+	}
 	printf("listening on %s\n", SOCK_PATH);
 	fflush(0);
 	for (;;) {
@@ -436,8 +476,8 @@ static int serve(void)
 		struct gps_frame frame = {{0}, 0};
 		int on = 0, fatal = 0;
 		int c = accept(ls, 0, 0);
-		if (c < 0)
-			continue;
+		if (c < 0) { close(ls); return 1; }
+		if (!peer_allowed(c)) { close(c); continue; }
 		pthread_mutex_lock(&mtx);
 		client = c;
 		pthread_mutex_unlock(&mtx);
@@ -505,12 +545,17 @@ disconnected:
 int main(int argc, char **argv, char **envp)
 {
 	int secs;
-	void *lib = dlopen(GPS_BRIDGE_LIB, RTLD_NOW);
+	void *lib;
 	const GpsInterface *(*get)(void);
 	int r;
 
 	daemon_mode = argc > 1 && !strcmp(argv[1], "daemon");
 	secs = argc > 1 && !daemon_mode ? atoi(argv[1]) : 90;
+	if (daemon_mode && (GPS_PEER_UID == (unsigned int)-1 || GPS_PEER_GID == (unsigned int)-1)) {
+		printf("GPS daemon blocked: verified Android UID/GID required\n");
+		return 1;
+	}
+	lib = dlopen(GPS_BRIDGE_LIB, RTLD_NOW);
 
 	(void)envp;
 	if (!lib) {

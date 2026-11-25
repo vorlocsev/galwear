@@ -3,6 +3,17 @@
 # Usage: build.sh <NDK r27c> <local Tizen library directory> <new-output-file>
 set -eu
 XTRA_ABI=${R800_XTRA_ABI:-0}
+PEER_UID=${R800_GPS_PEER_UID:--1}
+PEER_GID=${R800_GPS_PEER_GID:--1}
+# Require canonical decimal IDs; no leading zeros or shell/compiler expressions.
+python3 - "$PEER_UID" "$PEER_GID" <<'PY'
+import re, sys
+for value in sys.argv[1:]:
+    if value != "-1" and (not re.fullmatch(r"[1-9][0-9]{0,9}",value) or int(value)>2147483647):
+        raise SystemExit("Invalid GPS peer UID/GID")
+if (sys.argv[1]=="-1") != (sys.argv[2]=="-1"):
+    raise SystemExit("Set both GPS peer UID/GID or neither")
+PY
 case "$XTRA_ABI" in 0|1|2) ;; *) echo "invalid R800_XTRA_ABI" >&2; exit 2;; esac
 [ "$#" -eq 3 ] || { echo "usage: $0 <NDK r27c> <Tizen lib dir> <new output file>" >&2; exit 2; }
 S=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -33,7 +44,7 @@ done
 (cd "$SR" && sha256sum -c "$TMP/input.txt")
 (cd "$TMP/libs" && sha256sum -c "$TMP/input.txt")
 "$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
-    -DR800_XTRA_ABI="$XTRA_ABI" -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
+    -DR800_XTRA_ABI="$XTRA_ABI" -DR800_GPS_PEER_UID="$PEER_UID" -DR800_GPS_PEER_GID="$PEER_GID" -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
     -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
     -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-e,_start \
     -o "$TMP/gpsbridge" "$S/gpsbridge.c" "$TMP/libs/libc.so.6" "$TMP/libs/libdl.so.2" "$TMP/libs/libpthread.so.0"

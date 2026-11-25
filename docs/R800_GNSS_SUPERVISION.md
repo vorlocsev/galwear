@@ -21,3 +21,13 @@ Actual mount identity, socket access, readiness and restart behavior have
 not been tested on a donor or watch. No release or flashing authorized.
 
 safe_to_flash=false
+
+Socket hardening: the daemon requires explicit verified R800_GPS_PEER_UID and
+R800_GPS_PEER_GID at build time (default: daemon blocked). It creates a 0660
+socket and checks the connecting UID with SO_PEERCRED. Existing paths are
+never unlinked automatically. A stale socket after crash must be inspected
+and removed by an administrator only after verifying there is no live owner.
+This deliberately blocks automatic recovery from a stale socket until a safe
+ownership protocol exists. Parent directory trust and SELinux are unverified.
+Shutdown now attempts TERM then KILL with bounded checks; if a child remains
+alive, no new stack starts. Direct-child identity uses PPid, not pidfds.
