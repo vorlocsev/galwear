@@ -26,6 +26,9 @@ on:
       - "src/initramfs/init-readonly.c"
       - "tests/test_readonly_init.py"
       - "src/kernel/r800.config"
+      - "build/r800_boot_candidate.py"
+      - "build/r800_android_userspace_preflight.py"
+      - "src/dt/r800.dts"
       - "src/kernel/r800-wearos.patch"
   workflow_dispatch:
 
@@ -132,8 +135,14 @@ jobs:
           sys.path.insert(0, "build")
           from r800_boot_candidate import component_evidence
           root = pathlib.Path(sys.argv[1])
+          from r800_android_userspace_preflight import config_check
+          config = config_check(root / "r800-embedded-kernel/.config")
+          print(json.dumps({"effective_kernel_config": config}, sort_keys=True))
+          if config["missing_or_wrong"]:
+              raise SystemExit("Effective kernel config lacks Android prerequisites")
           report = component_evidence((root / "r800.dtb").read_bytes(),
               (root / "r800-embedded-kernel/arch/arm64/boot/Image").read_bytes())
+          report["effective_kernel_config"] = config
           (root / "r800-compiled-components.json").write_text(json.dumps(report, indent=2))
           print(json.dumps(report, sort_keys=True))
           PY
