@@ -15,7 +15,8 @@ command -v timeout >/dev/null
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 trap 'exit 1' HUP INT TERM
-mkdir -p "$TMP/root/lib"
+mkdir -p "$TMP/root/lib" "$TMP/root/dev" "$TMP/root/proc"
+: > "$TMP/root/qemu"
 # Read bounded regular files, not guest symlinks. Use identical bytes for link and runtime.
 python3 - "$ROOT" "$SRC" "$TMP/root/lib" <<'PY'
 import hashlib, pathlib, sys
@@ -51,7 +52,7 @@ sha256sum "$TMP/root/probe" "$TMP/root/probe_plugin.so" "$QEMU"
 timeout -k 5s 30s "$BWRAP" --unshare-all --die-with-parent --new-session \
   --clearenv --ro-bind "$TMP/root" / --ro-bind "$QEMU" /qemu \
   --dev /dev --proc /proc --chdir / \
-  /qemu -cpu cortex-a53 -L / -E LD_LIBRARY_PATH=/lib /probe > "$TMP/run.log" 2>&1 || {
+  /qemu -cpu cortex-a15 -L / -E LD_LIBRARY_PATH=/lib /probe > "$TMP/run.log" 2>&1 || {
     cat "$TMP/run.log"; echo "QEMU_PROBE=FAILED_OR_SANDBOX_UNAVAILABLE" >&2; exit 1;
   }
 cat "$TMP/run.log"
