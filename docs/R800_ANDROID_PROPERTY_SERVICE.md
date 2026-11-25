@@ -888,3 +888,44 @@ or typebounds are added to force a pass. SETools CLI syntax was
 checked against the 4.5.1 source; actual compiled AOSP policy and
 SETools binaries are absent from the current environment. Eight
 mocked regression cases are committed, not executed here.
+
+
+## Executable access and inherited stdout observations
+
+The pinned kernel hooks.c file_has_perm() checks FD__USE when
+the descriptor opener SID differs from the current SID. During a
+domain-changing exec, flush_unauthorized_files() revalidates inherited
+descriptors and may replace unauthorized ones with the SELinux null
+file. Its mmap hooks also check file map, read and execute permissions
+for executable file-backed mappings.
+
+The new r800_ext4_exec_access_audit.py reports unconditional TE
+allow candidates for kernel/init-owned descriptors, assumed console
+inode types, and actual selected system/runtime ELF inode types from
+the matching policy-bound image reports. It deduplicates queries by
+source, target, class and permission, retaining candidate paths.
+The stock profile covers the console assumptions only; the fixture
+profile adds both init and client ELF access, including the linker
+alias. The result is advisory: a missing candidate permission is
+not a proven AVC denial, because actual library selection, SID of
+the opener, inode type of the console, conditionals and constraints
+are not established by this audit. Both EXT4 execution runners
+repeat it on the exact guest policy snapshot. No rules are added.
+
+For the actual guest, the first-stage disk probe now reports
+fstat(stdout) character device, inode and filesystem device. Static
+second-stage init, the libinit harness and its client report the
+same fields after exec. The EXT4 runners require ordered markers
+and the same /dev/console device (5:1), inode and filesystem device
+throughout the corresponding handovers. These are guest observations,
+not proof of opener SID or open-file-description identity. Other
+RAM-only parsers can ignore the additional marker. Failure to observe
+the console rejects the EXT4 experiment rather than inferring
+success from missing output. No broad fd or console grants, mount
+flag changes, or SELinux relaxation are made.
+
+Six new synthetic access/console tests and two updated transition
+regressions are committed. The new C/C++ code, tests and actual
+compiled AOSP policies have not been tested in the current
+environment. The exact runtime console and dynamic loading remain
+unverified. No real watch, upstream repository or main branch changes.
