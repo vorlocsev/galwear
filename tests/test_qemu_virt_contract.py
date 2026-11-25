@@ -14,10 +14,42 @@ from test_initramfs_recipe import fake_aarch64_elf
 LIST = "/scratch/initramfs.list"
 CONFIG = "\n".join("CONFIG_" + key + "=y" for key in a.REQUIRED) + '\nCONFIG_INITRAMFS_SOURCE="' + LIST + '"\nCONFIG_CMDLINE=""\nCONFIG_NR_CPUS=2\nCONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"\n'
 
+PROPERTY_CONFIG = CONFIG + "\n".join("CONFIG_" + key + "=y" for key in a.PROPERTY_REQUIRED) + '\nCONFIG_DEFAULT_SECURITY="selinux"\n'
+
 
 class VirtTests(unittest.TestCase):
     def test_required_config(self):
         self.assertFalse(a.inspect(CONFIG, LIST)["safe_to_flash"])
+
+    def test_property_config(self):
+        report = a.inspect(PROPERTY_CONFIG, LIST, "property")
+        self.assertEqual(report["profile"], "property")
+        self.assertFalse(report["selinux_policy_loaded"])
+        self.assertFalse(report["property_service_started"])
+
+    def test_property_cannot_satisfy_minimal(self):
+        with self.assertRaisesRegex(ValueError, "CONFIG_NET"):
+            a.inspect(PROPERTY_CONFIG, LIST)
+
+    def test_property_dependencies_required(self):
+        for key in a.PROPERTY_REQUIRED:
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "Missing virt built-in CONFIG_" + key):
+                    a.inspect(PROPERTY_CONFIG.replace("CONFIG_" + key + "=y\n", ""), LIST, "property")
+
+    def test_property_forbidden_features(self):
+        for key in a.PROPERTY_FORBIDDEN:
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "Unexpected enabled CONFIG_" + key):
+                    a.inspect(PROPERTY_CONFIG + "CONFIG_" + key + "=y\n", LIST, "property")
+
+    def test_property_default_security(self):
+        with self.assertRaisesRegex(ValueError, "Expected SELinux"):
+            a.inspect(PROPERTY_CONFIG.replace('CONFIG_DEFAULT_SECURITY="selinux"', 'CONFIG_DEFAULT_SECURITY=""'), LIST, "property")
+
+    def test_invalid_profile(self):
+        with self.assertRaisesRegex(ValueError, "Unknown virt profile"):
+            a.inspect(CONFIG, LIST, "hardware")
 
     def test_wrong_binder_devices(self):
         with self.assertRaisesRegex(ValueError, "Binder device list"):
