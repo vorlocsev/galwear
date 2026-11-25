@@ -819,12 +819,18 @@ static int adev_open_output_stream(struct audio_hw_device *dev, audio_io_handle_
 {
     struct r800_audio_device *adev = (struct r800_audio_device *)dev;
     struct r800_stream_out *out;
+    int rc;
     (void)handle;
     (void)address;
 
+    if (!stream_out)
+        return -EINVAL;
+    *stream_out = NULL;
+    if (!dev || !config)
+        return -EINVAL;
+
     LOGI("open_output_stream devices 0x%x flags 0x%x rate %u ch 0x%x fmt 0x%x", devices,
          flags, config->sample_rate, config->channel_mask, config->format);
-    *stream_out = NULL;
     if (config->sample_rate != OUT_RATE || config->channel_mask != AUDIO_CHANNEL_OUT_STEREO ||
         config->format != AUDIO_FORMAT_PCM_16_BIT) {
         /* tell the framework what we support; it retries with these */
@@ -863,7 +869,12 @@ static int adev_open_output_stream(struct audio_hw_device *dev, audio_io_handle_
     out->stream.get_render_position = out_get_render_position;
     out->stream.get_next_write_timestamp = out_get_next_write_timestamp;
     out->stream.get_presentation_position = out_get_presentation_position;
-    pthread_mutex_init(&out->lock, NULL);
+    rc = pthread_mutex_init(&out->lock, NULL);
+    if (rc) {
+        free(out);
+        pthread_mutex_unlock(&adev->lock);
+        return -rc;
+    }
     out->adev = adev;
     out->standby = true;
     out->devices = devices;
@@ -878,13 +889,21 @@ static void adev_close_output_stream(struct audio_hw_device *dev, struct audio_s
     struct r800_audio_device *adev = (struct r800_audio_device *)dev;
     struct r800_stream_out *out = (struct r800_stream_out *)s;
 
-    out_standby(&s->common);
+    if (!dev || !s)
+        return;
+    /* The framework must quiesce calls on this stream before close.
+     * Keep the device lock through standby and destruction: HFP and
+     * a replacement stream must not see a half-closed route. */
     pthread_mutex_lock(&adev->lock);
-    if (adev->out == out)
-        adev->out = NULL;
-    pthread_mutex_unlock(&adev->lock);
+    if (adev->out != out) {
+        pthread_mutex_unlock(&adev->lock);
+        return;
+    }
+    out_standby(&s->common);
+    adev->out = NULL;
     pthread_mutex_destroy(&out->lock);
     free(out);
+    pthread_mutex_unlock(&adev->lock);
 }
 
 static int adev_open_input_stream(struct audio_hw_device *dev, audio_io_handle_t handle,
@@ -894,12 +913,18 @@ static int adev_open_input_stream(struct audio_hw_device *dev, audio_io_handle_t
 {
     struct r800_audio_device *adev = (struct r800_audio_device *)dev;
     struct r800_stream_in *in;
+    int rc;
     (void)handle;
     (void)address;
 
+    if (!stream_in)
+        return -EINVAL;
+    *stream_in = NULL;
+    if (!dev || !config)
+        return -EINVAL;
+
     LOGI("open_input_stream devices 0x%x flags 0x%x source %d rate %u ch 0x%x fmt 0x%x",
          devices, flags, source, config->sample_rate, config->channel_mask, config->format);
-    *stream_in = NULL;
     if (config->sample_rate != IN_RATE || config->format != AUDIO_FORMAT_PCM_16_BIT ||
         (config->channel_mask != AUDIO_CHANNEL_IN_MONO &&
          config->channel_mask != AUDIO_CHANNEL_IN_STEREO)) {
@@ -938,7 +963,12 @@ static int adev_open_input_stream(struct audio_hw_device *dev, audio_io_handle_t
     in->stream.read = in_read;
     in->stream.get_input_frames_lost = in_get_input_frames_lost;
     in->stream.get_capture_position = in_get_capture_position;
-    pthread_mutex_init(&in->lock, NULL);
+    rc = pthread_mutex_init(&in->lock, NULL);
+    if (rc) {
+        free(in);
+        pthread_mutex_unlock(&adev->lock);
+        return -rc;
+    }
     in->adev = adev;
     in->standby = true;
     in->channel_mask = config->channel_mask;
@@ -955,13 +985,21 @@ static void adev_close_input_stream(struct audio_hw_device *dev, struct audio_st
     struct r800_audio_device *adev = (struct r800_audio_device *)dev;
     struct r800_stream_in *in = (struct r800_stream_in *)s;
 
-    in_standby(&s->common);
+    if (!dev || !s)
+        return;
+    /* The framework must quiesce calls on this stream before close.
+     * Keep the device lock through standby and destruction: HFP and
+     * a replacement stream must not see a half-closed route. */
     pthread_mutex_lock(&adev->lock);
-    if (adev->in == in)
-        adev->in = NULL;
-    pthread_mutex_unlock(&adev->lock);
+    if (adev->in != in) {
+        pthread_mutex_unlock(&adev->lock);
+        return;
+    }
+    in_standby(&s->common);
+    adev->in = NULL;
     pthread_mutex_destroy(&in->lock);
     free(in);
+    pthread_mutex_unlock(&adev->lock);
 }
 
 static int adev_set_parameters(struct audio_hw_device *dev, const char *kv)
@@ -1046,7 +1084,15 @@ static size_t adev_get_input_buffer_size(const struct audio_hw_device *dev,
 static int adev_close(hw_device_t *device)
 {
     struct r800_audio_device *adev = (struct r800_audio_device *)device;
+    if (!device)
+        return -EINVAL;
     pthread_mutex_lock(&adev->lock);
+    /* Do not invalidate framework-owned stream pointers. Reject early
+     * close without changing state; callers must close streams first. */
+    if (adev->out || adev->in) {
+        pthread_mutex_unlock(&adev->lock);
+        return -EBUSY;
+    }
     hfp_stop(adev);
     pthread_mutex_unlock(&adev->lock);
     pthread_mutex_destroy(&adev->route_lock);
@@ -1059,7 +1105,10 @@ static int adev_open(const hw_module_t *module, const char *name, hw_device_t **
 {
     struct r800_audio_device *adev;
 
-    if (strcmp(name, AUDIO_HARDWARE_INTERFACE))
+    if (!device)
+        return -EINVAL;
+    *device = NULL;
+    if (!module || !name || strcmp(name, AUDIO_HARDWARE_INTERFACE))
         return -EINVAL;
     adev = calloc(1, sizeof(*adev));
     if (!adev)
