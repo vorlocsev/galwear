@@ -16,7 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Python syntax validation
-        run: python3 -m compileall -q installer tests
+        run: python3 -m compileall -q installer build tests
+      - name: Vendor assembly syntax (no mounts)
+        run: bash -n build/build_vendor.sh
       - name: Power helper syntax
         run: sh -n payload/android-helper.sh
       - name: Complete synthetic test suite (no device, no external firmware)
