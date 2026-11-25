@@ -334,6 +334,29 @@ namespace.default.search.paths = /vendor/${LIB}
 """
 
 
+def apex_pb(name="com.android.runtime", version=1):
+    raw = name.encode()
+    return bytes([10, len(raw)]) + raw + bytes([16, version])
+
+
+def apex_zip(path, manifest=None, aligned=True, ext4=True, compressed=False):
+    import zipfile
+    manifest = apex_pb() if manifest is None else manifest
+    with zipfile.ZipFile(path, "w") as z:
+        image = bytearray(4096)
+        if ext4:
+            image[1080:1082] = b"\x53\xef"
+        info = zipfile.ZipInfo("apex_payload.img")
+        info.compress_type = zipfile.ZIP_DEFLATED if compressed else zipfile.ZIP_STORED
+        if aligned:
+            padding = 4096 - 30 - len(info.filename) - 4
+            info.extra = struct.pack("<HH", 0xcafe, padding) + bytes(padding)
+        z.writestr(info, image)
+        z.writestr("apex_manifest.pb", manifest)
+        z.writestr("AndroidManifest.xml", b"manifest")
+        z.writestr("apex_pubkey", b"key")
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -1047,6 +1070,58 @@ class LinkerTests(unittest.TestCase):
         out = audit.audit(self.root, ("/init",))
         self.assertEqual(out["apex_metadata"]["status"], "REVIEW_REQUIRED")
         self.assertFalse(out["apex_activation_verified"])
+
+    def test_apex_protobuf_identity_and_unknown_field(self):
+        data = apex_pb() + b"\x2a\x03abc"
+        out = audit.r800_apex_inventory.protobuf_manifest(data)
+        self.assertEqual(out, {"name": "com.android.runtime", "version": 1})
+
+    def test_apex_protobuf_invalid_identity(self):
+        for raw in (apex_pb() + b"\x10\x02", b"\x0a\x80", b"\x10\x01",
+                    apex_pb("../x"), apex_pb() + b"\x18" + b"\xff" * 10):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                audit.r800_apex_inventory.protobuf_manifest(raw)
+
+    def test_apex_protobuf_only_expanded_metadata(self):
+        records = []
+        for name in ("com.android.runtime", "com.android.art"):
+            self.put("apex/" + name + "/apex_manifest.pb", apex_pb(name))
+            records.append('<apex-info moduleName="' + name +
+                           '" versionCode="1" isActive="true" isFactory="true"/>')
+        self.put("apex/apex-info-list.xml",
+                 ("<apex-info-list>" + "".join(records) + "</apex-info-list>").encode())
+        out = audit.r800_apex_inventory.audit(self.root)
+        self.assertEqual(out["status"], "METADATA_INVENTORY_ONLY")
+        self.assertTrue(out["modules"]["com.android.runtime"]["version_consistent"])
+
+    def test_apex_json_protobuf_mismatch(self):
+        self.put_apex_metadata("com.android.runtime", 1)
+        self.put("apex/com.android.runtime/apex_manifest.pb", apex_pb(version=2))
+        out = audit.r800_apex_inventory.audit(self.root)
+        self.assertTrue(any("manifests disagree" in e for e in out["errors"]))
+
+    def test_apex_package_inventory(self):
+        path = self.root / "runtime.apex"
+        apex_zip(path)
+        out = audit.r800_apex_inventory.package_inventory(path)
+        self.assertEqual(out["identity"]["name"], "com.android.runtime")
+        self.assertEqual(out["payload_offset"], 4096)
+        self.assertTrue(out["payload_ext4_magic"])
+        self.assertFalse(out["signature_verified"])
+        self.assertFalse(out["payload_crc_verified"])
+
+    def test_apex_package_rejects_bad_payload(self):
+        path = self.root / "runtime.apex"
+        for options in ({"aligned": False}, {"ext4": False}, {"compressed": True}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                apex_zip(path, **options)
+                audit.r800_apex_inventory.package_inventory(path)
+
+    def test_apex_package_bad_manifest(self):
+        path = self.root / "runtime.apex"
+        apex_zip(path, manifest=b"\x10\x01")
+        with self.assertRaises(ValueError):
+            audit.r800_apex_inventory.package_inventory(path)
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
