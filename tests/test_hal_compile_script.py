@@ -23,7 +23,7 @@ class HalCompileScriptTests(unittest.TestCase):
             self.assertIn(check, text[:evidence])
         self.assertIn('"hwc_shared_library_linked": True', text[evidence:])
         self.assertIn('"safe_to_flash": False', text[evidence:])
-        self.assertEqual(text.count("galwear-r800-hal-compile-v3"), 1)
+        self.assertEqual(text.count("galwear-r800-hal-compile-v4"), 1)
         self.assertNotIn("galwear-r800-hal-compile-v1", text)
 
     def test_all_ndk_only_hal_modules_linked_and_audio_blocked(self):
@@ -34,6 +34,18 @@ class HalCompileScriptTests(unittest.TestCase):
         self.assertIn('"linked_libraries": libraries', text)
         self.assertIn("unexpected dependencies:", text)
         self.assertIn("actual_soname != [soname]", text)
+
+
+    def test_audio_candidate_abi_evidence_is_not_hardware_acceptance(self):
+        text = SCRIPT.read_text()
+        self.assertIn('r800_pcm_abi_probe.c', text)
+        self.assertIn('llvm-objcopy', text)
+        self.assertIn('struct.unpack("<" + "I" * len(abi_keys)', text)
+        self.assertIn('"kernel_compat_abi_verified": False', text)
+        self.assertIn('"hardware_validated": False', text)
+        self.assertIn("unexpected Audio dependencies:", text)
+        self.assertIn('"audio_candidate_linked": True', text)
+        self.assertIn('"shared_libraries_linked": True', text)
 
 
 if __name__ == "__main__":

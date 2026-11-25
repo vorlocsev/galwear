@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compile five Android HAL translation units and link four NDK-only modules. No payload or flash.
+# Compile five Android HAL translation units and link all five (Audio experimental). No payload or flash.
 set -eu
 [ "$#" -eq 4 ] || {
     echo "usage: $0 <repo> <ndk-r27c> <tinyalsa-checkout> <new-out-dir>" >&2
@@ -64,9 +64,11 @@ grep -Eq 'Type:[[:space:]]+DYN' "$out/audio-elf.txt"
 "$toolchain/llvm-readelf" --dyn-syms --wide "$out/audio.primary.r800.so" > "$out/audio-symbols.txt"
 grep -Eq '[[:space:]]OBJECT[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+HMI$' "$out/audio-symbols.txt"
 "$toolchain/llvm-readelf" -d "$out/audio.primary.r800.so" > "$out/audio-dynamic.txt"
+"$cc" -std=gnu11 -c "$repo/build/r800_pcm_abi_probe.c" -o "$out/pcm-abi.o"
+"$toolchain/llvm-objcopy" --dump-section ".r800_pcm_abi=$out/pcm-abi.bin" "$out/pcm-abi.o" "$out/pcm-abi-copy.o"
 # Only JSON metadata leaves the runner, not binaries.
 python3 - "$out" "$repo" <<'PY'
-import hashlib, json, os, pathlib, re, subprocess, sys
+import hashlib, json, os, pathlib, re, struct, subprocess, sys
 out, repo = map(pathlib.Path, sys.argv[1:])
 names = ("audio_r800", "gps_r800", "sensors_r800", "hwcomposer_r800", "lights_r800")
 linked = ("hwcomposer", "gps", "sensors", "lights")
@@ -91,9 +93,34 @@ for name in linked:
         "needed": needed,
         "dynamic_section": dynamic,
     }
+audio_dynamic = (out / "audio-dynamic.txt").read_text()
+audio_needed = re.findall(r"\(NEEDED\).*?\[([^\]]+)\]", audio_dynamic)
+audio_soname = re.findall(r"\(SONAME\).*?\[([^\]]+)\]", audio_dynamic)
+if audio_soname != ["audio.primary.r800.so"] or not audio_needed:
+    raise SystemExit("unexpected Audio ELF dynamic metadata")
+if set(audio_needed) - {"libc.so", "libm.so", "libdl.so", "liblog.so"}:
+    raise SystemExit("unexpected Audio dependencies: " + repr(audio_needed))
+if re.search(r"\((?:RPATH|RUNPATH|TEXTREL)\)", audio_dynamic):
+    raise SystemExit("unexpected Audio dynamic search path or text relocation")
+abi_keys = (
+    "pointer_bytes", "uframes_bytes", "sync_ptr_bytes", "mmap_status_bytes",
+    "mmap_control_bytes", "sync_flags_offset", "sync_status_offset",
+    "sync_control_offset", "status_hw_ptr_offset", "control_appl_ptr_offset",
+    "control_avail_min_offset", "xferi_bytes", "xferi_result_offset",
+    "xferi_buf_offset", "xferi_frames_offset", "ioctl_sync_ptr",
+    "ioctl_readi", "ioctl_writei", "flag_hwsync", "flag_appl", "flag_avail_min",
+)
+abi_raw = (out / "pcm-abi.bin").read_bytes()
+if len(abi_raw) != 4 * len(abi_keys):
+    raise SystemExit("unexpected PCM ABI section size")
+pcm_abi = dict(zip(abi_keys, struct.unpack("<" + "I" * len(abi_keys), abi_raw)))
+if pcm_abi["pointer_bytes"] != 4 or pcm_abi["uframes_bytes"] != 4:
+    raise SystemExit("not the expected ARM32 PCM ABI")
+if [pcm_abi[k] for k in ("flag_hwsync", "flag_appl", "flag_avail_min")] != [1, 2, 4]:
+    raise SystemExit("unexpected SYNC_PTR flags")
 report = {
-    "schema": "galwear-r800-hal-compile-v3",
-    "status": "FIVE_ARM32_OBJECTS_COMPILED_FOUR_HAL_LINKED",
+    "schema": "galwear-r800-hal-compile-v4",
+    "status": "FIVE_ARM32_OBJECTS_COMPILED_FIVE_LINKED_AUDIO_EXPERIMENTAL",
     "commit": subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip(),
     "run_id": os.getenv("GITHUB_RUN_ID"),
     "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
@@ -103,7 +130,7 @@ report = {
     "api_level": 28,
     "objects": {n: {"source_sha256": sha(repo / "src/hal" / (n + ".c")),
                     "object_sha256": sha(out / (n + ".o"))} for n in names},
-    "shared_libraries_linked": False,  # not all HALs
+    "shared_libraries_linked": True,  # includes experimental Audio candidate
     "hwc_shared_library_linked": True,
     "hwc_shared_library": libraries["hwcomposer"],
     "linked_libraries": libraries,
@@ -114,7 +141,13 @@ report = {
         "sha256": sha(out / "audio.primary.r800.so"),
         "tinyalsa_patch_sha256": sha(repo / "tools/audio/tinyalsa-2.0.0-sync-ptr.patch"),
         "sync_ptr_mock_passed": True,
-        "dynamic_section": (out / "audio-dynamic.txt").read_text(),
+        "soname": audio_soname[0],
+        "needed": audio_needed,
+        "exported_hmi_verified": True,
+        "no_undefined_link": True,
+        "dynamic_section": audio_dynamic,
+        "pcm_ndk_abi": pcm_abi,
+        "kernel_compat_abi_verified": False,
         "hardware_validated": False,
     },
     "patched_tinyalsa_linked": False,
