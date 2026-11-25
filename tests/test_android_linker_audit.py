@@ -1433,6 +1433,57 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["fec_verified"])
         self.assertFalse(out["fec_recovery_tested"])
 
+    def test_init_apex_service_and_activation(self):
+        self.put("init.rc", b"import /system/etc/init/hw/apex.rc\non early-init\n    start apexd-bootstrap\n")
+        self.put("system/etc/init/hw/apex.rc",
+                 b"service apexd /system/bin/apexd\n    class core\n    disabled\n"
+                 b"on property:apexd.status=ready\n    perform_apex_config\n")
+        out = audit.r800_init_inventory.audit(self.root)
+        self.assertEqual(out["status"], "STATIC_INIT_INVENTORY_ONLY")
+        self.assertEqual(out["services"][0]["name"], "apexd")
+        self.assertEqual(len(out["activation_commands"]), 2)
+        self.assertFalse(out["apexd_activation_verified"])
+
+    def test_init_art_environment_and_continuation(self):
+        self.put("init.rc", b"on init\n    export ANDROID_ART_ROOT /apex/com.android.art\n"
+                 b"    export BOOTCLASSPATH \\\n        /apex/com.android.art/javalib/core-oj.jar\n")
+        out = audit.r800_init_inventory.audit(self.root)
+        self.assertEqual(len(out["art_environment"]), 2)
+        self.assertEqual(out["art_environment"][1]["args"][1], "/apex/com.android.art/javalib/core-oj.jar")
+
+    def test_init_property_import_not_expanded(self):
+        self.put("init.rc", b"import /init.$" + b"{ro.hardware}.rc\n")
+        out = audit.r800_init_inventory.audit(self.root)
+        self.assertEqual(len(out["unresolved_imports"]), 1)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_init_duplicate_override_requires_review(self):
+        self.put("system/etc/init/a.rc", b"service apexd /system/bin/apexd\n")
+        self.put("vendor/etc/init/b.rc", b"service apexd /vendor/bin/apexd\n    override\n")
+        out = audit.r800_init_inventory.audit(self.root)
+        self.assertEqual(out["duplicate_services"][0]["name"], "apexd")
+        self.assertTrue(out["duplicate_services"][0]["override_declared"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_init_import_cycle_bounded(self):
+        self.put("init.rc", b"import /other.rc\n")
+        self.put("other.rc", b"import /init.rc\nservice apexd /system/bin/apexd\n")
+        out = audit.r800_init_inventory.audit(self.root)
+        self.assertEqual(len(out["files"]), 2)
+        self.assertEqual(out["errors"], [])
+
+    def test_init_malformed_service_and_quoting(self):
+        for raw in ("service apexd relative", 'on "broken', "on init\n    start apexd \\"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                audit.r800_init_inventory.parse(raw, "/init.rc")
+
+    def test_init_report_integrated_without_boot_claim(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["init_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["init_inventory"]["init_execution_verified"])
+        self.assertFalse(out["android_boot_tested"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
