@@ -14,6 +14,7 @@ from r800_aosp_artifact_origin import bind_system, STATUS as ORIGIN_STATUS
 from r800_ext4_exec_access_audit import evaluate_blob as audit_exec_access
 import r800_qemu_prelabeled_mounts as labels
 from r800_qemu_property_service import MARKERS
+from r800_bionic_behavior_contract import inspect as inspect_bionic, verify_provider
 from r800_galwear_policy_fixture import audit_fixture, FILE, LABEL, SERVICE, SERVICE_LABEL
 from r800_android_init_rootfs import CONFIG
 from r800_android_rootfs_preflight import snapshot, sha
@@ -100,7 +101,8 @@ def inspect_console(log,records,plan):
     stdout = inspect_stdout(log, ("kernel","init","client"),
         (disks.EXPECTED.rstrip(b"\n"), EXEC, MARKERS[1]),
         (modes[0], MARKERS[0], MARKERS[2]))
-    return {**evidence,**stdout,"fixture_policy_loaded_reported":True,"stock_policy":False,
+    bionic = inspect_bionic(log)
+    return {**evidence,**stdout,**bionic,"fixture_policy_loaded_reported":True,"stock_policy":False,
             "production_policy":False,"current_domain_reported":"u:r:init:s0",
             "init_domain_entered":True,"mount_noexec_requested":False,
             "system_runtime_exec_reported":True,"property_service_started":True,
@@ -144,10 +146,12 @@ def run(a):
         extra_entries=[("galwear-policy",(0o100400,blob,0,0)),
                        ("galwear-labels.list",(0o100400,manifest,0,0))],
         label_parser=lambda log,actual:inspect_console(log,actual,plan))
+    verify_provider(result,resolution)
     return {**result,"nosuid_policy_prerequisites":nosuid,"exec_access_advisory":access,"linker_resolution_static":resolution,"elf_abi_advisory":abi,"artifact_origin_binding":binding,"stock_policy_sha256":stock["policy_sha256"],
             "fixture_audit":checked,"label_manifest_sha256":sha(manifest),
             "prior_transition_archive_sha256":prior["archive_sha256"],
             "experimental_linker_config_sha256":sha(CONFIG),
+            "selected_libm_provider_reported":True,
             "namespace_resolution_tested_by_service_execution":True,
             "genuine_android_linkerconfig_tested":False,"safe_to_flash":False}
 
