@@ -8,6 +8,8 @@
 #include <sys/statvfs.h>
 #include <sys/xattr.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 static int exact_text(const char *path, const char *expected)
@@ -45,6 +47,17 @@ int main(int argc, char **argv)
     if (statvfs("/system", &fs) ||
         (fs.f_flag & (ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC)) !=
         (ST_RDONLY | ST_NOSUID | ST_NODEV)) return 5;
+    struct stat console_stat;
+    if (fstat(STDOUT_FILENO, &console_stat) == 0 && S_ISCHR(console_stat.st_mode)) {
+        printf("r800-console: stage=init device=%u:%u inode=%llu filesystem=%u:%u\n",
+               (unsigned)major(console_stat.st_rdev), (unsigned)minor(console_stat.st_rdev),
+               (unsigned long long)console_stat.st_ino,
+               (unsigned)major(console_stat.st_dev), (unsigned)minor(console_stat.st_dev));
+        fflush(stdout);
+    } else {
+        fputs("r800-console: stage=init descriptor-unavailable\n", stderr);
+        fflush(stderr);
+    }
     puts("r800-ext4-transition: domain=u:r:init:s0 enforce=1 pid=1");
     puts("r800-ext4-transition: executable=/system/bin/init label=u:object_r:init_exec:s0");
     puts("r800-ext4-transition: PASS diagnostic-only stock-init=not-started");
