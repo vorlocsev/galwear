@@ -12,7 +12,8 @@ HALS = ("audio.primary.r800.so", "gps.r800.so", "hwcomposer.r800.so",
         "lights.r800.so", "sensors.r800.so")
 PAYLOAD = tuple(name for name in HALS if name != "lights.r800.so")
 CONFIGS = ("etc/init/init.r800.rc", "etc/fstab.r800", "ueventd.rc",
-           "etc/vintf/manifest.xml", "audio/audio_policy_configuration.xml")
+           "etc/vintf/manifest.xml", "audio/audio_policy_configuration.xml",
+           "sensors/android.hardware.sensors@1.0-service.rc")
 
 
 def stage(hal_dir, vendor_sources, output):
