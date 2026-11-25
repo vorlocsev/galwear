@@ -15,6 +15,9 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <stddef.h>
+#include <time.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,7 +36,9 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+#ifndef SOCK_PATH
 #define SOCK_PATH "/oem/r800dev/gps.sock"
+#endif
 
 /* ---- hardware/gps.h (AOSP, stable ABI) ---- */
 #define GPS_HARDWARE_MODULE_ID "gps"
@@ -122,18 +127,45 @@ struct gps_device_t {
 #define GPS_STATUS_ENGINE_ON 3
 #define GPS_STATUS_ENGINE_OFF 4
 
-static GpsCallbacks *cb;
+static GpsCallbacks callbacks_owned;
+static GpsCallbacks *cb = &callbacks_owned;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int sock = -1;
 static int sock_failed; /* protected by lock; only reader closes published fd */
 static int want_on;          /* framework asked for a session */
-static volatile int running; /* reader thread alive */
+/* All lifecycle state below is protected by lock. The reader owns callback
+ * delivery and the published fd. The framework may create detached threads. */
+static int running, starting, reader_alive, reader_id_valid;
+static pthread_t reader_id;
+static pthread_cond_t state_changed = PTHREAD_COND_INITIALIZER;
+
+static int reader_running(void)
+{
+    int active;
+    pthread_mutex_lock(&lock);
+    active = running;
+    pthread_mutex_unlock(&lock);
+    return active;
+}
+static void retry_wait(int seconds)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+        return;
+    deadline.tv_sec += seconds;
+    pthread_mutex_lock(&lock);
+    while (running) {
+        if (pthread_cond_timedwait(&state_changed, &lock, &deadline) != 0)
+            break;
+    }
+    pthread_mutex_unlock(&lock);
+}
 
 /* call with lock held */
 static int send_line(const char *s)
 {
     size_t n = strlen(s);
-    if (sock < 0 || sock_failed)
+    if (!running || sock < 0 || sock_failed)
         return -ENOTCONN;
     if (send(sock, s, n, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)n) {
         LOGE("bridge send failed or partial");
@@ -350,7 +382,14 @@ static void reader(void *arg)
 	struct gps_frame frame = {{0}, 0};
 	(void)arg;
 
-	while (running) {
+	pthread_mutex_lock(&lock);
+    reader_id = pthread_self();
+    reader_id_valid = 1;
+    pthread_mutex_unlock(&lock);
+    if (reader_running() && cb->set_capabilities_cb)
+        cb->set_capabilities_cb(GPS_CAPABILITY_SCHEDULING);
+
+	while (reader_running()) {
 		int fd;
 		struct sockaddr_un a;
 
@@ -358,19 +397,25 @@ static void reader(void *arg)
 		fd = sock;
 		pthread_mutex_unlock(&lock);
 		if (fd < 0) {
-			fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+			fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
 			memset(&a, 0, sizeof(a));
 			a.sun_family = AF_UNIX;
 			strncpy(a.sun_path, SOCK_PATH, sizeof(a.sun_path) - 1);
-			if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+			if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0 ||
+                fcntl(fd, F_SETFL, 0) < 0) {
 				if (fd >= 0)
 					close(fd);
-				sleep(2);
+				retry_wait(2);
 				continue;
 			}
 			LOGI("connected to %s", SOCK_PATH);
 			pthread_mutex_lock(&lock);
-			sock = fd;
+			if (!running) {
+                pthread_mutex_unlock(&lock);
+                close(fd);
+                break;
+            }
+            sock = fd;
 			sock_failed = 0;
 			if (want_on)
 				send_line("START\n");
@@ -389,7 +434,12 @@ static void reader(void *arg)
 			if (state < 0)
 				goto disconnected;
 			if (state == 1) {
-				handle_line(frame.line);
+                int deliver;
+                pthread_mutex_lock(&lock);
+                deliver = running && (want_on || !strncmp(frame.line,"STATUS ",7));
+                pthread_mutex_unlock(&lock);
+                if (deliver)
+                    handle_line(frame.line);
 				frame.used = 0;
 			}
 		}
@@ -404,49 +454,113 @@ disconnected:
 		close(fd);
 		pthread_mutex_unlock(&lock);
 		frame.used = 0;
-		sleep(1);
+		retry_wait(1);
 	}
+    pthread_mutex_lock(&lock);
+    if (sock >= 0) {
+        close(sock);
+        sock = -1;
+    }
+    sock_failed = 0;
+    want_on = 0;
+    running = 0;
+    reader_id_valid = 0;
+    reader_alive = 0;
+    memset(&callbacks_owned, 0, sizeof(callbacks_owned));
+    pthread_cond_broadcast(&state_changed);
+    pthread_mutex_unlock(&lock);
 }
 
 static int gps_init(GpsCallbacks *callbacks)
 {
-	cb = callbacks;
-	LOGI("init (callbacks size %zu, gnss_sv_status_cb %s)", callbacks ? callbacks->size : 0,
-	     callbacks && callbacks->size >= sizeof(GpsCallbacks) ? "yes" : "no");
-	if (cb && cb->set_capabilities_cb)
-		cb->set_capabilities_cb(GPS_CAPABILITY_SCHEDULING);
-	if (!running && cb && cb->create_thread_cb) {
-		running = 1;
-		cb->create_thread_cb("gps-r800-reader", reader, NULL);
-	}
-	return 0;
+    const size_t legacy = offsetof(GpsCallbacks, set_system_info_cb);
+    size_t size;
+    pthread_t (*create)(const char *, void (*)(void *), void *);
+    pthread_t th;
+
+    if (!callbacks || callbacks->size < legacy)
+        return -EINVAL;
+    size = callbacks->size;
+    if (!callbacks->create_thread_cb)
+        return -EINVAL;
+    pthread_mutex_lock(&lock);
+    if (starting || reader_alive || running) {
+        pthread_mutex_unlock(&lock);
+        return -EBUSY;
+    }
+    memset(&callbacks_owned, 0, sizeof(callbacks_owned));
+    /* Copy complete known fields only; never retain the caller's pointer. */
+    memcpy(&callbacks_owned, callbacks, legacy);
+    callbacks_owned.size = legacy;
+    if (size >= offsetof(GpsCallbacks, gnss_sv_status_cb)) {
+        callbacks_owned.set_system_info_cb = callbacks->set_system_info_cb;
+        callbacks_owned.size = offsetof(GpsCallbacks, gnss_sv_status_cb);
+    }
+    if (size >= sizeof(GpsCallbacks)) {
+        callbacks_owned.gnss_sv_status_cb = callbacks->gnss_sv_status_cb;
+        callbacks_owned.size = sizeof(GpsCallbacks);
+    }
+    create = callbacks_owned.create_thread_cb;
+    want_on = 0;
+    running = starting = reader_alive = 1;
+    pthread_mutex_unlock(&lock);
+
+    th = create("gps-r800-reader", reader, NULL);
+    pthread_mutex_lock(&lock);
+    starting = 0;
+    if (!th) {
+        running = reader_alive = 0;
+        want_on = 0;
+        memset(&callbacks_owned, 0, sizeof(callbacks_owned));
+    }
+    pthread_cond_broadcast(&state_changed);
+    pthread_mutex_unlock(&lock);
+    return th ? 0 : -EAGAIN;
 }
 
 static int gps_start(void)
 {
-	LOGI("start");
-	pthread_mutex_lock(&lock);
-	want_on = 1;
-	send_line("START\n");
-	pthread_mutex_unlock(&lock);
-	report_status(GPS_STATUS_SESSION_BEGIN);
-	return 0;
+    pthread_mutex_lock(&lock);
+    if (!running) {
+        pthread_mutex_unlock(&lock);
+        return -ENODEV;
+    }
+    if (!want_on) {
+        want_on = 1;
+        send_line("START\n"); /* reader replays wanted state after reconnect */
+    }
+    pthread_mutex_unlock(&lock);
+    return 0;
 }
 
 static int gps_stop(void)
 {
-	LOGI("stop");
-	pthread_mutex_lock(&lock);
-	want_on = 0;
-	send_line("STOP\n");
-	pthread_mutex_unlock(&lock);
-	report_status(GPS_STATUS_SESSION_END);
-	return 0;
+    pthread_mutex_lock(&lock);
+    if (want_on) {
+        want_on = 0;
+        send_line("STOP\n");
+    }
+    pthread_mutex_unlock(&lock);
+    return 0;
 }
 
 static void gps_cleanup(void)
 {
-	gps_stop();
+    pthread_mutex_lock(&lock);
+    want_on = 0;
+    running = 0;
+    if (sock >= 0)
+        shutdown(sock, SHUT_RDWR);
+    pthread_cond_broadcast(&state_changed);
+    /* A framework callback may request cleanup from the reader itself.
+     * It cannot wait for its own return; the reader performs final cleanup. */
+    if (reader_id_valid && pthread_equal(reader_id, pthread_self())) {
+        pthread_mutex_unlock(&lock);
+        return;
+    }
+    while (starting || reader_alive)
+        pthread_cond_wait(&state_changed, &lock);
+    pthread_mutex_unlock(&lock);
 }
 
 static int gps_inject_time(GpsUtcTime t, int64_t ref, int unc)
@@ -514,6 +628,7 @@ static const GpsInterface *get_iface(struct gps_device_t *d)
 
 static int dev_close(struct hw_device_t *d)
 {
+	gps_cleanup();
 	free(d);
 	return 0;
 }
