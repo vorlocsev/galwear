@@ -2,6 +2,7 @@
 # Build ONLY the Android 11 ARM64 runtime APEX from a dedicated AOSP checkout.
 # No firmware, no flashing, no publication. Full source sync is a separate step.
 set -euo pipefail
+TOOLS=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TAG=android-11.0.0_r48
 MANIFEST=4466d48178452bf5ac136852bf2768af407a0584
 [ "$#" -eq 3 ] || { echo "usage: $0 <synced-aosp-root> <new-evidence-dir> <jobs>" >&2; exit 2; }
@@ -48,4 +49,7 @@ test -s "$APEX" || { echo "Runtime APEX missing (flattened or unsupported build 
 # Local evidence only. Do not copy the APEX to an artifact or release.
 sha256sum "$APEX" > "$EVIDENCE/runtime-apex.sha256"
 printf '%s\n' "$(realpath "$APEX")" > "$EVIDENCE/runtime-apex-path.txt"
-printf 'status=AOSP_RUNTIME_BUILD_ONLY\nsafe_to_flash=false\n' >> "$EVIDENCE/source.txt"
+APEX_SHA=$(sha256sum "$APEX" | cut -d ' ' -f 1)
+python3 "$TOOLS/r800_android_runtime_extract.py" --donor "$APEX" --sha256 "$APEX_SHA" \
+    --out "$EVIDENCE/runtime-root" --report "$EVIDENCE/runtime-extraction.json"
+printf 'status=AOSP_RUNTIME_EXTRACTED_STATIC_ONLY\nsafe_to_flash=false\n' >> "$EVIDENCE/source.txt"
