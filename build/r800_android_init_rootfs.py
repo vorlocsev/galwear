@@ -13,7 +13,7 @@ import re
 import subprocess
 
 from r800_android_init_dependencies import graph, regular, MAX_NODES, MAX_TOTAL
-from r800_android_init_inventory import MODULES
+from r800_android_init_inventory import MODULES, INTERPRETERS
 from r800_android_dynamic_audit import RUNTIME
 
 SEARCH = ("/system/lib64/bootstrap", "/system/lib64",
@@ -61,6 +61,8 @@ def plan(report: dict, choices: dict) -> dict:
         key = "product:" + info["path"]
         add(key)
         pending.append(key)
+        if info["interpreter"] not in INTERPRETERS:
+            raise ValueError("Unexpected interpreter path")
         required_interpreters.add(info["interpreter"])
     if set(interpreters) != required_interpreters:
         raise ValueError("Explicit mapping required for each PT_INTERP")
@@ -139,7 +141,17 @@ def stage(result, product, runtime, out):
     # Keep guest symlinks as manifest data only; never create absolute host links.
     (out / "linkerconfig").mkdir()
     (out / "linkerconfig/ld.config.txt").write_bytes(CONFIG)
+    result["status"] = "INIT_EXPERIMENTAL_ROOTFS_STAGED_ONLY"
     (out / "guest-layout.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate selection key: " + key)
+        result[key] = value
+    return result
 
 
 def main():
@@ -156,10 +168,9 @@ def main():
             raw = f.read(65537)
         if len(raw) > 65536:
             raise ValueError("Selection file too large")
-        result = plan(graph(a.product_out, a.runtime_root, a.readelf), json.loads(raw))
+        result = plan(graph(a.product_out, a.runtime_root, a.readelf), json.loads(raw, object_pairs_hook=unique_object))
         if a.out:
             stage(result, a.product_out, a.runtime_root, a.out)
-            result["status"] = "INIT_EXPERIMENTAL_ROOTFS_STAGED_ONLY"
         rc = 0
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
         result = {"status": "REJECT", "reason": str(exc), "safe_to_flash": False}
