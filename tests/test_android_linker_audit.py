@@ -491,6 +491,29 @@ def oat_elf_fixture(isa="arm64"):
     return bytes(data)
 
 
+def display_dtb_fixture(width=360, height=360, disabled=False):
+    names = b"compatible\0status\0hactive\0vactive\0clock-frequency\0"
+    def token(n):
+        return struct.pack(">I", n)
+    def pad(raw):
+        return raw + bytes((-len(raw)) % 4)
+    def node(name):
+        return token(1) + pad(name.encode() + b"\0")
+    def prop(name, value):
+        return token(3) + struct.pack(">II", len(value), names.index(name.encode() + b"\0")) + pad(value)
+    body = node("") + node("dsi@1000") + prop("compatible", b"samsung,exynos-dsim\0")
+    if disabled:
+        body += prop("status", b"disabled\0")
+    body += node("panel@0") + prop("compatible", b"fixture,amoled-panel\0")
+    body += node("panel-timing") + prop("hactive", token(width)) + prop("vactive", token(height))
+    body += prop("clock-frequency", token(9000000)) + token(2) * 4 + token(9)
+    off = 56
+    strings = off + len(body)
+    header = struct.pack(">10I", 0xd00dfeed, strings + len(names), off, strings, 40,
+                         17, 16, 0, len(names), len(body))
+    return header + bytes(16) + body + names
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -1888,6 +1911,50 @@ class LinkerTests(unittest.TestCase):
         out = audit.audit(self.root, ("/init",))
         self.assertEqual(out["graphics_inventory"]["status"], "REVIEW_REQUIRED")
         self.assertFalse(out["graphics_inventory"]["display_output_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
+    def test_display_dtb_360_mode(self):
+        mod = audit.r800_display_inventory
+        out = mod.audit(self.root, {"CONFIG_DRM": "y"}, display_dtb_fixture())
+        self.assertEqual(out["status"], "DISPLAY_DT_INVENTORY_ONLY")
+        self.assertTrue(out["device_tree"]["matching_enabled_timing"])
+        self.assertEqual(out["device_tree"]["timings"][0]["mode"], [360, 360])
+        self.assertFalse(out["display_output_verified"])
+
+    def test_display_dtb_disabled_parent(self):
+        out = audit.r800_display_inventory.audit(self.root, dtb=display_dtb_fixture(disabled=True))
+        self.assertFalse(out["device_tree"]["matching_enabled_timing"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_display_dtb_wrong_resolution(self):
+        out = audit.r800_display_inventory.audit(self.root, dtb=display_dtb_fixture(320, 320))
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["device_tree"]["timings"][0]["mode"], [320, 320])
+
+    def test_display_dtb_invalid_header_and_bounds(self):
+        mod = audit.r800_display_inventory
+        raw = bytearray(display_dtb_fixture())
+        struct.pack_into(">I", raw, 12, 999999)
+        with self.assertRaises(ValueError):
+            mod.parse_dtb(raw)
+        with self.assertRaises(ValueError):
+            mod.parse_dtb(display_dtb_fixture()[:-8])
+
+    def test_display_dtb_invalid_timing_range(self):
+        with self.assertRaises(ValueError):
+            audit.r800_display_inventory.cells(struct.pack(">III", 400, 360, 500))
+
+    def test_display_sysfs_snapshot_not_live_evidence(self):
+        self.put("sys/class/graphics/fb0/virtual_size", b"360,360\n")
+        out = audit.r800_display_inventory.audit(self.root)
+        self.assertEqual(out["sysfs_snapshot"]["/sys/class/graphics/fb0/virtual_size"], "360,360")
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["display_output_verified"])
+
+    def test_display_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",), dtb=display_dtb_fixture())
+        self.assertEqual(out["display_inventory"]["status"], "DISPLAY_DT_INVENTORY_ONLY")
         self.assertFalse(out["safe_to_flash"])
 
     def test_symlink_alias_not_ambiguous(self):
