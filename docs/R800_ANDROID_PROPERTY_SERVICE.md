@@ -707,3 +707,43 @@ builds; these are not used by the EXT4 boot phase. Actual complete
 AOSP compilation, image creation, QEMU boots and CI are not yet
 established. The new synthetic orchestration tests do not substitute
 for a real run.
+
+
+## Real CI entrypoints and evidence boundaries
+
+r800-qemu-block-smoke.yml builds the pinned generic block kernel on
+an Ubuntu hosted runner (same pinned Alpine LLVM toolchain as the
+existing property workflow), boots its embedded PID1 without disks,
+then creates two 16 MiB synthetic EXT4 files and runs the actual
+read-only VirtIO probe. This does not depend on an AOSP checkout.
+The push trigger is deliberately limited to changes to the workflow
+itself on the development branch to start the first smoke run without
+rebuilding the kernel for every code commit. The separate synthetic
+status is VIRT_SYNTHETIC_READONLY_BLOCK_MOUNTS_ONLY; there is no
+Android policy hash or Android acceptance report. Only JSON and
+console logs are uploaded, not kernels, disk images or binaries.
+
+r800-aosp-ext4-manual.yml is manual-only and needs a dedicated,
+isolated Linux x64 self-hosted runner labeled galwear-aosp, with no
+privileged credentials or shared sensitive workspace. Configure
+repository variables GALWEAR_AOSP_ROOT (clean disposable pinned
+AOSP checkout), GALWEAR_BLOCK_BUNDLE (directory containing Image,
+block-baseline.json and virt-config-evidence.json for the exact
+accepted block kernel), and GALWEAR_LIBRARY_CHOICES (explicit JSON
+file). The runner must already have the build and QEMU prerequisites
+and enough storage. No automatic source sync, kernel or AOSP artifact
+download is performed. The confirmation input must be true. The
+job is restricted to the development branch of this fork.
+
+GitHub workflow_dispatch requires the workflow file on the default
+branch; the new files are currently in the development branch only.
+The block smoke push event does not require merging to main. Do not
+merge or modify main merely to make the manual workflow dispatchable
+without separate approval. The same full pipeline commands remain
+available on a suitable Linux machine.
+
+The workflow definitions and tests are committed, not evidence that
+the runs passed. A successful synthetic block smoke does not establish
+stock SELinux label handling, Android init, APEX activation or Property
+Service. Full AOSP experiment acceptance requires its separate
+VIRT_EXT4_PROPERTY_PIPELINE_ONLY report. No release or flashing.
