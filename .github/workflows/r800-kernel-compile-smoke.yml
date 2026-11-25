@@ -7,6 +7,8 @@ on:
       - "development/r800-display-error-propagation-20261125"
     paths:
       - ".github/workflows/r800-kernel-compile-smoke.yml"
+      - ".github/workflows/r800-initramfs-smoke.yml"
+      - "docs/R800_INTEGRATED_KERNEL_BUILD.md"
       - "build/r800_kernel_compile_smoke.sh"
       - "build/r800_aosp_source_probe.sh"
       - "tests/test_kernel_compile_recipe.py"
