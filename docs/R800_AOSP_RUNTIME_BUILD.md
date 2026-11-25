@@ -50,3 +50,34 @@ observed, a temporary guest archive, boot and execution in QEMU, and log
 validation. This recipe is not a verified build or bit-reproducibility
 guarantee. No APEX signature verification, actual watch test or Wear OS
 framework boot has occurred. safe_to_flash=false.
+
+
+## Dynamic guest execution (experimental)
+
+After a successful same-kernel static Bionic run, build the dynamic
+supervisor with the same cross GCC used by the virt workflow:
+
+    aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static \
+      src/initramfs/dynamic-probe-pid1.c -o /absolute/dynamic-init
+
+Then use the exact dynamic probe, locally extracted runtime, extraction
+report and static Bionic boot evidence:
+
+    python3 build/r800_qemu_dynamic_android.py \
+      --init /absolute/dynamic-init --probe /absolute/probe \
+      --runtime-root /absolute/new-runtime-evidence/runtime-root \
+      --runtime-report /absolute/new-runtime-evidence/runtime-extraction.json \
+      --kernel /absolute/virt-kernel/arch/arm64/boot/Image \
+      --baseline /absolute/virt-bionic-evidence.json \
+      --out-dir /absolute/new-dynamic-boot \
+      --report /absolute/dynamic-boot-evidence.json
+
+This creates a separate allowlisted newc initramfs with a relative linker64
+alias and a restricted experimental linker namespace. The guest runs the
+dynamic executable as a child of a static diagnostic PID1; procfs and
+devtmpfs are RAM-only. No host disks, network or watch hardware are attached.
+The original six-entry archive contract remains unchanged.
+
+Any additional observed runtime dependency must be reviewed explicitly.
+A successful dynamic probe is not a full Android platform boot, production
+linker policy, APEX signature verification or hardware acceptance.
