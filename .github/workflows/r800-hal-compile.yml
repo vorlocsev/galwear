@@ -9,6 +9,7 @@ on:
       - "build/r800_build_hals.sh"
       - "build/r800_build_tools.sh"
       - "build/r800_build_busybox.sh"
+      - "build/r800_build_wifi_tools.sh"
       - "src/tools/**"
       - "build/r800_tinyalsa_sync_test.py"
       - "build/r800_stage_hals.py"
@@ -78,16 +79,21 @@ jobs:
       - name: Build static BusyBox for unified staging
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi libc6-dev-armel-cross qemu-user
+          sudo apt-get install -y gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi libc6-dev-armel-cross qemu-user flex bison pkg-config
           sh build/r800_build_busybox.sh "$RUNNER_TEMP/r800-busybox"
+      - name: Build static Wi-Fi tools for unified staging
+        run: sh build/r800_build_wifi_tools.sh "$RUNNER_TEMP/r800-wifi-tools"
       - name: Assemble partial compiled component tree
         run: |
           python3 build/r800_stage_components.py --hal-dir "$RUNNER_TEMP/r800-hal" \
             --vendor-sources src/vendor --tools "$RUNNER_TEMP/r800-tools" \
             --bluetooth "$RUNNER_TEMP/r800-bt" --keepwifi "$RUNNER_TEMP/r800-keepwifi" \
-            --busybox "$RUNNER_TEMP/r800-busybox" \
+            --busybox "$RUNNER_TEMP/r800-busybox" --wifi "$RUNNER_TEMP/r800-wifi-tools" \
             --output "$RUNNER_TEMP/r800-components" --source-sha "$GITHUB_SHA"
           cmp "$RUNNER_TEMP/r800-busybox/bin/busybox" "$RUNNER_TEMP/r800-components/payload/bin/busybox"
+          for tool in wpa_supplicant wpa_cli iw; do
+            cmp "$RUNNER_TEMP/r800-wifi-tools/bin/$tool" "$RUNNER_TEMP/r800-components/payload/bin/$tool"
+          done
           test ! -e "$RUNNER_TEMP/r800-components/payload/gpsbridge"
           test ! -e "$RUNNER_TEMP/r800-components/payload/android/system.img"
       - name: Verify component manifest and missing donor gate
