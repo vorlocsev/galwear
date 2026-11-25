@@ -47,6 +47,10 @@ jobs:
           for module in audio.primary.r800.so gps.r800.so hwcomposer.r800.so sensors.r800.so; do
             cmp "$RUNNER_TEMP/r800-stage/vendor-overlay/$module" "$RUNNER_TEMP/r800-stage/payload/hwc/$module"
           done
+      - name: Compile Broadcom Bluetooth vendor library for BCM43012
+        run: |
+          sh -n src/vendor/libbt/build.sh
+          sh src/vendor/libbt/build.sh "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/r800-bt"
       - name: Upload compiler and ELF evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -57,5 +61,7 @@ jobs:
             ${{ runner.temp }}/r800-hal/toolchain.txt
             ${{ runner.temp }}/r800-hal/tinyalsa-evidence.txt
             ${{ runner.temp }}/r800-stage/hal-stage-evidence.json
+            ${{ runner.temp }}/r800-bt/libbt-vendor.elf.txt
+            ${{ runner.temp }}/r800-bt/bt-build-evidence.txt
           if-no-files-found: warn
           retention-days: 7
