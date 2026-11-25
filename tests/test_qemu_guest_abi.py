@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 import r800_qemu_guest_abi as a
 
-LOG = (a.EXPECTED + a.START + b"\n" + a.ABI_EXPECTED + b"\n".join(a.BINDER_EXPECTED) + b"\n" + a.END + b"\n"
+LOG = (a.EXPECTED + a.START + b"\n" + a.ABI_EXPECTED + b"\n".join(a.BINDER_EXPECTED) + b"\n" + b"\n".join(a.SHMEM_EXPECTED) + b"\n" + a.END + b"\n"
        + a.HEARTBEAT_PREFIX + b"00000001\n")
 
 
@@ -19,6 +19,8 @@ class GuestAbiTests(unittest.TestCase):
         self.assertTrue(report["guest_pid1_reported"])
         self.assertTrue(report["shared_memory_roundtrip"])
         self.assertTrue(report["binder_transactions_tested"])
+        self.assertTrue(report["ashmem_roundtrip_reported"])
+        self.assertTrue(report["memfd_seals_reported"])
         self.assertEqual(report["binder_roundtrip_context"], "binder")
 
     def test_missing_pid1_marker(self):
@@ -60,6 +62,20 @@ class GuestAbiTests(unittest.TestCase):
     def test_binder_failure_after_roundtrip(self):
         with self.assertRaisesRegex(ValueError, "Binder diagnostic sequence"):
             a.inspect_abi(LOG.replace(a.BINDER_EXPECTED[-1], b"r800-binder: FAIL transaction roundtrip"))
+
+    def test_missing_shared_memory_stage(self):
+        for marker in a.SHMEM_EXPECTED:
+            with self.subTest(marker=marker):
+                with self.assertRaisesRegex(ValueError, "shared memory diagnostic sequence"):
+                    a.inspect_abi(LOG.replace(marker, b""))
+
+    def test_memfd_seals_failure(self):
+        with self.assertRaisesRegex(ValueError, "shared memory diagnostic sequence"):
+            a.inspect_abi(LOG.replace(b"seals=PASS", b"seals=FAIL"))
+
+    def test_shmem_after_completion(self):
+        with self.assertRaisesRegex(ValueError, "outside ABI completion"):
+            a.inspect_abi(LOG.replace(a.END + b"\n", b"").replace(a.SHMEM_EXPECTED[0], a.END + b"\n" + a.SHMEM_EXPECTED[0]))
 
     def test_baseline_kernel_hash_and_status(self):
         with tempfile.TemporaryDirectory() as tmp:
