@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/r800-android-runtime-extract.yml
       - build/r800_android_runtime_extract.py
+      - build/r800_android_gsi_import.py
+      - tests/test_android_gsi_import.py
       - build/r800_android_dynamic_audit.py
       - tests/test_android_runtime_extract.py
   workflow_dispatch:
@@ -30,5 +32,6 @@ jobs:
           command -v debugfs
           command -v mke2fs
           command -v simg2img
-          python3 -m py_compile build/r800_android_runtime_extract.py
+          python3 -m py_compile build/r800_android_runtime_extract.py build/r800_android_gsi_import.py
           python3 -m unittest discover -s tests -p 'test_android_runtime_extract.py' -v
+          python3 -m unittest discover -s tests -p 'test_android_gsi_import.py' -v
