@@ -450,9 +450,8 @@ udhcpc -i wlan0 -s /data/r800dev/udhcpc.sh -b -t 15 -T 2 -x hostname:r800
 for i in $(seq 1 20); do ip -4 addr show wlan0 | grep -q inet && break; sleep 1; done
 log "wlan0: $(ip -4 addr show wlan0 | grep -o 'inet [0-9./]*') mac $(cat /sys/class/net/wlan0/address)"
 
-# ---- shell ----
-/data/r800dev/bin/busybox-extras telnetd -l /bin/sh -p 23
-log "telnetd on port 23 rc=$?"
+# No unauthenticated network shell in this candidate.
+log "network shell disabled"
 
 # Optional per-session hook, editable from Tizen without reflashing.
 [ -f /data/r800dev/hook.sh ] && sh /data/r800dev/hook.sh
