@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Build a static AOSP libselinux diagnostic, not the original init.
 set -euo pipefail
-[[ $# == 2 || $# == 3 ]] || { echo "usage: $0 <synced-aosp-root> <new-output-dir> [transition|relabel]" >&2; exit 2; }
+[[ $# == 2 || $# == 3 ]] || { echo "usage: $0 <synced-aosp-root> <new-output-dir> [transition|relabel|service]" >&2; exit 2; }
 MODE=${3:-transition}
+SERVICE_FLAG=""
 case "$MODE" in
     transition) SOURCE=selinux-transition-probe.c; STATUS=SELINUX_TRANSITION_COMPILE_ONLY ;;
     relabel) SOURCE=rootfs-relabel-probe.c; STATUS=SELINUX_ROOTFS_RELABEL_COMPILE_ONLY ;;
+    service) SOURCE=rootfs-relabel-probe.c; STATUS=SELINUX_SERVICE_BOOT_COMPILE_ONLY; SERVICE_FLAG="-DGALWEAR_SERVICE_BOOT" ;;
     *) exit 2 ;;
 esac
 TOOLS=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -32,6 +34,9 @@ cc_binary {
     cflags: ["-Wall", "-Wextra", "-Werror"],
 }
 BP
+if [[ -n "$SERVICE_FLAG" ]]; then
+    sed -i 's/"-Werror"/"-Werror", "-DGALWEAR_SERVICE_BOOT"/' "$OVERLAY/Android.bp"
+fi
 mkdir "$OUT"
 repo manifest -r -o "$OUT/manifest-resolved.xml"
 unset OUT_DIR_COMMON_BASE
