@@ -270,6 +270,94 @@ def symbol_inventory(tags, data, loads, cls, strings, result):
     result["versym_indices_checked"] = vers is not None
 
 
+DT_REL, DT_RELSZ, DT_RELENT = 17, 18, 19
+DT_RELA, DT_RELASZ, DT_RELAENT = 7, 8, 9
+DT_JMPREL, DT_PLTRELSZ, DT_PLTREL = 23, 2, 20
+MAX_RELOCATIONS = 262144
+# Other relocation encodings are reported, never treated as checked.
+PACKED_RELOCATION_TAGS = (0x6000000f, 0x60000010, 0x60000011, 0x60000012,
+                          35, 36, 37, 0x6fffe000, 0x6fffe001, 0x6fffe003)
+
+
+def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
+    result = {"tables": [], "unsupported_types": [], "symbol_indices_checked": True,
+              "packed_tags": [hex(t) for t in PACKED_RELOCATION_TAGS if t in tags],
+              "nonwritable_targets": 0, "relocations_applied": False}
+    wide = cls == 2
+    # Width of common scalar dynamic relocations. COPY and TLSDESC require
+    # additional symbol/type-specific checks and are deliberately not covered.
+    widths = ({257: 8, 258: 4, 259: 2, 260: 8, 261: 4, 262: 2,
+               1025: 8, 1026: 8, 1027: 8, 1028: 8, 1029: 8, 1030: 8, 1032: 8}
+              if wide else {2: 4, 3: 4, 17: 4, 18: 4, 19: 4,
+                            21: 4, 22: 4, 23: 4, 160: 4})
+    relative = (1027, 1032) if wide else (23, 160)
+    unsupported, ranges, total = set(), [], 0
+
+    def single(tag):
+        if len(tags.get(tag, [])) != 1:
+            raise ValueError("Missing or duplicate relocation tag: " + hex(tag))
+        return tags[tag][0]
+
+    def table(label, addr, size, rela):
+        nonlocal total
+        fmt = ("<QQq" if rela else "<QQ") if wide else ("<IIi" if rela else "<II")
+        step = struct.calcsize(fmt)
+        if size % step or total + size // step > MAX_RELOCATIONS:
+            raise ValueError("Invalid relocation table size or count")
+        total += size // step
+        summary = {"kind": label, "encoding": "RELA" if rela else "REL", "count": size // step,
+                   "types": {}}
+        result["tables"].append(summary)
+        if not size:
+            return
+        offsets = {fo + addr - va for va, fo, fs in loads
+                   if va <= addr and size <= fs - (addr - va)}
+        if len(offsets) != 1:
+            raise ValueError("Relocation table not uniquely file-backed")
+        off = offsets.pop()
+        if any(off < end and begin < off + size for begin, end in ranges):
+            raise ValueError("Overlapping relocation tables")
+        ranges.append((off, off + size))
+        for p in range(off, off + size, step):
+            target, info, *_ = struct.unpack_from(fmt, data, p)
+            sym, typ = (info >> 32, info & 0xffffffff) if wide else (info >> 8, info & 255)
+            summary["types"][str(typ)] = summary["types"].get(str(typ), 0) + 1
+            if sym and symbol_count is None:
+                result["symbol_indices_checked"] = False
+            elif symbol_count is not None and sym >= symbol_count:
+                raise ValueError("Relocation symbol index out of bounds")
+            if typ in relative and sym:
+                raise ValueError("Relative relocation has nonzero symbol index")
+            if typ == 0:
+                continue
+            width = widths.get(typ, 1)
+            if typ not in widths:
+                unsupported.add(typ)
+            targets = [flags for va, mem, flags in memory
+                       if va <= target and width <= mem - (target - va)]
+            if not targets:
+                raise ValueError("Relocation target outside PT_LOAD memory")
+            if not any(flags & 2 for flags in targets):
+                result["nonwritable_targets"] += 1
+
+    for label, a, s, e, rela in (("REL", DT_REL, DT_RELSZ, DT_RELENT, False),
+                                  ("RELA", DT_RELA, DT_RELASZ, DT_RELAENT, True)):
+        expected = (24 if rela else 16) if wide else (12 if rela else 8)
+        if e in tags and single(e) != expected:
+            raise ValueError("Invalid relocation entry size")
+        if a in tags or s in tags:
+            if single(e) != expected:
+                raise ValueError("Invalid relocation entry size")
+            table(label, single(a), single(s), rela)
+    if any(t in tags for t in (DT_JMPREL, DT_PLTRELSZ, DT_PLTREL)):
+        kind = single(DT_PLTREL)
+        if kind not in (DT_REL, DT_RELA):
+            raise ValueError("Invalid DT_PLTREL encoding")
+        table("PLT", single(DT_JMPREL), single(DT_PLTRELSZ), kind == DT_RELA)
+    result["unsupported_types"] = sorted(unsupported)
+    return result
+
+
 def inspect(data: bytes) -> dict:
     if len(data) < 52 or data[:4] != b"\x7fELF" or data[5:7] != b"\x01\x01":
         raise ValueError("Invalid little-endian ELF")
@@ -289,17 +377,18 @@ def inspect(data: bytes) -> dict:
         expected, dynfmt = 32, "<iI"
     if entsize != expected or not 1 <= count <= 128 or phoff + count * entsize > len(data):
         raise ValueError("Invalid program header table")
-    loads, dynamic = [], None
+    loads, memory, dynamic = [], [], None
     for i in range(count):
         p = phoff + i * entsize
         if cls == 2:
-            typ, _, off, addr, _, size, mem, _ = struct.unpack_from("<IIQQQQQQ", data, p)
+            typ, flags, off, addr, _, size, mem, _ = struct.unpack_from("<IIQQQQQQ", data, p)
         else:
-            typ, off, addr, _, size, mem, _, _ = struct.unpack_from("<IIIIIIII", data, p)
+            typ, off, addr, _, size, mem, flags, _ = struct.unpack_from("<IIIIIIII", data, p)
         if typ in (1, 2) and (off + size > len(data) or size > mem):
             raise ValueError("Invalid segment bounds")
         if typ == 1:
             loads.append((addr, off, size))
+            memory.append((addr, mem, flags))
         if typ == 2:
             if dynamic is not None:
                 raise ValueError("Duplicate PT_DYNAMIC")
@@ -312,7 +401,8 @@ def inspect(data: bytes) -> dict:
               "version_needs": [], "version_definitions": [], "versym_present": False,
               "dynamic_symbol_count": None, "symbol_table_status": "NOT_PRESENT",
               "versym_indices_checked": False, "symbol_imports": [],
-              "symbol_exports": [], "unsupported_symbols": []}
+              "symbol_exports": [], "unsupported_symbols": [],
+              "relocations": relocation_inventory({}, data, loads, memory, cls, None)}
     if dynamic is None:
         return result
     off, size = dynamic
@@ -333,6 +423,7 @@ def inspect(data: bytes) -> dict:
     if len(tags.get(14, [])) > 1:
         raise ValueError("Duplicate DT_SONAME")
     if not any(tag in tags for tag in (1, 14, DT_VERNEED, DT_VERNEEDNUM, DT_VERDEF, DT_VERDEFNUM, DT_VERSYM, DT_HASH, DT_SYMTAB, DT_SYMENT, DT_GNU_HASH)):
+        result["relocations"] = relocation_inventory(tags, data, loads, memory, cls, None)
         return result
     if len(tags.get(5, [])) != 1 or len(tags.get(10, [])) != 1:
         raise ValueError("Missing or duplicate dynamic string table")
@@ -361,6 +452,7 @@ def inspect(data: bytes) -> dict:
         result["soname"] = dynamic_name(tags[14][0], "DT_SONAME")
     result["version_needs"], result["version_definitions"], result["versym_present"] = version_inventory(tags, data, loads, dynamic_name)
     symbol_inventory(tags, data, loads, cls, strings, result)
+    result["relocations"] = relocation_inventory(tags, data, loads, memory, cls, result["dynamic_symbol_count"])
     return result
 
 
@@ -446,6 +538,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
     unsupported_search_paths, soname_mismatches = [], []
     version_mismatches, unbound_version_needs = [], []
     unsupported_symbol_objects = []
+    relocation_review_objects = []
     edges = {}
     inventory_records = 0
     inventory_name_bytes = 0
@@ -470,6 +563,10 @@ def audit(root: Path, targets=TARGETS) -> dict:
             break
         seen[name] = info
         edges[name] = {}
+        reloc = info["relocations"]
+        if (reloc["unsupported_types"] or reloc["packed_tags"] or
+                not reloc["symbol_indices_checked"] or reloc["nonwritable_targets"]):
+            relocation_review_objects.append(name)
         if info["unsupported_symbols"]:
             unsupported_symbol_objects.append(name)
         if info["custom_search_path"]:
@@ -519,12 +616,14 @@ def audit(root: Path, targets=TARGETS) -> dict:
             present = False
         apex[name] = {"expanded_tree_present": present}
     return {"schema": "galwear-r800-linker-inventory-v1",
-            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs or unsupported_symbol_objects or resolution["missing_strong"] or resolution["ambiguous"] or resolution["incomplete"]) else "REVIEW_REQUIRED",
+            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs or unsupported_symbol_objects or relocation_review_objects or resolution["missing_strong"] or resolution["ambiguous"] or resolution["incomplete"]) else "REVIEW_REQUIRED",
             "objects": seen, "missing_candidates": unresolved, "ambiguous_candidates": ambiguous,
             "errors": errors, "unsupported_search_paths": unsupported_search_paths,
             "soname_mismatches": soname_mismatches,
             "version_mismatches": version_mismatches, "unbound_version_needs": unbound_version_needs,
             "unsupported_symbol_objects": unsupported_symbol_objects,
+            "relocation_review_objects": relocation_review_objects,
+            "relocations_applied": False,
             "dependency_edges": edges, "symbol_candidates": resolution,
             "symbol_resolution_verified": False,
             "apex": apex, "android_namespace_resolution_verified": False,
