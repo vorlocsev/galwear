@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded read-only AVB footer/VBMeta inspection; no trust or signature claims."""
+"""Read-only AVB inventory and embedded-key RSA checks; no platform trust claims."""
 from __future__ import annotations
 import hashlib
 import hmac
@@ -8,7 +8,39 @@ import struct
 MAX_VBMETA = 1024 * 1024
 
 
-def inspect(stream, base, size, package_key):
+DIGEST_INFO = {
+    "sha256": bytes.fromhex("3031300d060960864801650304020105000420"),
+    "sha512": bytes.fromhex("3051300d060960864801650304020305000440"),
+}
+
+
+def rsa_signature_matches(key, signature, digest, hash_name):
+    """Verify AVB RSA public key encoding and exact PKCS#1 v1.5 digest block."""
+    if hash_name not in DIGEST_INFO or len(digest) != hashlib.new(hash_name).digest_size:
+        return False
+    width = len(signature)
+    if width not in (256, 512, 1024) or len(key) != 8 + 2 * width:
+        return False
+    bits, n0inv = struct.unpack_from(">II", key)
+    n = int.from_bytes(key[8:8 + width], "big")
+    rr = int.from_bytes(key[8 + width:], "big")
+    if bits != width * 8 or n.bit_length() != bits or not n & 1:
+        return False
+    if (n * n0inv + 1) % (1 << 32) or rr != pow(2, 2 * bits, n):
+        return False
+    s = int.from_bytes(signature, "big")
+    if not 0 < s < n:
+        return False
+    encoded = pow(s, 65537, n).to_bytes(width, "big")
+    suffix = DIGEST_INFO[hash_name] + digest
+    pad = width - len(suffix) - 3
+    if pad < 8:
+        return False
+    expected = bytes((0, 1)) + bytes((255,)) * pad + bytes((0,)) + suffix
+    return hmac.compare_digest(encoded, expected)
+
+
+def inspect(stream, base, size, package_key, trusted_key_sha256=None):
     def read(off, length):
         if off < 0 or length < 0 or off + length > size or length > MAX_VBMETA:
             raise ValueError("AVB read outside payload")
@@ -21,6 +53,13 @@ def inspect(stream, base, size, package_key):
     result = {"status": "REVIEW_REQUIRED", "footer_present": False,
               "signature_verified": False, "trusted_key_verified": False,
               "hashtree_verified": False, "rollback_verified": False}
+    if trusted_key_sha256 is not None:
+        if (not isinstance(trusted_key_sha256, str) or len(trusted_key_sha256) != 64 or
+                any(ch not in "0123456789abcdefABCDEF" for ch in trusted_key_sha256)):
+            raise ValueError("Invalid independently supplied trusted key fingerprint")
+        trusted_key_sha256 = trusted_key_sha256.lower()
+    result["signature_status"] = "NOT_CHECKED"
+    result["key_fingerprint_matches"] = None
     if size < 64:
         raise ValueError("AVB payload too small")
     footer = read(size - 64, 64)
@@ -75,7 +114,18 @@ def inspect(stream, base, size, package_key):
             issues.append("VBMeta digest mismatch")
         if not key_matches:
             issues.append("Embedded AVB key differs from package key")
+        rsa_ok = rsa_signature_matches(key, signature, calculated, hash_name)
+        result["signature_verified"] = bool(rsa_ok and hash_matches)
+        result["signature_status"] = ("EMBEDDED_KEY_SIGNATURE_VALID" if result["signature_verified"]
+                                      else "INVALID_SIGNATURE_OR_KEY")
+        result["embedded_key_sha256"] = hashlib.sha256(key).hexdigest()
+        if trusted_key_sha256 is not None:
+            result["key_fingerprint_matches"] = hmac.compare_digest(
+                result["embedded_key_sha256"], trusted_key_sha256)
+            result["trusted_key_verified"] = bool(result["key_fingerprint_matches"] and
+                                                  result["signature_verified"] and key_matches)
     else:
+        result["signature_status"] = "UNSUPPORTED_OR_UNSIGNED"
         issues.append("Unsigned or unsupported VBMeta algorithm")
     if flags:
         issues.append("Nonzero VBMeta flags")
