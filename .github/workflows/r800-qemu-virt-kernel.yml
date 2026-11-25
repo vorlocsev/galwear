@@ -27,6 +27,7 @@ on:
       - src/initramfs/binder-roundtrip.c
       - src/initramfs/shared-memory-probe.c
       - build/r800_qemu_guest_abi.py
+      - build/r800_bionic_compile.sh
       - build/r800_qemu_abi_probe.py
       - tests/test_qemu_guest_abi.py
   workflow_dispatch:
@@ -98,6 +99,21 @@ jobs:
             --baseline "$RUNNER_TEMP/virt-boot-evidence.json" \
             --out-dir "$RUNNER_TEMP/virt-abi-boot" \
             --report "$RUNNER_TEMP/virt-abi-evidence.json"
+      - name: Install pinned NDK and compile separate Bionic diagnostic
+        run: |
+          sdkmanager --install "ndk;27.3.13750724"
+          sh build/r800_bionic_compile.sh "$GITHUB_WORKSPACE" "$ANDROID_SDK_ROOT/ndk/27.3.13750724" "$RUNNER_TEMP/virt-abi-init/uapi" "$RUNNER_TEMP/virt-bionic-init"
+      - name: Boot Bionic diagnostic on same virt kernel after glibc success
+        run: |
+          python3 build/r800_qemu_guest_abi.py \
+            --init "$RUNNER_TEMP/virt-bionic-init/init" \
+            --compile-evidence "$RUNNER_TEMP/virt-bionic-init/initramfs-evidence.json" \
+            --bionic-compile-evidence "$RUNNER_TEMP/virt-bionic-init/bionic-compile-evidence.json" \
+            --glibc-baseline "$RUNNER_TEMP/virt-abi-evidence.json" \
+            --kernel "$RUNNER_TEMP/virt-kernel/arch/arm64/boot/Image" \
+            --baseline "$RUNNER_TEMP/virt-boot-evidence.json" \
+            --out-dir "$RUNNER_TEMP/virt-bionic-boot" \
+            --report "$RUNNER_TEMP/virt-bionic-evidence.json"
       - name: Record source and patch identity
         if: always()
         run: |
@@ -121,5 +137,10 @@ jobs:
             ${{ runner.temp }}/virt-abi-init/ashmem-uapi.sha256
             ${{ runner.temp }}/virt-abi-evidence.json
             ${{ runner.temp }}/virt-abi-boot/generic-console.log
+            ${{ runner.temp }}/virt-bionic-init/initramfs-evidence.json
+            ${{ runner.temp }}/virt-bionic-init/bionic-compile-evidence.json
+            ${{ runner.temp }}/virt-bionic-init/clang-version.txt
+            ${{ runner.temp }}/virt-bionic-evidence.json
+            ${{ runner.temp }}/virt-bionic-boot/generic-console.log
           if-no-files-found: warn
           retention-days: 7
