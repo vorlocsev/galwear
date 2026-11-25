@@ -47,6 +47,7 @@ test "$(get_build_var TARGET_ARCH)" = arm64
 m -j4 init_second_stage galwear_property_service galwear_property_client
 PRODUCT_OUT=$(get_build_var PRODUCT_OUT)
 set -u
+printf '%s\n' "$(realpath "$PRODUCT_OUT")" > "$OUT/product-out-path.txt"
 python3 "$TOOLS/r800_android_init_inventory.py" --product-out "$PRODUCT_OUT" --report "$OUT/init-inventory.json"
 if [[ -n "$RUNTIME" ]]; then
     python3 "$TOOLS/r800_android_init_dependencies.py" --product-out "$PRODUCT_OUT" --runtime-root "$RUNTIME" --report "$OUT/init-dependencies.json"
