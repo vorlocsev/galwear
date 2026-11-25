@@ -27,7 +27,7 @@ struct pcm_config { unsigned channels, rate, format, period_size, period_count,
     start_threshold, stop_threshold; };
 struct mix_setting { const char *name, *str; int val; };
 struct stream { pthread_mutex_t lock; bool standby; };
-struct r800_audio_device { bool hfp_active; int hfp_rate, hfp_volume;
+struct r800_audio_device { bool hfp_active; int hfp_rate, hfp_volume; pthread_mutex_t route_lock;
     struct stream *out, *in; struct pcm *hfp_pcm[4]; };
 static const struct mix_setting spk_off[] = {{"speaker",NULL,0}};
 static const struct mix_setting mic_off[] = {{"mic",NULL,0}};
@@ -56,7 +56,7 @@ int main(int argc,char **argv) {
     assert(argc == 3);
     fail_slot = atoi(argv[1]); fail_mode = atoi(argv[2]);
     struct stream out = {.lock=PTHREAD_MUTEX_INITIALIZER}, in = {.lock=PTHREAD_MUTEX_INITIALIZER};
-    struct r800_audio_device a = {.hfp_rate=8000,.hfp_volume=11,.out=&out,.in=&in};
+    struct r800_audio_device a = {.hfp_rate=8000,.hfp_volume=11,.out=&out,.in=&in,.route_lock=PTHREAD_MUTEX_INITIALIZER};
     int rc = hfp_start(&a);
     assert(out.standby && in.standby);
     if (fail_mode) {
@@ -71,6 +71,9 @@ int main(int argc,char **argv) {
         hfp_stop(&a);
         assert(live == 0 && stops == 4);
     }
+    assert(pthread_mutex_trylock(&a.route_lock) == 0);
+    pthread_mutex_unlock(&a.route_lock);
+    assert(!pthread_mutex_destroy(&a.route_lock));
     assert(pthread_mutex_trylock(&out.lock) == 0);
     pthread_mutex_unlock(&out.lock);
     assert(pthread_mutex_trylock(&in.lock) == 0);

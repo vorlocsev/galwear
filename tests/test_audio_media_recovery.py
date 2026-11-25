@@ -12,6 +12,7 @@ STUB = r"""
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #define LOGE(...) ((void)0)
 #define LOGW(...) ((void)0)
 #define LOGI(...) ((void)0)
@@ -41,7 +42,7 @@ static const struct mix_setting spk_on[] = {{"spk on",0,1}};
 static const struct mix_setting spk_off[] = {{"spk off",0,0}};
 static const struct mix_setting mic_on[] = {{"mic on",0,1}};
 static const struct mix_setting mic_off[] = {{"mic off",0,0}};
-struct adev { bool hfp_active, mic_mute; };
+struct adev { bool hfp_active, mic_mute; pthread_mutex_t route_lock; };
 struct r800_stream_out { struct adev *adev; struct pcm *pcm; bool standby; int64_t next_open_ns; };
 struct r800_stream_in { struct adev *adev; struct pcm *pcm; bool standby;
     int64_t next_open_ns; unsigned channels; uint64_t start_frames, frames_read; int peak; };
@@ -71,7 +72,7 @@ MAIN = r"""
 int main(int argc,char **argv) {
     assert(argc == 3);
     int input = atoi(argv[1]), mode = atoi(argv[2]);
-    struct adev a = {0};
+    struct adev a = {.route_lock=PTHREAD_MUTEX_INITIALIZER};
     struct r800_stream_out o = {.adev=&a,.standby=true};
     struct r800_stream_in i = {.adev=&a,.standby=true,.channels=1};
     fail_route = mode <= 2 ? mode : 0;
@@ -83,6 +84,8 @@ int main(int argc,char **argv) {
     assert(deadline == clock_ns + RETRY_NS && rollback == 1);
     assert(opens == (mode >= 3));
     assert(closes == (mode == 4));
+    assert(pthread_mutex_trylock(&a.route_lock) == 0);
+    pthread_mutex_unlock(&a.route_lock);
     int old_calls = calls;
     assert((input ? start_input(&i) : start_output(&o)) == -EAGAIN);
     assert(calls == old_calls);
@@ -95,6 +98,9 @@ int main(int argc,char **argv) {
     assert((input ? start_input(&i) : start_output(&o)) == 0);
     assert(input ? !i.standby && !i.next_open_ns : !o.standby && !o.next_open_ns);
     pcm_close(input ? i.pcm : o.pcm);
+    assert(pthread_mutex_trylock(&a.route_lock) == 0);
+    pthread_mutex_unlock(&a.route_lock);
+    assert(!pthread_mutex_destroy(&a.route_lock));
     return 0;
 }
 """
@@ -111,7 +117,7 @@ class MediaRecoveryTests(unittest.TestCase):
             c = Path(tmp) / "media.c"
             exe = Path(tmp) / "media"
             c.write_text(STUB + out + inp + MAIN)
-            subprocess.run(["cc", "-std=c11", "-Wall", "-Werror=implicit-function-declaration",
+            subprocess.run(["cc", "-std=c11", "-pthread", "-Wall", "-Werror=implicit-function-declaration",
                             str(c), "-o", str(exe)], check=True, timeout=15)
             for input_stream in (0, 1):
                 for mode in (1, 2, 3, 4):

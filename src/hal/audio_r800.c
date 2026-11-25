@@ -120,6 +120,9 @@ static const struct mix_setting mic_off[] = {
 struct r800_audio_device {
     struct audio_hw_device dev;   /* first: the framework casts back to this */
     pthread_mutex_t lock;
+    /* Lock order: device -> out -> in -> route; media takes stream -> route.
+     * Never hold route_lock during steady-state PCM read/write. */
+    pthread_mutex_t route_lock;
     _Atomic bool mic_mute;
     audio_mode_t mode;
     struct r800_stream_out *out;
@@ -225,6 +228,7 @@ static void do_standby(struct r800_stream_out *out)
 {
     if (out->standby)
         return;
+    pthread_mutex_lock(&out->adev->route_lock);
     if (out->pcm) {
         pcm_close(out->pcm);
         out->pcm = NULL;
@@ -232,6 +236,7 @@ static void do_standby(struct r800_stream_out *out)
     if (!out->adev->hfp_active)   /* a call keeps the speaker on */
         apply_mixer(spk_off, sizeof(spk_off) / sizeof(spk_off[0]));
     out->standby = true;
+    pthread_mutex_unlock(&out->adev->route_lock);
 }
 
 static int out_standby(struct audio_stream *s)
@@ -267,6 +272,7 @@ static int start_output(struct r800_stream_out *out)
         return -EAGAIN;
     if (out->adev->hfp_active)
         return -EBUSY;
+    pthread_mutex_lock(&out->adev->route_lock);
     memset(&cfg, 0, sizeof(cfg));
     cfg.channels = OUT_CHANNELS;
     cfg.rate = OUT_RATE;
@@ -287,6 +293,7 @@ static int start_output(struct r800_stream_out *out)
     out->standby = false;
     out->next_open_ns = 0;
     LOGI("speaker started");
+    pthread_mutex_unlock(&out->adev->route_lock);
     return 0;
 
 fail:
@@ -297,6 +304,7 @@ fail:
         LOGW("speaker route rollback failed");
     out->standby = true;
     out->next_open_ns = now_ns() + RETRY_NS;
+    pthread_mutex_unlock(&out->adev->route_lock);
     return -EIO;
 }
 
@@ -415,6 +423,7 @@ static void in_do_standby(struct r800_stream_in *in)
 {
     if (in->standby)
         return;
+    pthread_mutex_lock(&in->adev->route_lock);
     if (in->pcm) {
         pcm_close(in->pcm);
         in->pcm = NULL;
@@ -422,6 +431,7 @@ static void in_do_standby(struct r800_stream_in *in)
     if (!in->adev->hfp_active)    /* a call keeps the mic on */
         apply_mixer(mic_off, sizeof(mic_off) / sizeof(mic_off[0]));
     in->standby = true;
+    pthread_mutex_unlock(&in->adev->route_lock);
 }
 
 static int in_standby(struct audio_stream *s)
@@ -443,6 +453,7 @@ static int start_input(struct r800_stream_in *in)
         return -EAGAIN;
     if (in->adev->hfp_active)     /* WDMA1 belongs to the call: silence */
         return -EBUSY;
+    pthread_mutex_lock(&in->adev->route_lock);
     memset(&cfg, 0, sizeof(cfg));
     cfg.channels = IN_HW_CHANNELS;
     cfg.rate = IN_RATE;
@@ -472,6 +483,7 @@ static int start_input(struct r800_stream_in *in)
          in->adev->mic_mute, gain, vol);
     in->start_frames = in->frames_read;
     in->peak = 0;
+    pthread_mutex_unlock(&in->adev->route_lock);
     return 0;
 
 fail:
@@ -482,6 +494,7 @@ fail:
         LOGW("mic route rollback failed");
     in->standby = true;
     in->next_open_ns = now_ns() + RETRY_NS;
+    pthread_mutex_unlock(&in->adev->route_lock);
     return -EIO;
 }
 
@@ -678,6 +691,7 @@ static int hfp_start(struct r800_audio_device *adev)
         do_standby(adev->out);
     if (adev->in)
         in_do_standby(adev->in);
+    pthread_mutex_lock(&adev->route_lock);
     adev->hfp_active = true;   /* reserve routing until start or rollback */
     if (apply_mixer(route, sizeof(route) / sizeof(route[0])))
         goto fail;
@@ -708,6 +722,7 @@ static int hfp_start(struct r800_audio_device *adev)
         }
         adev->hfp_pcm[i] = p;
     }
+    pthread_mutex_unlock(&adev->route_lock);
     if (adev->in)
         pthread_mutex_unlock(&adev->in->lock);
     if (adev->out)
@@ -718,6 +733,7 @@ static int hfp_start(struct r800_audio_device *adev)
 
 fail:
     /* No partial HFP session may retain the route or PCM handles. */
+    pthread_mutex_unlock(&adev->route_lock);
     if (adev->in)
         pthread_mutex_unlock(&adev->in->lock);
     if (adev->out)
@@ -735,6 +751,7 @@ static void hfp_stop(struct r800_audio_device *adev)
         pthread_mutex_lock(&adev->out->lock);
     if (adev->in)
         pthread_mutex_lock(&adev->in->lock);
+    pthread_mutex_lock(&adev->route_lock);
     for (int i = HFP_N_STREAMS - 1; i >= 0; i--) {
         if (adev->hfp_pcm[i]) {
             pcm_stop(adev->hfp_pcm[i]);
@@ -757,12 +774,14 @@ static void hfp_stop(struct r800_audio_device *adev)
         { "ABOX Sampling Rate Out2 Min", NULL, 48000 },
         { "DAC Gain", NULL, MEDIA_DAC_GAIN },
     };
-    apply_mixer(route_off, sizeof(route_off) / sizeof(route_off[0]));
+    if (apply_mixer(route_off, sizeof(route_off) / sizeof(route_off[0])))
+        LOGE("HFP route rollback failed");
     adev->hfp_active = false;
     if (!adev->out || adev->out->standby)
         apply_mixer(spk_off, sizeof(spk_off) / sizeof(spk_off[0]));
     if (!adev->in || adev->in->standby)
         apply_mixer(mic_off, sizeof(mic_off) / sizeof(mic_off[0]));
+    pthread_mutex_unlock(&adev->route_lock);
     if (adev->in)
         pthread_mutex_unlock(&adev->in->lock);
     if (adev->out)
@@ -1030,6 +1049,7 @@ static int adev_close(hw_device_t *device)
     pthread_mutex_lock(&adev->lock);
     hfp_stop(adev);
     pthread_mutex_unlock(&adev->lock);
+    pthread_mutex_destroy(&adev->route_lock);
     pthread_mutex_destroy(&adev->lock);
     free(adev);
     return 0;
@@ -1044,7 +1064,17 @@ static int adev_open(const hw_module_t *module, const char *name, hw_device_t **
     adev = calloc(1, sizeof(*adev));
     if (!adev)
         return -ENOMEM;
-    pthread_mutex_init(&adev->lock, NULL);
+    int rc = pthread_mutex_init(&adev->lock, NULL);
+    if (rc) {
+        free(adev);
+        return -rc;
+    }
+    rc = pthread_mutex_init(&adev->route_lock, NULL);
+    if (rc) {
+        pthread_mutex_destroy(&adev->lock);
+        free(adev);
+        return -rc;
+    }
     atomic_init(&adev->mic_mute, false);
     atomic_init(&adev->hfp_active, false);
     adev->hfp_rate = 8000;
