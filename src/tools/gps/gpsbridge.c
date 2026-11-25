@@ -39,6 +39,7 @@
 #define GPS_PEER_UID ((unsigned int)getuid())
 #define GPS_PEER_GID ((unsigned int)getgid())
 #define SOCK_PATH "./gps.sock"
+#define GPS_IPC_DIR "."
 #define GPS_BRIDGE_LIB "./libbrcm-test.so"
 #else
 typedef unsigned int size_t;
@@ -102,6 +103,7 @@ int pthread_mutex_unlock(void *);
 #define MSG_NOSIGNAL 0x4000
 #define SHUT_RDWR 2
 #define SOCK_PATH "/opt/usr/r800dev/gps.sock"
+#define GPS_IPC_DIR "/opt/usr/r800dev"
 #define GPS_BRIDGE_LIB "/usr/lib/libbrcm.so"
 #define GPS_MUTEX(name) static int name[8]
 #ifndef R800_GPS_PEER_UID
@@ -113,6 +115,8 @@ int pthread_mutex_unlock(void *);
 #define GPS_PEER_UID ((unsigned int)R800_GPS_PEER_UID)
 #define GPS_PEER_GID ((unsigned int)R800_GPS_PEER_GID)
 #endif
+
+#include "gps_ipc.h"
 
 /* daemon: the connected gps.r800.so, or -1 */
 static int client = -1;
@@ -436,7 +440,7 @@ static int peer_allowed(int fd)
            len == sizeof(peer) && peer.pid > 0 && peer.uid == GPS_PEER_UID;
 }
 
-static int serve(void)
+static int serve(int dirfd)
 {
 	struct { unsigned short fam; char path[108]; } a;
 	int ls, i;
@@ -453,8 +457,8 @@ static int serve(void)
 	a.path[i] = 0;
 	if (ls < 0)
 		return 1;
-	/* Create owner-only first. Never unlink an existing filesystem entry.
-	 * The parent must be trusted and not writable by untrusted processes. */
+	/* Create owner-only first. Recovery has already verified any old endpoint.
+	 * The parent must remain trusted throughout the daemon lifetime. */
 	previous_mask = umask(0177);
 	int bound = bind(ls, (const void *)&a, sizeof(a));
 	umask(previous_mask);
@@ -464,7 +468,7 @@ static int serve(void)
 		return 1;
 	}
 	if (chown(SOCK_PATH, getuid(), GPS_PEER_GID) != 0 ||
-	    chmod(SOCK_PATH, 0660) != 0 || listen(ls, 2) != 0) {
+	    chmod(SOCK_PATH, 0660) != 0 || gps_ipc_record(dirfd) != 0 || listen(ls, 2) != 0) {
 		printf("cannot secure/listen on %s\n", SOCK_PATH);
 		close(ls);
 		return 1;
@@ -544,7 +548,7 @@ disconnected:
 
 int main(int argc, char **argv, char **envp)
 {
-	int secs;
+	int secs, dirfd;
 	void *lib;
 	const GpsInterface *(*get)(void);
 	int r;
@@ -553,6 +557,12 @@ int main(int argc, char **argv, char **envp)
 	secs = argc > 1 && !daemon_mode ? atoi(argv[1]) : 90;
 	if (daemon_mode && (GPS_PEER_UID == (unsigned int)-1 || GPS_PEER_GID == (unsigned int)-1)) {
 		printf("GPS daemon blocked: verified Android UID/GID required\n");
+		return 1;
+	}
+	/* Lock before vendor initialization, including standalone mode. */
+	dirfd = gps_ipc_lock(GPS_IPC_DIR);
+	if (dirfd < 0 || gps_ipc_recover(dirfd, SOCK_PATH) != 0) {
+		printf("GPS bridge blocked: lock or socket ownership uncertain\n");
 		return 1;
 	}
 	lib = dlopen(GPS_BRIDGE_LIB, RTLD_NOW);
@@ -580,7 +590,7 @@ int main(int argc, char **argv, char **envp)
 		return 1;
 	if (daemon_mode) {
 		inject_now();
-		exit(serve());
+		exit(serve(dirfd));
 	}
 	aid();
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE, GPS_POSITION_RECURRENCE_PERIODIC,

@@ -77,6 +77,38 @@ class BridgeIntegration(unittest.TestCase):
             self.assertEqual(run.returncode,1)
             self.assertEqual(marker.read_bytes(),b"preserve")
 
+    def test_duplicate_and_crash_recovery(self):
+        cwd,proc,log=self.launch("normal")
+        old_inode=(cwd/"gps.sock").stat().st_ino
+        run=subprocess.run([str(self.bin/"gpsbridge"),"daemon"],cwd=cwd,
+                           capture_output=True,timeout=5)
+        self.assertEqual(run.returncode,1)
+        self.assertNotIn(b"MOCK_INIT",run.stdout)
+        self.assertEqual((cwd/"gps.sock").stat().st_ino,old_inode)
+        proc.kill()
+        proc.wait(timeout=5)
+        self.assertTrue((cwd/"gps.sock.owner").is_file())
+        with (cwd/"restarted.log").open("wb") as out:
+            again=subprocess.Popen([str(self.bin/"gpsbridge"),"daemon"],cwd=cwd,
+                                   stdout=out,stderr=subprocess.STDOUT)
+            try:
+                for _ in range(500):
+                    if b"listening on ./gps.sock\n" in (cwd/"restarted.log").read_bytes():
+                        break
+                    if again.poll() is not None:
+                        self.fail((cwd/"restarted.log").read_text())
+                    time.sleep(.01)
+                else: self.fail("restart not ready")
+                self.assertIsNone(again.poll())
+                with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as peer:
+                    peer.settimeout(5)
+                    peer.connect(str(cwd/"gps.sock"))
+                    peer.sendall(b"START\n")
+                    self.assertTrue(peer.recv(4096))
+            finally:
+                again.kill()
+                again.wait(timeout=5)
+
     def test_socket_mode(self):
         cwd,proc,log=self.launch("normal")
         self.assertEqual((cwd/"gps.sock").stat().st_mode & 0o777,0o660)

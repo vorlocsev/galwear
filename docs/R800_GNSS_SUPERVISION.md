@@ -31,3 +31,18 @@ This deliberately blocks automatic recovery from a stale socket until a safe
 ownership protocol exists. Parent directory trust and SELinux are unverified.
 Shutdown now attempts TERM then KILL with bounded checks; if a child remains
 alive, no new stack starts. Direct-child identity uses PPid, not pidfds.
+
+## Exclusive socket ownership and recovery
+
+The bridge now locks its owner-controlled parent directory with flock before
+loading the donor library. statx confirms directory ownership and mode; on
+ARM EABI the kernel syscall is 397, so the target must support statx (Linux
+4.11+). After bind and final permissions, it records the socket inode, device
+and ctime in a private owner marker. Recovery requires an exact marker match,
+ECONNREFUSED on a nonblocking connect and unchanged identities before unlink.
+Unmarked sockets, replaced files, symlinks, live listeners and incomplete
+markers are blocked. A crash between bind and marker creation or between the
+two unlinks requires manual review. Parent ancestors must remain trusted;
+flock is cooperative and the pathname checks are not an atomic unlink CAS.
+No UID/GID defaults or SELinux changes. Target statx/filesystem behavior and
+full daemon integration are unverified.

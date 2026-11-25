@@ -21,6 +21,8 @@ cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
     -fsanitize=undefined -fno-sanitize-recover=all \
     tests/test_r800_gps_hal_lifecycle.c -o "$TMP/test-hal-lifecycle"
 timeout 30s "$TMP/test-hal-lifecycle"
+cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -fsanitize=undefined -fno-sanitize-recover=all tests/test_r800_gps_ipc.c -o "$TMP/test-ipc"
+timeout 10s "$TMP/test-ipc"
 cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
     -fsanitize=undefined -fno-sanitize-recover=all \
     tests/test_r800_gps_hal_peer.c -o "$TMP/test-hal-peer"
