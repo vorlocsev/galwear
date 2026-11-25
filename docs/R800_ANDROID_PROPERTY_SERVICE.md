@@ -428,3 +428,39 @@ report paths and status names rather than trusting a saved status.
 
 No actual compiled policy query, complete AOSP build, or QEMU boot has
 been verified in this audit.
+
+
+## Pre-labeled system EXT4 alternative (static only)
+
+The initial implementation builds a small diagnostic /system image,
+not a complete Android system partition. Supply a trusted AOSP host
+e2fsdroid executable, checkfc, e2fsprogs and matchpathcon (for example
+the selinux-utils package on Ubuntu).
+
+    python3 build/r800_android_system_ext4.py \
+      --staged /absolute/staged-rootfs --product-out /absolute/stock-product-out \
+      --preflight-init /absolute/preflight-init \
+      --checkfc /absolute/aosp-host/bin/checkfc \
+      --e2fsdroid /absolute/aosp-host/bin/e2fsdroid \
+      --out /absolute/new-system-fixture \
+      --report /absolute/system-fixture.json
+
+Only audited system entries and the platform file_contexts are copied.
+The known linker alias is represented by a relative guest symlink.
+The image uses a restricted EXT4 feature set and a fixed 128 MiB size;
+it is not a signed, AVB-protected or flashable image. e2fsdroid applies
+original platform contexts using the /system mountpoint; matchpathcon
+independently determines expected labels by guest path and inode type.
+The tool runs e2fsck -fn and uses read-only debugfs stat, ea_get and
+dump to check each selected inode, actual security.selinux bytes and
+file payload. No loop device or host mount is used. The image and
+builder digest are recorded. The tool does not claim complete
+filesystem enumeration or identical output across tool versions.
+
+Remaining work: validate the actual host image tools and their
+compatibility, add labeled vendor/product/system_ext as needed, preserve
+the genuine APEX payload labels (not guessed platform contexts),
+and build a separate generic virt kernel profile with a read-only
+virtual block transport and EXT4. The existing property-profile
+kernel and no-block QEMU acceptance contract remain unchanged.
+No real e2fsdroid execution or kernel mount has been verified.
