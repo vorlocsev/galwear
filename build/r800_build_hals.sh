@@ -15,19 +15,45 @@ mkdir -- "$OUT"
 OUT=$(CDPATH= cd -- "$OUT" && pwd)
 "$CC" --version > "$OUT/toolchain.txt"
 build() {
+    source=$1; module=$2; shift 2
     "$CC" -std=gnu11 -O2 -g0 -fPIC -shared -Wl,--no-undefined \
         -march=armv7-a -mfpu=neon -I "$REPO/src/hal/include" \
-        -Wl,-soname,"$2" -o "$OUT/$2" "$REPO/src/hal/$1" -llog -ldl -lm
-    "$TC/llvm-readelf" -h -d --dyn-syms --wide "$OUT/$2" > "$OUT/$2.elf.txt"
-    grep -Eq 'Class:[[:space:]]*ELF32' "$OUT/$2.elf.txt"
-    grep -Eq 'Machine:[[:space:]]*ARM' "$OUT/$2.elf.txt"
-    grep -Eq 'Type:[[:space:]]*DYN' "$OUT/$2.elf.txt"
-    grep -Eq 'OBJECT[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+HMI([[:space:]]|$)' "$OUT/$2.elf.txt"
-    sha256sum "$OUT/$2"
+        -Wl,-soname,"$module" -o "$OUT/$module" "$REPO/src/hal/$source" "$@" -llog -ldl -lm
+    "$TC/llvm-readelf" -h -d --dyn-syms --wide "$OUT/$module" > "$OUT/$module.elf.txt"
+    grep -Eq 'Class:[[:space:]]*ELF32' "$OUT/$module.elf.txt"
+    grep -Eq 'Machine:[[:space:]]*ARM' "$OUT/$module.elf.txt"
+    grep -Eq 'Type:[[:space:]]*DYN' "$OUT/$module.elf.txt"
+    grep -Eq 'OBJECT[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+HMI([[:space:]]|$)' "$OUT/$module.elf.txt"
+    sha256sum "$OUT/$module"
 }
 build lights_r800.c lights.r800.so
 build gps_r800.c gps.r800.so
 build sensors_r800.c sensors.r800.so
 build hwcomposer_r800.c hwcomposer.r800.so
-echo "NON-RELEASE ARM32 HAL compilation only; audio requires patched tinyalsa."
+# Fetch only the exact public tinyalsa base into disposable output.
+# Keep the third-party source/license in the scratch tree; do not publish binaries.
+TINY=$OUT/tinyalsa
+BASE=1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
+git init -q "$TINY"
+git -C "$TINY" remote add origin https://github.com/tinyalsa/tinyalsa.git
+git -C "$TINY" fetch --depth=1 origin "$BASE"
+git -C "$TINY" checkout --detach -q FETCH_HEAD
+[ "$(git -C "$TINY" rev-parse HEAD)" = "$BASE" ]
+PATCH=$REPO/src/vendor/audio/tinyalsa-2.0.0-sync-ptr.patch
+git -C "$TINY" apply --check "$PATCH"
+git -C "$TINY" apply "$PATCH"
+{
+    printf 'tinyalsa_base=%s\n' "$BASE"
+    sha256sum "$PATCH"
+    git -C "$TINY" diff --stat
+} > "$OUT/tinyalsa-evidence.txt"
+# Compile PIC objects, archive them, and link only this patched copy.
+for unit in pcm pcm_hw mixer mixer_hw; do
+    "$CC" -std=gnu11 -D_GNU_SOURCE -O2 -g0 -fPIC -fvisibility=hidden \
+        -I "$TINY/include" -c "$TINY/src/$unit.c" -o "$OUT/$unit.o"
+done
+"$TC/llvm-ar" rcs "$OUT/libtinyalsa-r800.a" "$OUT/pcm.o" "$OUT/pcm_hw.o" "$OUT/mixer.o" "$OUT/mixer_hw.o"
+build audio_r800.c audio.primary.r800.so -I "$TINY/include" \
+    "$OUT/libtinyalsa-r800.a" -Wl,--exclude-libs,ALL
+echo "NON-RELEASE ARM32 HAL compilation only; PCM runtime untested."
 echo "No HAL executed, no device contact, no firmware published."
