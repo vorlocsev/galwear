@@ -22,7 +22,7 @@ MISSING = ("Samsung combination firmware and verified NZIT template",
            "Complete donor HIDL services and dependency closure; libeffectsconfig.so",
            "Tizen glibc libraries and final linked GPSBridge",
            "BCMDHD STA/NVRAM/CLM and BCM43012 firmware",
-           "Curated busybox, busybox-extras, root, tzlite and lib trees",
+           "Curated busybox, root, tzlite and lib trees",
            "Original charger digits and bootanimation frame; prepared display assets",
            "Independently prepared required persistent input; no device state copying",
            "PIT and recovery verification; physical acceptance")
