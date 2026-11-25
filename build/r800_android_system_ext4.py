@@ -147,6 +147,17 @@ def build(a):
         raise ValueError("Expected text file_contexts")
     fc.decode("utf-8")
     entries = system_entries(entries, {FILE_CONTEXTS[0]: fc})
+    service = getattr(a, "service_fixture", False)
+    if service:
+        if a.transition_init is not None or a.transition_compile_evidence is not None:
+            raise ValueError("Service and static transition modes are exclusive")
+        # Android 11 linker falls back to /system/etc/ld.config.txt when
+        # generated /linkerconfig/ld.config.txt is absent.
+        configs = [v for n,v in prepare_entries(a.staged, root, a.preflight_init, a.readelf)[0]
+                   if n == "linkerconfig/ld.config.txt"]
+        if len(configs) != 1 or "system/etc/ld.config.txt" in entries:
+            raise ValueError("Missing or conflicting experimental linker config")
+        entries["system/etc/ld.config.txt"] = configs[0]
     transition = None
     if a.transition_init is not None:
         if a.transition_compile_evidence is None:
@@ -182,6 +193,10 @@ def build(a):
         expected = {n: expected_label(ctx,n,v[0],a.matchpathcon) for n,v in entries.items()}
         if expected.get("system/bin/init") not in (None, "u:object_r:init_exec:s0"):
             raise ValueError("Unexpected original init label")
+        if service:
+            from r800_galwear_policy_fixture import FILE, LABEL as CLIENT_LABEL, SERVICE, SERVICE_LABEL
+            if expected.get(FILE[1:]) != CLIENT_LABEL or expected.get(SERVICE[1:]) != SERVICE_LABEL:
+                raise ValueError("Dedicated fixture executable labels required")
         materialize(scratch, entries)
         image = scratch/"system.ext4"
         with image.open("xb") as f:
@@ -210,8 +225,10 @@ def build(a):
         if digest(dest, IMAGE_SIZE) != before:
             raise ValueError("Image copy mismatch")
     return {"status": ("ANDROID_SYSTEM_EXT4_TRANSITION_STATIC_ONLY" if transition else
-                       "ANDROID_SYSTEM_EXT4_LABELED_STATIC_ONLY"),
+                       "ANDROID_SYSTEM_EXT4_SERVICE_STATIC_ONLY" if service else "ANDROID_SYSTEM_EXT4_LABELED_STATIC_ONLY"),
             "diagnostic_init_substitution": transition,
+            "service_fixture": service,
+            "experimental_linker_config_sha256": sha(configs[0][1]) if service else None,
             "image_sha256": before, "image_bytes": IMAGE_SIZE,
             "e2fsdroid_sha256": e2fsdroid_hash,
             "policy_sha256": policy["policy_sha256"], "platform_file_contexts_sha256": sha(fc),
@@ -227,6 +244,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ("staged", "product-out", "preflight-init", "checkfc", "e2fsdroid", "out", "report"):
         p.add_argument("--"+name, type=Path, required=True)
+    p.add_argument("--service-fixture", action="store_true")
     p.add_argument("--transition-init", type=Path)
     p.add_argument("--transition-compile-evidence", type=Path)
     for name in ("mke2fs", "e2fsck", "debugfs", "matchpathcon", "readelf"):
