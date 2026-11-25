@@ -1376,6 +1376,63 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["hashtree_verified"])
         self.assertFalse(out["payload_authenticated"])
 
+    def test_fec_geometry_absent(self):
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        out = avb.fec_geometry(4096, 4096, 4096, 0, 0, 0, 8192)
+        self.assertEqual(out["status"], "NOT_PRESENT")
+        self.assertFalse(out["parity_verified"])
+
+    def test_fec_geometry_one_round(self):
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        out = avb.fec_geometry(4096, 4096, 4096, 2, 8192, 8192, 16384)
+        self.assertEqual(out["status"], "FEC_GEOMETRY_ONLY")
+        self.assertEqual(out["rounds"], 1)
+        self.assertEqual(out["data_symbols"], 253)
+        self.assertEqual(out["protected_blocks"], 2)
+        self.assertFalse(out["recovery_tested"])
+
+    def test_fec_geometry_round_boundary(self):
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        for blocks, rounds in ((253, 1), (254, 2), (506, 2), (507, 3)):
+            with self.subTest(blocks=blocks):
+                offset = blocks * 4096
+                size = rounds * 8192
+                out = avb.fec_geometry(4096, 4096, 4096, 2, offset, size, offset + size)
+                self.assertEqual(out["expected_bytes"], size)
+                self.assertEqual(out["status"], "FEC_GEOMETRY_ONLY")
+
+    def test_fec_geometry_invalid_layout(self):
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        for roots, offset, size, vbmeta in ((2, 4096, 8192, 16384),
+                (2, 8193, 8192, 32768), (2, 8192, 8192, 12288),
+                (2, 8192, 8191, 32768), (2, 0, 0, 16384)):
+            with self.subTest(roots=roots, offset=offset, size=size):
+                out = avb.fec_geometry(4096, 4096, 4096, roots, offset, size, vbmeta)
+                self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_fec_geometry_wrong_parity_size(self):
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        out = avb.fec_geometry(4096, 4096, 4096, 2, 8192, 4096, 16384)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["expected_bytes"], 8192)
+
+    def test_fec_geometry_root_limits(self):
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        for roots in (0, 1, 25, 255):
+            with self.subTest(roots=roots):
+                out = avb.fec_geometry(4096, 4096, 4096, roots, 8192,
+                                       max(1, roots) * 4096, 2 * 1024 * 1024)
+                self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_avb_fec_absence_does_not_claim_verification(self):
+        import io
+        payload, key = avb_fixture()
+        out = audit.r800_apex_inventory.r800_avb_inventory.inspect(
+            io.BytesIO(payload), 0, len(payload), key)
+        self.assertEqual(out["fec_status"], "NOT_PRESENT")
+        self.assertFalse(out["fec_verified"])
+        self.assertFalse(out["fec_recovery_tested"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
