@@ -49,6 +49,11 @@ class AbiTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 a.parse(CONSUMER+"\n"+tag)
 
+    def test_android_packed_tags_are_not_empty_relocations(self):
+        text=CONSUMER+"\n0x0000000060000011 (Operating System specific: 60000011) 0x290\n"
+        text+="0x0000000060000012 (Operating System specific: 60000012) 0x1b\n"
+        self.assertTrue({"ANDROID_RELA","ANDROID_RELASZ"}<=set(a.parse(text)["relocation_tags"]))
+
     def test_version_tls_mismatch(self):
         need=a.parse(CONSUMER)["imports"][0]
         exp=a.parse(PROVIDER)["exports"][0]
