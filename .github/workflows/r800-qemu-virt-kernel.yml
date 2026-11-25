@@ -122,7 +122,7 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/virt-dynamic"
           toolchain="$ANDROID_SDK_ROOT/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          "$toolchain/aarch64-linux-android30-clang" -std=c11 -Wall -Wextra -Werror -O2 -fPIE -pie -ldl src/initramfs/bionic-dynamic-probe.c -o "$RUNNER_TEMP/virt-dynamic/probe"
+          "$toolchain/aarch64-linux-android30-clang" -std=c11 -Wall -Wextra -Werror -O2 -fPIE -pie src/initramfs/bionic-dynamic-probe.c -ldl -o "$RUNNER_TEMP/virt-dynamic/probe"
           LC_ALL=C python3 build/r800_android_dynamic_audit.py --probe "$RUNNER_TEMP/virt-dynamic/probe" --readelf "$toolchain/llvm-readelf" --report "$RUNNER_TEMP/virt-dynamic/evidence.json"
       - name: Record source and patch identity
         if: always()
