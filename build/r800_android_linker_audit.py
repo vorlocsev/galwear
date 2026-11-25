@@ -53,7 +53,7 @@ def inspect(data: bytes) -> dict:
         raise ValueError("Missing PT_LOAD")
     result = {"abi": "arm64" if cls == 2 else "arm", "needed": [],
               "has_dynamic": dynamic is not None, "custom_search_path": False,
-              "elf_type": "ET_DYN" if etype == 3 else "ET_EXEC"}
+              "elf_type": "ET_DYN" if etype == 3 else "ET_EXEC", "soname": None}
     if dynamic is None:
         return result
     off, size = dynamic
@@ -71,7 +71,9 @@ def inspect(data: bytes) -> dict:
     if not ended:
         raise ValueError("Missing DT_NULL")
     result["custom_search_path"] = 15 in tags or 29 in tags
-    if 1 not in tags:
+    if len(tags.get(14, [])) > 1:
+        raise ValueError("Duplicate DT_SONAME")
+    if 1 not in tags and 14 not in tags:
         return result
     if len(tags.get(5, [])) != 1 or len(tags.get(10, [])) != 1:
         raise ValueError("Missing or duplicate dynamic string table")
@@ -81,17 +83,23 @@ def inspect(data: bytes) -> dict:
     if len(set(mappings)) != 1:
         raise ValueError("Dynamic string table not uniquely file-backed")
     strings = data[mappings[0]:mappings[0] + size]
-    for index in tags[1]:
+    def dynamic_name(index, label):
         if index >= len(strings):
-            raise ValueError("DT_NEEDED offset outside string table")
+            raise ValueError(label + " offset outside string table")
         end = strings.find(b"\0", index)
         if end == -1 or end - index > 255:
-            raise ValueError("Invalid DT_NEEDED string")
+            raise ValueError("Invalid " + label + " string")
         name = strings[index:end].decode("ascii")
         if not NAME.fullmatch(name) or name in (".", ".."):
-            raise ValueError("Unsafe dependency name")
+            raise ValueError("Unsafe dependency name: " + label)
+        return name
+
+    for index in tags.get(1, []):
+        name = dynamic_name(index, "DT_NEEDED")
         if name not in result["needed"]:
             result["needed"].append(name)
+    if 14 in tags:
+        result["soname"] = dynamic_name(tags[14][0], "DT_SONAME")
     return result
 
 
@@ -106,7 +114,7 @@ def directories(abi):
 def audit(root: Path, targets=TARGETS) -> dict:
     queue = list(targets)
     seen, errors, unresolved, ambiguous = {}, [], [], []
-    unsupported_search_paths = []
+    unsupported_search_paths, soname_mismatches = [], []
     while queue:
         name = queue.pop(0)
         if name in seen:
@@ -134,6 +142,9 @@ def audit(root: Path, targets=TARGETS) -> dict:
                         if child["elf_type"] != "ET_DYN" or not child["has_dynamic"]:
                             errors.append(path + ": dependency is not a dynamic ET_DYN object")
                             continue
+                        if child["soname"] is not None and child["soname"] != dep:
+                            soname_mismatches.append({"from": name, "needed": dep,
+                                                     "candidate": path, "soname": child["soname"]})
                         candidates.setdefault(str(resolved), path)
                 except FileNotFoundError:
                     continue
@@ -153,9 +164,10 @@ def audit(root: Path, targets=TARGETS) -> dict:
             present = False
         apex[name] = {"expanded_tree_present": present}
     return {"schema": "galwear-r800-linker-inventory-v1",
-            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths) else "REVIEW_REQUIRED",
+            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches) else "REVIEW_REQUIRED",
             "objects": seen, "missing_candidates": unresolved, "ambiguous_candidates": ambiguous,
             "errors": errors, "unsupported_search_paths": unsupported_search_paths,
+            "soname_mismatches": soname_mismatches,
             "apex": apex, "android_namespace_resolution_verified": False,
             "symbol_versions_verified": False, "apex_activation_verified": False,
             "android_boot_tested": False, "safe_to_flash": False}
