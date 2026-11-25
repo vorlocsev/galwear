@@ -139,6 +139,55 @@ def inspect_console(log: bytes, timed_out: bool) -> dict:
             "guest_alive_at_timeout_proven": False, **diagnostics}
 
 
+def inspect_platform(log: bytes, expected_cpus: int = 2, ram_mib: int = 512) -> dict:
+    """Require explicit early-kernel evidence from the generic virt console.
+
+    These are log assertions, not independent hardware measurements.
+    """
+    lines = log.replace(b"\r\n", b"\n").splitlines()
+    launch = next((i for i, line in enumerate(lines)
+                   if b"Run /init as init process" in line), None)
+    if launch is None:
+        raise ValueError("Missing kernel init launch evidence")
+    # Ignore messages after PID1 launch; late markers cannot satisfy early boot.
+    early = [re.sub(rb"^\[\s*[0-9]+\.[0-9]+\]\s*", b"", line)
+             for line in lines[:launch]]
+    model = [line for line in early if line.startswith(b"Machine model: ")]
+    if model != [b"Machine model: linux,dummy-virt"]:
+        raise ValueError("Missing or unexpected virt machine model")
+    smp = [int(m[1]) for line in early
+           if (m := re.fullmatch(rb"SMP: Total of (\d+) processors activated\.", line))]
+    if smp != [expected_cpus]:
+        raise ValueError("SMP online CPU count does not match virt profile")
+    redistributors = [int(m[1]) for line in early
+                      if (m := re.search(rb"^GICv3: CPU(\d+): found redistributor\b", line))]
+    if sorted(redistributors) != list(range(expected_cpus)):
+        raise ValueError("Missing, duplicate or unexpected GICv3 redistributor")
+    timers = [m[1].decode("ascii") for line in early
+              if (m := re.search(rb"^arch_timer: .*timer\(s\) running at (\d+(?:\.\d+)?)MHz\b", line))]
+    if len(timers) != 1 or not 0 < float(timers[0]) <= 1000:
+        raise ValueError("Missing or invalid ARM architected timer frequency")
+    mem = [(int(m[1]), int(m[2])) for line in early
+           if (m := re.match(rb"^Memory: (\d+)K/(\d+)K available\b", line))]
+    if len(mem) != 1:
+        raise ValueError("Missing or ambiguous kernel memory summary")
+    available, total = mem[0]
+    # Allow reservations and version-dependent accounting, but require
+    # plausible usable RAM for the explicitly configured 512 MiB guest.
+    if not ram_mib * 1024 * 3 // 4 <= total <= ram_mib * 1024:
+        raise ValueError("Kernel memory total inconsistent with virt profile")
+    if not total // 4 <= available <= total:
+        raise ValueError("Kernel available memory outside expected bounds")
+    if not any(re.search(rb"console \[ttyAMA0\] enabled\b", line) for line in early):
+        raise ValueError("PL011 console enable evidence missing")
+    return {"platform_log_contract": "VIRT_EARLY_BOOT_LOG_ONLY",
+            "machine_model": "linux,dummy-virt", "smp_online_cpus": smp[0],
+            "gicv3_redistributor_cpus": sorted(redistributors),
+            "arm_timer_mhz_reported": float(timers[0]),
+            "kernel_memory_total_kib": total, "kernel_memory_available_kib": available,
+            "pl011_console_enabled": True, "physical_hardware_verified": False}
+
+
 def kernel_bytes(path: Path) -> bytes:
     if path.is_symlink() or not path.is_file():
         raise ValueError("Invalid generic kernel input")
@@ -234,7 +283,9 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
             if log_path.stat().st_size > MAX_LOG:
                 stream.truncate(MAX_LOG)
                 raise ValueError("Virtual console exceeded log limit; artifact truncated")
-    observed = inspect_console(log_path.read_bytes(), timed_out)
+    final_log = log_path.read_bytes()
+    observed = inspect_console(final_log, timed_out)
+    observed["early_platform"] = inspect_platform(final_log)
     timing = monitor.evidence(end_observed)
     if timing["observed_heartbeat_count"] != observed["heartbeat_count"]:
         raise ValueError("Live and final heartbeat counts differ")
