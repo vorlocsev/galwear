@@ -10,7 +10,7 @@ from pathlib import Path
 from r800_storage_isolation import parse
 from r800_initramfs_spec import validate_init
 
-REQUIRED = ("STAGING", "ASHMEM", "SHMEM", "TMPFS", "MEMFD_CREATE", "DEVTMPFS", "ANDROID", "ANDROID_BINDER_IPC", "FUTEX", "POSIX_TIMERS", "MULTIUSER", "ADVISE_SYSCALLS", "SMP", "ARM64", "ARM64_4K_PAGES", "ARM_AMBA", "ARM_GIC_V3",
+REQUIRED = ("STAGING", "ASHMEM", "SHMEM", "TMPFS", "MEMFD_CREATE", "DEVTMPFS", "ANDROID", "ANDROID_BINDER_IPC", "FUTEX", "POSIX_TIMERS", "MULTIUSER", "ADVISE_SYSCALLS", "SMP", "MMU", "ARM64", "ARM64_4K_PAGES", "ARM_AMBA", "ARM_GIC_V3",
             "ARM_ARCH_TIMER", "ARM_PSCI_FW", "ARCH_VEXPRESS", "PRINTK",
             "TTY", "SERIAL_AMBA_PL011", "SERIAL_AMBA_PL011_CONSOLE",
             "BINFMT_ELF", "BLK_DEV_INITRD", "INITRAMFS_COMPRESSION_NONE")
@@ -18,7 +18,7 @@ FORBIDDEN = ("ARCH_EXYNOS", "ARCH_EXYNOS9", "MMC", "SCSI", "MTD", "USB",
              "NET", "MODULES", "PSTORE", "INITRAMFS_FORCE", "ANDROID_BINDERFS", "ANDROID_VSOC", "CMDLINE_FORCE", "CMDLINE_EXTEND")
 
 
-PROPERTY_REQUIRED = ("NET", "UNIX", "INET", "AUDIT", "SECURITY", "SECURITY_NETWORK",
+PROPERTY_REQUIRED = ("NET", "UNIX", "INET", "EPOLL", "EVENTFD", "AUDIT", "SECURITY", "SECURITY_NETWORK",
                      "SECURITY_SELINUX", "DEFAULT_SECURITY_SELINUX", "TMPFS_XATTR", "PROC_FS", "SYSFS")
 PROPERTY_FORBIDDEN = ("SECURITY_SELINUX_BOOTPARAM", "SECURITY_SELINUX_DISABLE", "SECURITY_SELINUX_DEVELOP",
                       "NETDEVICES", "IPV6", "PACKET", "NETFILTER", "WIRELESS", "BT", "VSOCKETS", "NET_9P", "CAN", "NFC")
@@ -61,7 +61,8 @@ def inspect(text: str, source: str, profile: str = "minimal") -> dict:
     return {"status": "VIRT_CONFIG_STATIC_ONLY", "profile": profile, "required": list(required),
             "disabled": list(forbidden), "selinux_policy_loaded": False, "property_service_started": False, "nr_cpus": 2,
             "config_sha256": hashlib.sha256(text.encode()).hexdigest(),
-            "virtio_block_profile": profile == "block", "r800_hardware_config": False, "safe_to_flash": False}
+            "virtio_block_profile": profile == "block", "property_event_loop_configured": profile != "minimal",
+            "property_event_loop_runtime_tested": False, "r800_hardware_config": False, "safe_to_flash": False}
 
 
 def main() -> int:
