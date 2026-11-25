@@ -47,6 +47,8 @@ def system_entries(entries, contexts):
     if not {"system", "system/bin", "system/bin/galwear_property_service",
             "system/bin/galwear_property_client"} <= set(result):
         raise ValueError("Missing required system files")
+    if result["system"][0] & 0o170000 != 0o040000:
+        raise ValueError("System root must be a directory")
     for name, (mode, data, major, minor) in result.items():
         if major or minor:
             raise ValueError("Device node forbidden")
@@ -54,8 +56,10 @@ def system_entries(entries, contexts):
             if name != "system/bin/linker64" or data not in (
                 b"/apex/com.android.runtime/bin/linker64", b"/system/bin/bootstrap/linker64"):
                 raise ValueError("Unsupported system symlink")
-        if name != "system" and str(Path(name).parent) not in result:
-            raise ValueError("Missing parent directory")
+        if name != "system":
+            parent = result.get(str(Path(name).parent))
+            if parent is None or parent[0] & 0o170000 != 0o040000:
+                raise ValueError("Missing regular parent directory")
     return result
 
 
@@ -130,6 +134,7 @@ def build(a):
     policy = audit(root, a.checkfc)
     policy_path = regular(root, policy["policy_path"])
     policy_data = snapshot(policy_path, MAX_POLICY)
+    e2fsdroid_hash = digest(a.e2fsdroid, 128*1024*1024)
     if sha(policy_data) != policy["policy_sha256"]:
         raise ValueError("Policy changed")
     entries, rootfs = prepare_entries(a.staged, root, a.preflight_init, a.readelf)
@@ -170,6 +175,8 @@ def build(a):
                     for name,item in sorted(entries.items())}
         if digest(image, IMAGE_SIZE) != before:
             raise ValueError("Image changed during read-only inspection")
+        if digest(a.e2fsdroid, 128*1024*1024) != e2fsdroid_hash:
+            raise ValueError("e2fsdroid changed during build")
         a.out.mkdir(exist_ok=False)
         dest = a.out/"system.ext4"
         with dest.open("xb") as dst, image.open("rb") as src:
@@ -179,6 +186,7 @@ def build(a):
             raise ValueError("Image copy mismatch")
     return {"status": "ANDROID_SYSTEM_EXT4_LABELED_STATIC_ONLY",
             "image_sha256": before, "image_bytes": IMAGE_SIZE,
+            "e2fsdroid_sha256": e2fsdroid_hash,
             "policy_sha256": policy["policy_sha256"], "platform_file_contexts_sha256": sha(fc),
             "property_contexts_sha256": rootfs["property_contexts_sha256"],
             "verified_system_entries": observed, "e2fsck_read_only_passed": True,
