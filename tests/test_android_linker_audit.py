@@ -185,6 +185,46 @@ def classified_symbol_fixture(abi="arm64", binding=1, visibility=0, section=0,
     return data
 
 
+def relocation_fixture(abi="arm64", plt=False, malformed=None):
+    data = symbol_fixture(abi)
+    wide = abi == "arm64"
+    ent = 24 if wide else 16
+    rel_size = 24 if wide else 8
+    addr = 940
+    tags = [(5, 0x1000 + 400), (10, len(b"\0symbol\0")),
+            (audit.DT_SYMTAB, 0x1000 + 600), (audit.DT_SYMENT, ent),
+            (audit.DT_HASH, 0x1000 + 800)]
+    if plt:
+        tags += [(audit.DT_JMPREL, 0x1000 + addr), (audit.DT_PLTRELSZ, rel_size),
+                 (audit.DT_PLTREL, 999 if malformed == "plt" else
+                  audit.DT_RELA if wide else audit.DT_REL)]
+    else:
+        a, s, e = ((audit.DT_RELA, audit.DT_RELASZ, audit.DT_RELAENT) if wide else
+                   (audit.DT_REL, audit.DT_RELSZ, audit.DT_RELENT))
+        tags += [(a, 0x1000 + (1020 if malformed == "table" else addr)),
+                 (s, rel_size - 1 if malformed == "size" else rel_size),
+                 (e, 1 if malformed == "entry" else rel_size)]
+    tags.append((0, 0))
+    fmt = "<qQ" if wide else "<iI"
+    size = len(tags) * struct.calcsize(fmt)
+    for i, pair in enumerate(tags):
+        struct.pack_into(fmt, data, 224 + i * struct.calcsize(fmt), *pair)
+    target = 0x1000 + (1024 if malformed == "target" else 1000)
+    sym = 2 if malformed == "symbol" else 1 if plt or malformed == "relative" else 0
+    typ = 1026 if wide and plt else 1027 if wide else 22 if plt else 23
+    if malformed == "unknown":
+        typ = 250
+    if wide:
+        struct.pack_into("<QQq", data, addr, target, sym << 32 | typ, 0)
+        struct.pack_into("<QQ", data, 152, size, size)
+        struct.pack_into("<I", data, 68, 5 if malformed == "readonly" else 6)
+    else:
+        struct.pack_into("<II", data, addr, target, sym << 8 | typ)
+        struct.pack_into("<II", data, 100, size, size)
+        struct.pack_into("<I", data, 76, 5 if malformed == "readonly" else 6)
+    return data
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -528,6 +568,53 @@ class LinkerTests(unittest.TestCase):
         out = audit.symbol_candidates({"init": root, "lib": lib},
                                       {"init": {"libx.so": ["lib"]}})
         self.assertEqual(len(out["missing_strong"]), 1)
+
+    def test_rel_and_rela_both_abis(self):
+        for abi in ("arm", "arm64"):
+            with self.subTest(abi=abi):
+                info = audit.inspect(relocation_fixture(abi))["relocations"]
+                self.assertEqual(info["tables"][0]["count"], 1)
+                self.assertEqual(info["tables"][0]["kind"], "RELA" if abi == "arm64" else "REL")
+                self.assertTrue(info["symbol_indices_checked"])
+                self.assertFalse(info["relocations_applied"])
+
+    def test_plt_relocations(self):
+        for abi in ("arm", "arm64"):
+            self.assertEqual(audit.inspect(relocation_fixture(abi, plt=True))[
+                "relocations"]["tables"][0]["kind"], "PLT")
+
+    def test_invalid_relocation_entry_and_size(self):
+        for case in ("entry", "size"):
+            with self.subTest(case=case), self.assertRaisesRegex(ValueError, "relocation.*size"):
+                audit.inspect(relocation_fixture(malformed=case))
+
+    def test_invalid_relocation_symbol(self):
+        with self.assertRaisesRegex(ValueError, "symbol index out of bounds"):
+            audit.inspect(relocation_fixture(malformed="symbol"))
+
+    def test_relative_relocation_nonzero_symbol(self):
+        with self.assertRaisesRegex(ValueError, "nonzero symbol"):
+            audit.inspect(relocation_fixture(malformed="relative"))
+
+    def test_relocation_outside_load_memory(self):
+        with self.assertRaisesRegex(ValueError, "outside PT_LOAD"):
+            audit.inspect(relocation_fixture(malformed="target"))
+
+    def test_truncated_relocation_table(self):
+        with self.assertRaisesRegex(ValueError, "file-backed"):
+            audit.inspect(relocation_fixture(malformed="table"))
+
+    def test_invalid_plt_encoding(self):
+        with self.assertRaisesRegex(ValueError, "DT_PLTREL"):
+            audit.inspect(relocation_fixture(plt=True, malformed="plt"))
+
+    def test_unknown_type_and_readonly_target_require_review(self):
+        for case in ("unknown", "readonly"):
+            with self.subTest(case=case):
+                self.put("init", relocation_fixture(malformed=case))
+                out = audit.audit(self.root, ("/init",))
+                self.assertEqual(out["status"], "REVIEW_REQUIRED")
+                self.assertEqual(out["relocation_review_objects"], ["/init"])
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
