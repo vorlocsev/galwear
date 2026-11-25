@@ -317,6 +317,23 @@ def inspect_tls_relocation(abi, typ, target=0x2000, tls_indices=frozenset({1}),
         [(0x2000, span, 6)], 2 if wide else 1, 2, tls_indices)
 
 
+NAMESPACE_CONFIG = """dir.system = /system/bin
+dir.vendor = /vendor/bin
+[system]
+additional.namespaces = vendor
+namespace.default.isolated = true
+namespace.default.search.paths = /system/${LIB}
+namespace.default.search.paths += /system_ext/${LIB}
+namespace.default.links = vendor
+namespace.default.link.vendor.shared_libs = libx.so:liby.so
+namespace.vendor.isolated = true
+namespace.vendor.search.paths = /vendor/${LIB}
+namespace.vendor.permitted.paths = /vendor
+[vendor]
+namespace.default.search.paths = /vendor/${LIB}
+"""
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -844,6 +861,65 @@ class LinkerTests(unittest.TestCase):
         out = inspect_tls_relocation("arm64", 1028, sym=0, tls_indices=None)
         self.assertTrue(out["tls_symbol_types_checked"])
         self.assertEqual(out["tls_count"], 1)
+
+    def test_namespace_inventory_arm_and_arm64(self):
+        for abi, lib in (("arm", "lib"), ("arm64", "lib64")):
+            with self.subTest(abi=abi):
+                out = audit.r800_linker_namespaces.parse(NAMESPACE_CONFIG, abi)
+                ns = out["sections"]["system"]["default"]
+                self.assertEqual(ns["search_paths"], ["/system/" + lib, "/system_ext/" + lib])
+                self.assertEqual(ns["links"], ["vendor"])
+                self.assertEqual(ns["link_policies"]["vendor"]["shared_libs"], ["libx.so", "liby.so"])
+                self.assertEqual(out["unsupported_properties"], [])
+                self.assertFalse(out["runtime_resolution_verified"])
+
+    def test_namespace_invalid_links_and_policies(self):
+        for config in (
+            NAMESPACE_CONFIG.replace("links = vendor", "links = absent"),
+            NAMESPACE_CONFIG.replace("links = vendor", "links = default"),
+            NAMESPACE_CONFIG.replace("shared_libs = libx.so:liby.so",
+                "shared_libs = libx.so\nnamespace.default.link.vendor.allow_all_shared_libs = true"),
+        ):
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                audit.r800_linker_namespaces.parse(config, "arm64")
+
+    def test_namespace_invalid_paths(self):
+        for path in ("/system/../vendor", "relative/lib", "/system/lib::/vendor/lib"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                audit.r800_linker_namespaces.parse("[system]\nnamespace.default.search.paths = " + path, "arm")
+
+    def test_namespace_unknown_properties_and_variables(self):
+        cfg = NAMESPACE_CONFIG.replace("/system_ext/${LIB}", "/system_ext/${UNKNOWN}")
+        cfg += "namespace.default.asan.search.paths = /data/asan\n"
+        out = audit.r800_linker_namespaces.parse(cfg, "arm64")
+        self.assertEqual(len(out["unsupported_properties"]), 2)
+
+    def test_namespace_duplicate_property_rejected(self):
+        cfg = NAMESPACE_CONFIG + "namespace.default.search.paths = /system/lib\n"
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            audit.r800_linker_namespaces.parse(cfg, "arm64")
+
+    def test_namespace_config_missing_is_not_verified(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["namespace_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["android_namespace_resolution_verified"])
+
+    def test_generated_namespace_config_inventory(self):
+        self.put("init", fixture())
+        self.put("linkerconfig/ld.config.txt", NAMESPACE_CONFIG.encode())
+        out = audit.audit(self.root, ("/init",))
+        inventory = out["namespace_inventory"]
+        self.assertTrue(inventory["generated_config_present"])
+        self.assertEqual(inventory["status"], "CONFIG_INVENTORY_ONLY")
+        self.assertFalse(out["android_namespace_resolution_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
+    def test_malformed_namespace_config_requires_review(self):
+        self.put("linkerconfig/ld.config.txt", b"[system]\nnamespace.default.isolated = maybe\n")
+        out = audit.r800_linker_namespaces.audit(self.root)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertTrue(out["errors"])
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
