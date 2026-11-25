@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - development/r800-integration-ci-20261125
+      - development/r800-display-error-propagation-20261125
   workflow_dispatch:
     inputs:
       kernel_repeatability:
@@ -44,19 +45,26 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Install exact NDK release
+      - name: Install exact NDK release without sdkmanager
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
+          set -euo pipefail
+          archive="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o "$archive"
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e "$archive" | sha1sum --check -
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          rm -f "$archive"
+          test -x "$RUNNER_TEMP/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang"
       - name: Fetch tinyalsa header source by immutable commit
         run: |
           git init "$RUNNER_TEMP/tinyalsa"
           git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
           git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
           git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
-      - name: Compile all four HALs
+      - name: Compile four HALs and link HWC
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$ANDROID_HOME/ndk/27.2.12479018" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+          sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
       - name: Upload JSON evidence only
         uses: actions/upload-artifact@v4
         with:

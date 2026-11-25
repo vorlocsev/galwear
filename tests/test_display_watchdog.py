@@ -82,7 +82,7 @@ class DisplayWatchdogTests(unittest.TestCase):
     def test_reject_ambiguous_numeric_inputs(self):
         for bad in ("", "1 2", "-1", "010", "1234567890123", "abc"):
             self.assertNotEqual(self.invoke("r800_hwc_action", 150, bad, 130, 0, 100, 1, 1).returncode, 0)
-        self.assertNotEqual(self.invoke("r800_hwc_action", 150, 140, 130, 0, 100, "unknown", 1).returncode)
+        self.assertNotEqual(self.invoke("r800_hwc_action", 150, 140, 130, 0, 100, "unknown", 1).returncode, 0)
         self.assertNotEqual(self.invoke("r800_hwc_action", 150, 140, 130, 0, 100, 0, "unknown").returncode, 0)
 
     def test_shell_syntax_and_packaging(self):

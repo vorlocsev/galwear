@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compile four complete Android HAL translation units. No link, payload or flash.
+# Compile four complete Android HAL translation units and link HWC only. No payload or flash.
 set -eu
 [ "$#" -eq 4 ] || {
     echo "usage: $0 <repo> <ndk-r27c> <tinyalsa-checkout> <new-out-dir>" >&2
@@ -25,6 +25,47 @@ for module in audio_r800 gps_r800 sensors_r800 hwcomposer_r800; do
         -c "$repo/src/hal/$module.c" -o "$out/$module.o"
     "$toolchain/llvm-readelf" -h "$out/$module.o" | grep -Eq 'Machine:[[:space:]]+ARM'
 done
+# HWC depends only on NDK libraries; gralloc is resolved dynamically.
+"$cc" -shared -Wl,--no-undefined -Wl,-soname,hwcomposer.r800.so \
+    "$out/hwcomposer_r800.o" -llog -ldl -o "$out/hwcomposer.r800.so"
+"$toolchain/llvm-readelf" -h "$out/hwcomposer.r800.so" | grep -Eq 'Machine:[[:space:]]+ARM'
+"$toolchain/llvm-readelf" -h "$out/hwcomposer.r800.so" | grep -Eq 'Type:[[:space:]]+DYN'
+"$toolchain/llvm-readelf" --dyn-syms --wide "$out/hwcomposer.r800.so" | grep -Eq '[[:space:]]GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+HMI
+python3 - "$out" "$repo" <<'PY'
+import hashlib, json, os, pathlib, subprocess, sys
+out, repo = map(pathlib.Path, sys.argv[1:])
+names = ("audio_r800", "gps_r800", "sensors_r800", "hwcomposer_r800")
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+report = {
+    "schema": "galwear-r800-hal-compile-v2",
+    "status": "FOUR_ARM32_OBJECTS_COMPILED_HWC_LINKED",
+    "commit": subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip(),
+    "run_id": os.getenv("GITHUB_RUN_ID"),
+    "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
+    "ndk": "27.2.12479018",
+    "tinyalsa_headers_commit": "1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d",
+    "abi": "armeabi-v7a",
+    "api_level": 28,
+    "objects": {n: {"source_sha256": sha(repo / "src/hal" / (n + ".c")),
+                    "object_sha256": sha(out / (n + ".o"))} for n in names},
+    "shared_libraries_linked": False,  # not all HALs
+    "hwc_shared_library_linked": True,
+    "hwc_shared_library": {
+        "sha256": sha(out / "hwcomposer.r800.so"),
+        "exported_hmi_verified": True,
+        "no_undefined_link": True,
+        "dynamic_section": (out / "hwc-dynamic.txt").read_text(),
+    },
+    "patched_tinyalsa_linked": False,
+    "android_boot_tested": False,
+    "hardware_tested": False,
+    "safe_to_flash": False,
+}
+(out / "hal-compile.json").write_text(json.dumps(report, indent=2) + "\n")
+PY
+
+"$toolchain/llvm-readelf" -d "$out/hwcomposer.r800.so" > "$out/hwc-dynamic.txt"
 # Only JSON metadata leaves the runner, not binaries.
 python3 - "$out" "$repo" <<'PY'
 import hashlib, json, os, pathlib, subprocess, sys
