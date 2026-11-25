@@ -921,6 +921,75 @@ class LinkerTests(unittest.TestCase):
         self.assertEqual(out["status"], "REVIEW_REQUIRED")
         self.assertTrue(out["errors"])
 
+    def test_namespace_scope_allowed_vendor_dependency(self):
+        self.put("system/bin/service", fixture(needed=["libx.so"]))
+        self.put("vendor/lib64/libx.so", fixture())
+        self.put("linkerconfig/ld.config.txt", NAMESPACE_CONFIG.encode())
+        out = audit.audit(self.root, ("/system/bin/service",))["namespace_scope"]
+        self.assertEqual(out["status"], "STATIC_SCOPE_INVENTORY_ONLY")
+        self.assertEqual(out["checks"][0]["candidates"][0]["namespace"], "vendor")
+        self.assertFalse(out["runtime_resolution_verified"])
+
+    def test_namespace_scope_denied_vendor_dependency(self):
+        self.put("system/bin/service", fixture(needed=["libz.so"]))
+        self.put("vendor/lib64/libz.so", fixture())
+        self.put("linkerconfig/ld.config.txt", NAMESPACE_CONFIG.encode())
+        out = audit.audit(self.root, ("/system/bin/service",))["namespace_scope"]
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["checks"][0]["denied_links"], ["vendor"])
+        self.assertEqual(out["checks"][0]["candidates"], [])
+
+    def test_namespace_scope_transitive_vendor_dependency(self):
+        self.put("system/bin/service", fixture(needed=["libx.so"]))
+        self.put("vendor/lib64/libx.so", fixture(needed=["libz.so"]))
+        self.put("vendor/lib64/libz.so", fixture())
+        self.put("linkerconfig/ld.config.txt", NAMESPACE_CONFIG.encode())
+        out = audit.audit(self.root, ("/system/bin/service",))["namespace_scope"]
+        self.assertEqual(out["status"], "STATIC_SCOPE_INVENTORY_ONLY")
+        self.assertEqual(out["checks"][1]["namespace"], "vendor")
+
+    def test_namespace_scope_custom_path_uninspected(self):
+        self.put("system/bin/service", fixture(needed=["libx.so"]))
+        self.put("custom/lib64/libx.so", fixture())
+        config = NAMESPACE_CONFIG.replace("/vendor/${LIB}", "/custom/${LIB}")
+        self.put("linkerconfig/ld.config.txt", config.encode())
+        out = audit.audit(self.root, ("/system/bin/service",))["namespace_scope"]
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["checks"][0]["uninspected"], [
+            {"namespace": "vendor", "path": "/custom/lib64/libx.so"}])
+
+    def test_namespace_scope_multiple_candidates_require_review(self):
+        self.put("system/bin/service", fixture(needed=["libx.so"]))
+        self.put("system/lib64/libx.so", fixture())
+        self.put("vendor/lib64/libx.so", fixture())
+        self.put("linkerconfig/ld.config.txt", NAMESPACE_CONFIG.encode())
+        out = audit.audit(self.root, ("/system/bin/service",))["namespace_scope"]
+        self.assertEqual(len(out["checks"][0]["candidates"]), 2)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_namespace_section_longest_directory_and_boundary(self):
+        ns = audit.r800_linker_namespaces
+        cfg = {"directory_sections": {"system": ["/system"], "bin": ["/system/bin"]}}
+        self.assertEqual(ns.section_for(cfg, "/system/bin/service"), "bin")
+        self.assertIsNone(ns.section_for(cfg, "/systematic/bin/service"))
+        cfg["other"] = []
+        cfg["directory_sections"]["other"] = ["/system/bin"]
+        self.assertIsNone(ns.section_for(cfg, "/system/bin/service"))
+
+    def test_legacy_vndk_llndk_list_inventory(self):
+        self.put("system/etc/llndk.libraries.txt", b"# comment\nlibc.so\nlibc.so\nlibm.so\n")
+        self.put("system/etc/vndksp.libraries.txt", b"libx.so\n")
+        out = audit.r800_linker_namespaces.library_lists(self.root)
+        self.assertEqual(out["lists"]["llndk"]["libraries"], ["libc.so", "libm.so"])
+        self.assertEqual(out["lists"]["vndk_sp"]["libraries"], ["libx.so"])
+        self.assertFalse(out["runtime_policy_verified"])
+
+    def test_legacy_library_list_malformed_entry(self):
+        self.put("system/etc/vndkcore.libraries.txt", b"../libx.so\n")
+        out = audit.r800_linker_namespaces.library_lists(self.root)
+        self.assertTrue(out["errors"])
+        self.assertNotIn("vndk_core", out["lists"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
