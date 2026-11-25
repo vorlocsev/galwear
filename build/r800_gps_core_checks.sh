@@ -18,7 +18,7 @@ for test in frame command lto output wire nmea ipc; do
     timeout 10s "$TMP/test-$test"
     echo "HOST_$test=PASS"
 done
-python3 -m unittest discover -s tests -p 'test_r800_gnss_readiness.py' -v
+python3 build/r800_run_required_suite.py 'test_r800_gnss_readiness.py'
 for abi in 0 1 2; do
     clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 \
         -std=c11 -O2 -ffreestanding -fno-builtin -fno-pic -fno-stack-protector \
