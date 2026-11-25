@@ -129,6 +129,10 @@ def execute(p,a):
     p.py("08-linker-resolution","r800_ext4_linker_resolution.py",
          ["--system-report",o/"08-fixture-system.json","--runtime-report",o/"08-fixture-runtime.json"],
          o/"linker-resolution.json","EXT4_LINKER_RESOLUTION_STATIC_ONLY")
+    p.py("08-elf-abi","r800_ext4_elf_abi.py",
+         ["--system-report",o/"08-fixture-system.json","--runtime-report",o/"08-fixture-runtime.json",
+          "--system-image",o/"08-fixture-system/system.ext4","--runtime-image",o/"08-fixture-runtime/runtime.ext4"],
+         o/"elf-abi.json","EXT4_ELF_ABI_STATIC_ADVISORY_ONLY")
     p.py("09-property-service","r800_qemu_ext4_property_service.py",
          [*common,*fixture_args,*probes["service"],"--stock-system-report",o/"03-stock-system.json",
           "--product-out",fixture,"--checkfc",ft/"checkfc","--analyze",ft/"sepolicy-analyze",
