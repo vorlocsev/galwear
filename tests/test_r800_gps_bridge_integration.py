@@ -47,7 +47,7 @@ class BridgeIntegration(unittest.TestCase):
                     proc.kill(); proc.wait(timeout=3)
         self.addCleanup(stop)
         for _ in range(500):
-            if (cwd/"gps.sock").exists(): break
+            if (cwd/"gps.sock").exists() and "listening on ./gps.sock\n" in log.read_text(): break
             if proc.poll() is not None: self.fail(log.read_text())
             time.sleep(.01)
         else: self.fail("bridge socket not ready")
