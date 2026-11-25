@@ -7,6 +7,8 @@ on:
     paths:
       - ".github/workflows/r800-hal-compile.yml"
       - "build/r800_build_hals.sh"
+      - "build/r800_build_tools.sh"
+      - "src/tools/**"
       - "build/r800_tinyalsa_sync_test.py"
       - "build/r800_stage_hals.py"
       - "build/r800_vendor_inputs.py"
@@ -51,6 +53,10 @@ jobs:
         run: |
           sh -n src/vendor/libbt/build.sh
           sh src/vendor/libbt/build.sh "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/r800-bt"
+      - name: Compile static watch utilities and GPS bridge object
+        run: |
+          sh -n build/r800_build_tools.sh
+          sh build/r800_build_tools.sh "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/r800-tools"
       - name: Upload compiler and ELF evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -63,5 +69,6 @@ jobs:
             ${{ runner.temp }}/r800-stage/hal-stage-evidence.json
             ${{ runner.temp }}/r800-bt/libbt-vendor.elf.txt
             ${{ runner.temp }}/r800-bt/bt-build-evidence.txt
+            ${{ runner.temp }}/r800-tools/evidence/*.txt
           if-no-files-found: warn
           retention-days: 7
