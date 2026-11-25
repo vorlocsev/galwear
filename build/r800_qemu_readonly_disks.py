@@ -41,8 +41,11 @@ def verify_image(path, name, expected, size):
     ext4(path)
 
 
-def inventory(a, transition=False):
-    system = report(a.system_report, "ANDROID_SYSTEM_EXT4_TRANSITION_STATIC_ONLY" if transition else
+def inventory(a, transition=False, service=False):
+    if transition and service:
+        raise ValueError("Conflicting boot modes")
+    system = report(a.system_report, "ANDROID_SYSTEM_EXT4_SERVICE_STATIC_ONLY" if service else
+                    "ANDROID_SYSTEM_EXT4_TRANSITION_STATIC_ONLY" if transition else
                     "ANDROID_SYSTEM_EXT4_LABELED_STATIC_ONLY")
     extra = report(a.context_report,"ANDROID_CONTEXT_PARTITIONS_STATIC_ONLY")
     runtime = report(a.runtime_report,"ANDROID_RUNTIME_APEX_PAYLOAD_PRESERVED_ONLY")
@@ -91,7 +94,7 @@ def command(image,archive,disks):
     return args
 
 
-def inspect_console(log, disks, allow_label_probe=False):
+def inspect_console(log, disks, allow_label_probe=False, allow_service=False):
     lines = log.replace(b"\r\n",b"\n").splitlines()
     markers = [PREFIX+d["name"].encode()+b" serial=PASS block-ro=1 ext4-ro=1" for d in disks]
     markers += [PREFIX+f"PASS count={len(disks)} policy=not-loaded android=not-started".encode()]
@@ -102,7 +105,8 @@ def inspect_console(log, disks, allow_label_probe=False):
         raise ValueError("Disk diagnostics outside startup window")
     if any(line.startswith(HEARTBEAT_PREFIX) for line in lines[:lines.index(markers[-1])]):
         raise ValueError("Heartbeat before disk diagnostics")
-    if any(line.startswith((b"r800-property-service:",b"r800-transition:",b"r800-relabel:")) for line in lines):
+    if any(line.startswith((b"r800-transition:",b"r800-relabel:")) for line in lines) or (
+            not allow_service and any(line.startswith((b"r800-property-service:",b"r800-property-client:",b"r800-ext4-service:")) for line in lines)):
         raise ValueError("Unexpected Android diagnostics")
     if not allow_label_probe and any(line.startswith((b"r800-disk-label:", b"r800-ext4-transition:", b"r800-ext4-exec:")) for line in lines):
         raise ValueError("Unexpected loaded-policy diagnostics")
@@ -112,16 +116,16 @@ def inspect_console(log, disks, allow_label_probe=False):
             "android_init_started":False,"property_service_started":False}
 
 
-def run(a, *, expected_inventory=None, extra_entries=(), label_parser=None, transition=False):
+def run(a, *, expected_inventory=None, extra_entries=(), label_parser=None, transition=False, service=False):
     kernel_sha = verify_baseline(a.baseline,a.kernel)
     cfg = read_bounded_json(a.config_evidence)
     if (cfg.get("status") != "VIRT_CONFIG_STATIC_ONLY" or cfg.get("profile") != "block"
             or cfg.get("compiled_kernel_sha256") != kernel_sha
             or cfg.get("virtio_block_profile") is not True or cfg.get("safe_to_flash") is not False):
         raise ValueError("Matching separate block profile required")
-    if transition and label_parser is None:
+    if (transition or service) and label_parser is None:
         raise ValueError("Transition requires dedicated acceptance parser")
-    policy,disks = inventory(a, transition=transition)
+    policy,disks = inventory(a, transition=transition, service=service)
     if expected_inventory is not None and (policy,disks) != expected_inventory:
         raise ValueError("Disk inventory changed since label audit")
     init = validate_init(a.init)
@@ -166,11 +170,12 @@ def run(a, *, expected_inventory=None, extra_entries=(), label_parser=None, tran
     for d in disks:
         verify_image(d["path"],d["name"],d["sha256"],d["bytes"])
     console = log.read_bytes()
-    evidence = inspect_console(console,disks,allow_label_probe=label_parser is not None)
+    evidence = inspect_console(console,disks,allow_label_probe=label_parser is not None,allow_service=service)
     status = "VIRT_ANDROID_READONLY_BLOCK_MOUNTS_ONLY"
     if label_parser is not None:
         evidence.update(label_parser(console,disks))
-        status = ("VIRT_ANDROID_EXT4_DIAGNOSTIC_INIT_DOMAIN_ONLY" if transition else
+        status = ("VIRT_GALWEAR_EXT4_PROPERTY_SERVICE_ONLY" if service else
+                  "VIRT_ANDROID_EXT4_DIAGNOSTIC_INIT_DOMAIN_ONLY" if transition else
                   "VIRT_ANDROID_PRELABELED_MOUNTS_ONLY")
     return {**observed,**evidence,
             "status":status,
