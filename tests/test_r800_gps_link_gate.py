@@ -45,6 +45,32 @@ class GpsLinkGateTests(unittest.TestCase):
         self.imp["type"]=6
         self.assertIn("No supplied direct provider for: malloc",import_problems(self.info,self.providers))
 
+    def test_function_object_mismatch(self):
+        self.providers["libc.so.6"]["symbol_exports"][0]["type"]=1
+        self.assertIn("No supplied direct provider for: malloc",import_problems(self.info,self.providers))
+
+    def test_ifunc_callable(self):
+        self.providers["libc.so.6"]["symbol_exports"][0]["type"]=10
+        self.assertEqual(import_problems(self.info,self.providers),[])
+
+    def test_notype_callable(self):
+        self.imp["type"]=0
+        self.assertEqual(import_problems(self.info,self.providers),[])
+
+    def test_version_without_declaration(self):
+        self.info["version_needs"]=[]
+        self.assertIn("Unbound symbol version requirement: malloc",import_problems(self.info,self.providers))
+
+    def test_internal_version_outside_needed(self):
+        self.info["needed"]=[]
+        self.assertIn("Unbound symbol version requirement: malloc",
+                      import_problems(self.info,self.providers,internal=True,scope=["libc.so.6"]))
+
+    def test_unbound_weak_version(self):
+        self.imp["weak"]=True
+        self.imp["version_library"]=None
+        self.assertIn("Unbound symbol version requirement: malloc",import_problems(self.info,self.providers))
+
     def test_private_version_internal_only(self):
         self.imp["version"]="GLIBC_PRIVATE"
         self.info["version_needs"][0]["version"]="GLIBC_PRIVATE"
