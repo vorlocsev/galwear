@@ -6,6 +6,7 @@ XTRA_ABI=${R800_XTRA_ABI:-0}
 case "$XTRA_ABI" in 0|1|2) ;; *) echo "invalid R800_XTRA_ABI" >&2; exit 2;; esac
 [ "$#" -eq 3 ] || { echo "usage: $0 <NDK r27c> <Tizen lib dir> <new output file>" >&2; exit 2; }
 S=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$S/../../.." && pwd)
 NDK=$(CDPATH= cd -- "$1" && pwd)
 SR=$(CDPATH= cd -- "$2" && pwd)
 OUT=$3
@@ -26,12 +27,14 @@ trap 'exit 1' HUP INT TERM
 sha256sum "$SR/libc.so.6" "$SR/libdl.so.2" "$SR/libpthread.so.0" > "$TMP/input.txt"
 "$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
     -DR800_XTRA_ABI="$XTRA_ABI" -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
+    -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
     -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-e,_start \
     -o "$TMP/gpsbridge" "$S/gpsbridge.c" "$SR/libc.so.6" "$SR/libdl.so.2" "$SR/libpthread.so.0"
 "$TC/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
 grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
 grep -Fq '/lib/ld-linux.so.3' "$TMP/elf.txt"
+python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "$SR"
 sha256sum -c "$TMP/input.txt"
 ln -- "$TMP/gpsbridge" "$OUT"
 sha256sum "$OUT"
