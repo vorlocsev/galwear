@@ -2,13 +2,13 @@
 # Disposable generic virt build from the patched pinned R800 source.
 # NOT a SM-R800 kernel or firmware image.
 set -eu
-[ "$#" -eq 4 ] || [ "$#" -eq 5 ] || { echo "usage: $0 <source> <repo> <new-out> <initramfs.list> [minimal|property]" >&2; exit 2; }
+[ "$#" -eq 4 ] || [ "$#" -eq 5 ] || { echo "usage: $0 <source> <repo> <new-out> <initramfs.list> [minimal|property|block]" >&2; exit 2; }
 SOURCE=$1
 REPO=$2
 OUT=$3
 LIST=$4
 PROFILE=${5:-minimal}
-case "$PROFILE" in minimal|property) ;; *) exit 2;; esac
+case "$PROFILE" in minimal|property|block) ;; *) exit 2;; esac
 BASE=50db73fc799f20a7120a8b5f653b16cc123d856f
 [ ! -e "$OUT" ]
 [ "$(git -C "$SOURCE" rev-parse HEAD)" = "$BASE" ]
@@ -26,9 +26,12 @@ export KBUILD_BUILD_TIMESTAMP="Thu Jan  1 00:00:00 UTC 1970" SOURCE_DATE_EPOCH=0
 git -C "$SOURCE" apply --check "$REPO/src/kernel/r800-wearos.patch"
 git -C "$SOURCE" apply "$REPO/src/kernel/r800-wearos.patch"
 mkdir -p "$OUT"
-if [ "$PROFILE" = property ]; then
+if [ "$PROFILE" != minimal ]; then
     sed '/^# CONFIG_NET is not set$/d; /^CONFIG_PROC_FS=y$/d; /^CONFIG_SYSFS=y$/d' "$REPO/src/kernel/qemu-virt-minimal.config" > "$OUT/virt.config"
     cat "$REPO/src/kernel/qemu-virt-property.config" >> "$OUT/virt.config"
+    if [ "$PROFILE" = block ]; then
+        cat "$REPO/src/kernel/qemu-virt-block.config" >> "$OUT/virt.config"
+    fi
 else
     cp "$REPO/src/kernel/qemu-virt-minimal.config" "$OUT/virt.config"
 fi
