@@ -25,6 +25,7 @@ on:
       - src/initramfs/abi-probe-pid1.c
       - src/initramfs/binder-probe.c
       - src/initramfs/binder-roundtrip.c
+      - src/initramfs/shared-memory-probe.c
       - build/r800_qemu_guest_abi.py
       - build/r800_qemu_abi_probe.py
       - tests/test_qemu_guest_abi.py
@@ -83,8 +84,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/virt-abi-init/uapi/linux/android"
           cp "$RUNNER_TEMP/virt-source/include/uapi/linux/android/binder.h" "$RUNNER_TEMP/virt-abi-init/uapi/linux/android/binder.h"
           sha256sum "$RUNNER_TEMP/virt-abi-init/uapi/linux/android/binder.h" > "$RUNNER_TEMP/virt-abi-init/binder-uapi.sha256"
+          cp "$RUNNER_TEMP/virt-source/drivers/staging/android/uapi/ashmem.h" "$RUNNER_TEMP/virt-abi-init/uapi/linux/ashmem.h"
+          sha256sum "$RUNNER_TEMP/virt-abi-init/uapi/linux/ashmem.h" > "$RUNNER_TEMP/virt-abi-init/ashmem-uapi.sha256"
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -pthread -Dmain=abi_probe_main -c src/initramfs/abi-probe.c -o "$RUNNER_TEMP/virt-abi-init/probe.o"
-          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -pthread -Wl,--build-id=none -I"$RUNNER_TEMP/virt-abi-init/uapi" src/initramfs/abi-probe-pid1.c src/initramfs/binder-probe.c src/initramfs/binder-roundtrip.c "$RUNNER_TEMP/virt-abi-init/probe.o" -o "$RUNNER_TEMP/virt-abi-init/init"
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -pthread -Wl,--build-id=none -I"$RUNNER_TEMP/virt-abi-init/uapi" src/initramfs/abi-probe-pid1.c src/initramfs/binder-probe.c src/initramfs/binder-roundtrip.c src/initramfs/shared-memory-probe.c "$RUNNER_TEMP/virt-abi-init/probe.o" -o "$RUNNER_TEMP/virt-abi-init/init"
           python3 build/r800_initramfs_spec.py --init "$RUNNER_TEMP/virt-abi-init/init" --list "$RUNNER_TEMP/virt-abi-init/initramfs.list" --report "$RUNNER_TEMP/virt-abi-init/initramfs-evidence.json"
       - name: Boot identical virt kernel with diagnostic external initramfs
         run: |
@@ -115,6 +118,7 @@ jobs:
             ${{ runner.temp }}/virt-boot/generic-console.log
             ${{ runner.temp }}/virt-abi-init/initramfs-evidence.json
             ${{ runner.temp }}/virt-abi-init/binder-uapi.sha256
+            ${{ runner.temp }}/virt-abi-init/ashmem-uapi.sha256
             ${{ runner.temp }}/virt-abi-evidence.json
             ${{ runner.temp }}/virt-abi-boot/generic-console.log
           if-no-files-found: warn
