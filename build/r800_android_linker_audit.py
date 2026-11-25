@@ -274,16 +274,16 @@ DT_REL, DT_RELSZ, DT_RELENT = 17, 18, 19
 DT_RELA, DT_RELASZ, DT_RELAENT = 7, 8, 9
 DT_JMPREL, DT_PLTRELSZ, DT_PLTREL = 23, 2, 20
 MAX_RELOCATIONS = 262144
-# Other relocation encodings are reported, never treated as checked.
 DT_ANDROID_REL, DT_ANDROID_RELSZ = 0x6000000f, 0x60000010
 DT_ANDROID_RELA, DT_ANDROID_RELASZ = 0x60000011, 0x60000012
-PACKED_RELOCATION_TAGS = (35, 36, 37, 0x6fffe000, 0x6fffe001, 0x6fffe003)
+DT_RELR, DT_RELRSZ, DT_RELRENT = 36, 35, 37
+DT_ANDROID_RELR, DT_ANDROID_RELRSZ, DT_ANDROID_RELRENT = 0x6fffe000, 0x6fffe001, 0x6fffe003
 MAX_PACKED_BYTES = 16 * 1024 * 1024
 
 
 def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
     result = {"tables": [], "unsupported_types": [], "symbol_indices_checked": True,
-              "packed_tags": [hex(t) for t in PACKED_RELOCATION_TAGS if t in tags],
+              "packed_tags": [],
               "nonwritable_targets": 0, "relocations_applied": False}
     wide = cls == 2
     # Width of common scalar dynamic relocations. COPY and TLSDESC require
@@ -418,6 +418,60 @@ def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
         if cursor != end:
             raise ValueError("Unexpected trailing APS2 bytes")
 
+    def relr_table(label, addr, size, entry_size):
+        nonlocal total
+        word = 8 if wide else 4
+        bits = word * 8
+        limit = 1 << bits
+        if entry_size != word or size % word or addr % word or size // word > MAX_RELOCATIONS:
+            raise ValueError("Invalid RELR table size, alignment or entry size")
+        summary = {"kind": label, "encoding": "RELR", "count": 0,
+                   "encoded_count": size // word, "types": {}}
+        result["tables"].append(summary)
+        if not size:
+            return
+        offsets = {fo + addr - va for va, fo, fs in loads
+                   if va <= addr and size <= fs - (addr - va)}
+        if len(offsets) != 1:
+            raise ValueError("RELR table not uniquely file-backed")
+        off = offsets.pop()
+        if any(off < end and begin < off + size for begin, end in ranges):
+            raise ValueError("Overlapping relocation tables")
+        ranges.append((off, off + size))
+        cursor = None
+        seen_targets = set()
+        typ = 1027 if wide else 23
+
+        def emit(target):
+            nonlocal total
+            if target % word or not 0 <= target <= limit - word:
+                raise ValueError("Invalid RELR target alignment or overflow")
+            if target in seen_targets:
+                raise ValueError("Duplicate RELR target")
+            if total >= MAX_RELOCATIONS:
+                raise ValueError("Expanded RELR count exceeds inspection limit")
+            seen_targets.add(target)
+            total += 1
+            summary["count"] += 1
+            check_record(summary, target, typ)
+
+        for pos in range(off, off + size, word):
+            entry, = struct.unpack_from("<Q" if wide else "<I", data, pos)
+            if not entry & 1:
+                emit(entry)
+                cursor = entry + word
+                continue
+            if cursor is None:
+                raise ValueError("RELR bitmap precedes address entry")
+            if cursor + (bits - 1) * word > limit:
+                raise ValueError("RELR bitmap cursor overflow")
+            bitmap = entry >> 1
+            while bitmap:
+                bit = (bitmap & -bitmap).bit_length() - 1
+                emit(cursor + bit * word)
+                bitmap &= bitmap - 1
+            cursor += (bits - 1) * word
+
     for label, a, s, e, rela in (("REL", DT_REL, DT_RELSZ, DT_RELENT, False),
                                   ("RELA", DT_RELA, DT_RELASZ, DT_RELAENT, True)):
         expected = (24 if rela else 16) if wide else (12 if rela else 8)
@@ -436,6 +490,14 @@ def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
                                ("ANDROID_RELA", DT_ANDROID_RELA, DT_ANDROID_RELASZ, True)):
         if a in tags or s in tags:
             packed_table(label, single(a), single(s), rela)
+    standard_relr = (DT_RELR, DT_RELRSZ, DT_RELRENT)
+    android_relr = (DT_ANDROID_RELR, DT_ANDROID_RELRSZ, DT_ANDROID_RELRENT)
+    # Treat duplicate encodings conservatively rather than count/apply twice.
+    if any(t in tags for t in standard_relr) and any(t in tags for t in android_relr):
+        raise ValueError("Both standard and Android RELR encodings present")
+    for label, group in (("RELR", standard_relr), ("ANDROID_RELR", android_relr)):
+        if any(t in tags for t in group):
+            relr_table(label, *(single(t) for t in group))
     result["unsupported_types"] = sorted(unsupported)
     return result
 
