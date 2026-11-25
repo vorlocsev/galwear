@@ -192,9 +192,13 @@ def main() -> int:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--report", type=Path, required=True)
     p.add_argument("--readelf", default="readelf")
+    p.add_argument("--resolved-manifest", type=Path)
     a = p.parse_args()
     try:
         report = extract(a.donor, a.sha256, a.out, a.readelf)
+        if a.resolved_manifest is not None:
+            from r800_aosp_artifact_origin import manifest_digest
+            report["resolved_manifest_sha256"] = manifest_digest(a.resolved_manifest)
         rc = 0
     except (OSError, ValueError, zipfile.BadZipFile, subprocess.SubprocessError) as exc:
         report = {"status": "REJECT", "reason": str(exc), "safe_to_flash": False}
