@@ -503,3 +503,40 @@ virtual disk manifest and introduce a separate virt kernel profile
 with EXT4 and VirtIO block, leaving the existing no-block property
 profile unchanged. Actual image-tool runs and guest mounting are
 still unverified.
+
+
+## Separate virtual block profile and read-only mount gate
+
+The new block profile extends the property profile with built-in VirtIO
+MMIO block, EXT4 and EXT4 security xattr support. The original minimal
+and property profiles reject VirtIO block transport. Neither real
+SM-R800 storage nor network devices are enabled. Use a fresh pinned
+kernel checkout and the existing embedded diagnostic initramfs:
+
+    sh build/r800_qemu_virt_compile.sh /absolute/kernel-source /absolute/galwear \
+      /absolute/new-virt-block-kernel /absolute/embedded/initramfs.list block
+
+First establish the existing embedded PID1 boot baseline on this exact
+Image, without external disks. Compile the separate disk probe:
+
+    aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static \
+      src/initramfs/virt-readonly-disks.c -o /absolute/disk-init
+    python3 build/r800_initramfs_spec.py --init /absolute/disk-init \
+      --list /absolute/disk-init.list --report /absolute/disk-compile.json
+
+Then supply the three static image reports and their output directories
+to build/r800_qemu_readonly_disks.py (see --help). The runner verifies
+one shared policy SHA-256, matching context inventories, exact image
+hashes and bounded regular-file input. It makes private copies, sets
+them mode 0444, uses read-only raw blockdev/file nodes and only
+virtio-blk-device, with no NIC. The guest resolves each image by unique
+serial rather than MMIO discovery order, checks BLKROGET and mounts
+under /mnt with MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC and noload.
+It checks EXT4 magic and ST_RDONLY; host image hashes must remain
+unchanged after the boot. The manifest slot is not the actual Linux
+device name. No policy is loaded; this does not establish the guest
+SELinux labels, Android root layout, AVB or service execution.
+
+The block profile must still be compiled and tested on the pinned
+kernel. Actual image creation, mount support and QEMU runtime are
+unconfirmed. No release or flash artifact.
