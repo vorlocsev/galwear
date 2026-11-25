@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,6 +45,45 @@ class VirtTests(unittest.TestCase):
             for invalid in (b"prefix", data + data):
                 with self.assertRaisesRegex(ValueError, "missing or ambiguous"):
                     boot.verify_embedded(invalid, archive, init)
+
+    def test_archive_changed_after_audit_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            init = root / "init"
+            init.write_bytes(fake_aarch64_elf())
+            archive = root / "archive"
+            data = boot.create_archive(init)
+            archive.write_bytes(data)
+            original_audit = boot.inspect_cpio
+
+            def mutate_after_audit(path, binary):
+                report = original_audit(path, binary)
+                path.write_bytes(data + bytes(4))
+                return report
+
+            with patch.object(boot, "inspect_cpio", side_effect=mutate_after_audit):
+                with self.assertRaisesRegex(ValueError, "changed after audit"):
+                    boot.verify_embedded(b"prefix" + data + bytes(4), archive, init)
+
+    def test_compile_evidence_must_be_json_object(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            init = root / "init"
+            init.write_bytes(fake_aarch64_elf())
+            evidence = root / "report.json"
+            evidence.write_text("[]")
+            with self.assertRaisesRegex(ValueError, "Init does not match"):
+                boot.run(init, evidence, root / "Image", root / "out")
+
+    def test_oversized_compile_evidence_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            init = root / "init"
+            init.write_bytes(fake_aarch64_elf())
+            evidence = root / "report.json"
+            evidence.write_bytes(b" " * 65537)
+            with self.assertRaisesRegex(ValueError, "too large"):
+                boot.run(init, evidence, root / "Image", root / "out")
 
 
 if __name__ == "__main__":
