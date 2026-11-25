@@ -1957,6 +1957,58 @@ class LinkerTests(unittest.TestCase):
         self.assertEqual(out["display_inventory"]["status"], "DISPLAY_DT_INVENTORY_ONLY")
         self.assertFalse(out["safe_to_flash"])
 
+    def test_input_keylayout_key_usage_and_axis(self):
+        mod = audit.r800_input_inventory
+        out = mod.keylayout("key 158 BACK\nkey 116 POWER WAKE\nkey usage 0x1234 STEM_PRIMARY\naxis 8 WHEEL\n")
+        self.assertEqual(out["keys"][0]["name"], "BACK")
+        self.assertTrue(out["keys"][2]["usage"])
+        self.assertEqual(out["axes"][0]["mapping"], ["WHEEL"])
+
+    def test_input_keylayout_duplicate_rejected(self):
+        mod = audit.r800_input_inventory
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            mod.keylayout("key 158 BACK\nkey 158 HOME\n")
+        with self.assertRaises(ValueError):
+            mod.keylayout("axis -1 WHEEL\n")
+
+    def test_input_dt_touch_keys_and_rotary(self):
+        mod = audit.r800_input_inventory
+        nodes = {"/": {}, "/touchscreen@20": {"touchscreen-size-x": struct.pack(">I", 360),
+                 "touchscreen-size-y": struct.pack(">I", 360)},
+                 "/gpio-keys": {"compatible": b"gpio-keys\0"},
+                 "/gpio-keys/back": {"linux,code": struct.pack(">I", 158)},
+                 "/rotary": {"compatible": b"rotary-encoder\0", "linux,axis": struct.pack(">I", 8)}}
+        out = mod.dt_inventory(nodes)
+        self.assertEqual({k for entry in out for k in entry["kinds"]}, {"touchscreen", "keys", "rotary"})
+        self.assertEqual(out[0]["touchscreen-size-x"], 360)
+
+    def test_input_dt_disabled_parent(self):
+        nodes = {"/": {}, "/bus": {"status": b"disabled\0"},
+                 "/bus/rotary": {"compatible": b"rotary-encoder\0"}}
+        self.assertFalse(audit.r800_input_inventory.dt_inventory(nodes)[0]["enabled"])
+
+    def test_input_idc_and_static_keylayout(self):
+        self.put("vendor/usr/keylayout/rotary.kl", b"axis 8 WHEEL\nkey 158 BACK\n")
+        self.put("vendor/usr/idc/touch.idc", b"touch.deviceType = touchScreen\n")
+        out = audit.r800_input_inventory.audit(self.root)
+        self.assertEqual(out["button_mappings"][0]["name"], "BACK")
+        self.assertEqual(len(out["rotary_axis_candidates"]), 1)
+        self.assertEqual(out["idc"]["/vendor/usr/idc/touch.idc"]["touch.deviceType"], "touchScreen")
+        self.assertFalse(out["bezel_verified"])
+
+    def test_input_fake_event_node(self):
+        self.put("dev/input/event0", b"fake")
+        out = audit.r800_input_inventory.audit(self.root)
+        self.assertFalse(out["device_nodes"]["/dev/input/event0"])
+        self.assertTrue(any("not a character device" in e for e in out["errors"]))
+
+    def test_input_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",), dtb=display_dtb_fixture())
+        self.assertEqual(out["input_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["input_inventory"]["touch_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
