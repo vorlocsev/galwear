@@ -21,11 +21,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Android NDK r27c
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
+          set -eu
+          archive="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o "$archive"
+          # Official Android NDK r27c Linux release checksum (SHA-1).
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e "$archive" | sha1sum -c -
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          test -x "$RUNNER_TEMP/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang"
       - name: Compile Android API 28 ARM32 HALs
         run: |
           sh -n build/r800_build_hals.sh
-          sh build/r800_build_hals.sh "$ANDROID_HOME/ndk/27.2.12479018" "$RUNNER_TEMP/r800-hal"
+          sh build/r800_build_hals.sh "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/r800-hal"
       - name: Upload compiler and ELF evidence only
         if: always()
         uses: actions/upload-artifact@v4
