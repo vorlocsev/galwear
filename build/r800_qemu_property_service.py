@@ -18,6 +18,7 @@ from r800_qemu_rootfs_preflight import command, verify_archive
 from r800_qemu_system_init import kernel_bytes, observe_boot
 from r800_qemu_user_init import HEARTBEAT_PREFIX
 from r800_initramfs_spec import validate_init
+from r800_bionic_behavior_contract import inspect as inspect_bionic
 
 MARKERS = [
     b"r800-property-service: domain=u:r:init:s0 enforce=1",
@@ -51,7 +52,8 @@ def inspect_console(log, paths):
         raise ValueError("Unexpected diagnostic executable labels")
     if any(line.startswith(HEARTBEAT_PREFIX) for line in lines[:lines.index(MARKERS[-1])]):
         raise ValueError("Heartbeat before client completion")
-    return {"file_labels_reported": labels, "fixture_policy_loaded_reported": True,
+    bionic = inspect_bionic(log)
+    return {**bionic,"file_labels_reported": labels, "fixture_policy_loaded_reported": True,
             "enforcing_reported": True, "init_domain_entered": True,
             "property_service_started": True, "client_transition_reported": True,
             "socket_set_update_reported": True, "read_only_status_reported": 0x000B,
