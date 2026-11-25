@@ -156,6 +156,15 @@ if [ -f /data/r800dev/android/BOOT_ANDROID ]; then
 			mount --bind $VP /newroot/vendor/build.prop && log "android: boot animation on, GL preload on"
 	fi
 	android_require "p17 bind to oem" mount --bind /data /newroot/oem
+	# Verify the kernel actually exposed the legacy Binder character devices.
+	# The guest init/ueventd owns their permissions and labeling; never change them here.
+	for DEVICE in binder hwbinder vndbinder; do
+		android_require "binder device $DEVICE" test -c "/dev/$DEVICE"
+	done
+	for MANAGER in system/bin/servicemanager system/bin/hwservicemanager vendor/bin/vndservicemanager; do
+		android_require "manager executable $MANAGER" test -x "/newroot/$MANAGER"
+	done
+	android_require "ARM32 zygote executable" test -x /newroot/system/bin/app_process32
 	# Our composer (zero-copy DECON present), kept on p17 so it can change without
 	# rebuilding vendor.img.
 	HW=/data/r800dev/hwc/hwcomposer.r800.so
