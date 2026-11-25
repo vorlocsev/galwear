@@ -89,6 +89,11 @@ class SystemBootTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "deadline"):
             monitor.check(a.STARTUP_LIMIT + 1)
 
+    def test_late_startup_marker_rejected(self):
+        monitor = a.LiveHeartbeat(0)
+        with self.assertRaisesRegex(ValueError, "deadline"):
+            monitor.feed(a.EXPECTED, a.STARTUP_LIMIT + 1)
+
     def test_live_stall_after_two_heartbeats(self):
         monitor = a.LiveHeartbeat(0)
         monitor.feed(a.EXPECTED, 2)
