@@ -57,6 +57,21 @@ jobs:
         run: |
           sh -n build/r800_build_tools.sh
           sh build/r800_build_tools.sh "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/r800-tools"
+      - name: Compile KeepWifi DEX against Android 11
+        run: |
+          set -eu
+          mkdir "$RUNNER_TEMP/r800-sdk"
+          cd "$RUNNER_TEMP/r800-sdk"
+          curl --fail --location --retry 3 --max-time 300 https://dl.google.com/android/repository/platform-30_r03.zip -o platform.zip
+          curl --fail --location --retry 3 --max-time 300 https://dl.google.com/android/repository/build-tools_r30.0.3-linux.zip -o tools.zip
+          printf '%s\n' 'f3f5b75744dbf6ee6ed3e8174a71e513bfee502d0bc3463ea97e517bff68d84e  platform.zip' '24593500aa95d2f99fb4f10658aae7e65cb519be6cd33fa164f15f27f3c4a2d6  tools.zip' | sha256sum -c -
+          mkdir platform tools
+          unzip -q platform.zip -d platform
+          unzip -q tools.zip -d tools
+          jar=$(find "$PWD/platform" -name android.jar -type f)
+          d8=$(find "$PWD/tools" -name d8 -type f)
+          cd "$GITHUB_WORKSPACE"
+          sh src/tools/keepwifi/build.sh "$jar" "$(dirname "$d8")" "$RUNNER_TEMP/r800-keepwifi"
       - name: Upload compiler and ELF evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -70,5 +85,6 @@ jobs:
             ${{ runner.temp }}/r800-bt/libbt-vendor.elf.txt
             ${{ runner.temp }}/r800-bt/bt-build-evidence.txt
             ${{ runner.temp }}/r800-tools/evidence/*.txt
+            ${{ runner.temp }}/r800-keepwifi/*-evidence.txt
           if-no-files-found: warn
           retention-days: 7
