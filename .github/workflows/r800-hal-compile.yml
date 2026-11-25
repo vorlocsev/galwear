@@ -7,6 +7,8 @@ on:
     paths:
       - ".github/workflows/r800-hal-compile.yml"
       - "build/r800_build_hals.sh"
+      - "build/r800_tinyalsa_sync_test.py"
+      - "src/vendor/audio/tinyalsa-2.0.0-sync-ptr.patch"
       - "src/hal/**"
   workflow_dispatch:
 
@@ -33,6 +35,8 @@ jobs:
         run: |
           sh -n build/r800_build_hals.sh
           sh build/r800_build_hals.sh "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/r800-hal"
+      - name: Simulate PCM sync pointer ownership (no ALSA device)
+        run: python3 build/r800_tinyalsa_sync_test.py --source "$RUNNER_TEMP/r800-hal/tinyalsa/src/pcm.c"
       - name: Upload compiler and ELF evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -41,5 +45,6 @@ jobs:
           path: |
             ${{ runner.temp }}/r800-hal/*.elf.txt
             ${{ runner.temp }}/r800-hal/toolchain.txt
+            ${{ runner.temp }}/r800-hal/tinyalsa-evidence.txt
           if-no-files-found: warn
           retention-days: 7
