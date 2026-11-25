@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/system_properties.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #ifndef __BIONIC__
@@ -98,6 +100,17 @@ int main(int argc, char **argv)
         setvbuf(stdout, NULL, _IONBF, 0) ||
         check(version, "2", &ignored))
         return 1;
+    struct stat console_stat;
+    if (fstat(STDOUT_FILENO, &console_stat) == 0 && S_ISCHR(console_stat.st_mode)) {
+        printf("r800-console: stage=client device=%u:%u inode=%llu filesystem=%u:%u\n",
+               (unsigned)major(console_stat.st_rdev), (unsigned)minor(console_stat.st_rdev),
+               (unsigned long long)console_stat.st_ino,
+               (unsigned)major(console_stat.st_dev), (unsigned)minor(console_stat.st_dev));
+        fflush(stdout);
+    } else {
+        fputs("r800-console: stage=client descriptor-unavailable\n", stderr);
+        fflush(stderr);
+    }
     puts("r800-property-client: domain=u:r:galwear_property_client:s0 protocol=2");
     if (__system_property_find(name) ||
         __system_property_set(name, "ready") ||
