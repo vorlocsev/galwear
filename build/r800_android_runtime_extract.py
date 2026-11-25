@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -62,9 +63,10 @@ def dump_file(image: Path, source: str, destination: Path, limit: int) -> None:
     if destination.exists():
         raise ValueError("Destination already exists")
     command = ["debugfs", "-R", "stat " + source, str(image)]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=True)
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=True,
+                            env={**os.environ, "LC_ALL": "C"})
     match = re.search(r"^Inode:\s+\d+\s+Type:\s+regular\b", result.stdout, re.M)
-    sizes = re.findall(r"\bSize:\s*(\d+)", result.stdout)
+    sizes = re.findall(r"^User:[^\n]*?\bSize:\s*(\d+)", result.stdout, re.M)
     if not match or len(sizes) != 1 or not 0 < int(sizes[0]) <= limit:
         raise ValueError("Missing or invalid regular file in image: " + source)
     subprocess.run(["debugfs", "-R", f"dump {source} {destination}", str(image)],
@@ -78,7 +80,7 @@ def extract_payload(apex: Path, target: Path) -> None:
     with zipfile.ZipFile(apex) as z:
         entries = [i for i in z.infolist() if i.filename == "apex_payload.img"]
         if len(entries) != 1:
-            raise ValueError("Expected exactly one uncompressed APEX payload entry")
+            raise ValueError("Expected exactly one APEX payload entry (CAPEX unsupported)")
         entry = entries[0]
         if entry.is_dir() or not 0 < entry.file_size <= MAX_PAYLOAD:
             raise ValueError("Invalid APEX payload size")
@@ -102,9 +104,11 @@ def unpack_system(donor: Path, scratch: Path) -> Path:
     if header[:4] == SPARSE_MAGIC:
         if len(header) != 28:
             raise ValueError("Truncated Android sparse header")
+        if int.from_bytes(header[4:6], "little") != 1 or int.from_bytes(header[8:10], "little") < 28 or int.from_bytes(header[10:12], "little") < 12:
+            raise ValueError("Unsupported Android sparse header")
         block_size = int.from_bytes(header[12:16], "little")
         blocks = int.from_bytes(header[16:20], "little")
-        if not 0 < block_size * blocks <= MAX_SYSTEM:
+        if block_size != 4096 or not 0 < block_size * blocks <= MAX_SYSTEM:
             raise ValueError("Sparse expansion outside size limit")
         raw = scratch / "system.raw"
         subprocess.run(["simg2img", str(donor), str(raw)], check=True, timeout=300,
