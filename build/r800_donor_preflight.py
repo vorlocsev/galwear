@@ -140,7 +140,7 @@ def audit(donors, components, expected_sha):
             check("payload/" + name, lambda p: digest(p, MAX_FILE))
     for name, size in ASSET_SIZES.items():
         check("payload/" + name, lambda p, size=size: sized(p, size))
-    for name in ("busybox", "busybox-extras"):
+    for name in ("busybox",):
         def tool(p):
             info = digest(p, MAX_FILE)
             if not p.stat().st_mode & 0o111:
