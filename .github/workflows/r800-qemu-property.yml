@@ -1,0 +1,73 @@
+name: SM-R800 property virt configuration (non-release)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - development/r800-display-error-propagation-20261125
+    paths:
+      - .github/workflows/r800-qemu-property.yml
+      - src/kernel/qemu-virt-property.config
+      - src/kernel/qemu-virt-minimal.config
+      - build/r800_qemu_virt_compile.sh
+      - build/r800_qemu_virt_contract.py
+      - tests/test_qemu_virt_contract.py
+      - src/kernel/r800-wearos.patch
+      - build/r800_aosp_source_probe.sh
+
+permissions:
+  contents: read
+
+jobs:
+  property-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact head and profile contracts
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh -n build/r800_qemu_virt_compile.sh
+          python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
+      - name: Fetch pinned disposable kernel source
+        run: |
+          sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/property-source" "$RUNNER_TEMP/property-source-evidence.json"
+          git -C "$RUNNER_TEMP/property-source" sparse-checkout disable
+      - name: Compile separate property virt kernel
+        run: |
+          docker run --rm --pull=always \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/property-source:/source" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache clang19=19.1.4-r0 lld=19.1.4-r0 llvm19=19.1.4-r1 \
+                git make bash bc bison flex perl python3 openssl-dev \
+                elfutils-dev build-base linux-headers coreutils findutils
+              git config --global --add safe.directory /source
+              sh /repo/build/r800_initramfs_compile_smoke.sh /repo /scratch/property-init
+              sh /repo/build/r800_qemu_virt_compile.sh /source /repo /scratch/property-kernel /scratch/property-init/initramfs.list property
+            '
+      - name: Boot minimal PID1 without network device or storage
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm
+          python3 build/r800_qemu_system_init.py \
+            --init "$RUNNER_TEMP/property-init/init" \
+            --compile-evidence "$RUNNER_TEMP/property-init/initramfs-evidence.json" \
+            --generic-kernel "$RUNNER_TEMP/property-kernel/arch/arm64/boot/Image" \
+            --embedded-archive "$RUNNER_TEMP/property-kernel/usr/initramfs_data.cpio" \
+            --out-dir "$RUNNER_TEMP/property-boot" \
+            --report "$RUNNER_TEMP/property-boot-evidence.json"
+      - name: Upload evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-property-virt-evidence-only
+          path: |
+            ${{ runner.temp }}/property-source-evidence.json
+            ${{ runner.temp }}/property-kernel/virt-config-evidence.json
+            ${{ runner.temp }}/property-kernel/virt-cpio-evidence.json
+            ${{ runner.temp }}/property-boot-evidence.json
+            ${{ runner.temp }}/property-boot/generic-console.log
+          if-no-files-found: warn
+          retention-days: 7
