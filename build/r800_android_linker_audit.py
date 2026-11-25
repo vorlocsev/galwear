@@ -27,6 +27,7 @@ import r800_sensor_inventory
 import r800_nfc_inventory
 import r800_health_inventory
 import r800_power_inventory
+import r800_selinux_inventory
 from r800_android_userspace_preflight import parse_kernel_config, MAX_CONFIG
 
 NAME = re.compile(r"[A-Za-z0-9_.+~-]{1,255}")
@@ -832,6 +833,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
     nfc_inventory = r800_nfc_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     health_inventory = r800_health_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     power_inventory = r800_power_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
+    selinux_inventory = r800_selinux_inventory.audit(root, init_inventory, kernel_config)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -868,6 +870,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
             "nfc_inventory": nfc_inventory,
             "health_inventory": health_inventory,
             "power_inventory": power_inventory,
+            "selinux_inventory": selinux_inventory,
             "namespace_inventory": namespace_inventory,
             "namespace_scope": namespace_scope,
             "android_namespace_resolution_verified": False,
