@@ -26,9 +26,13 @@ property_info and a digest record, not a property area or service.
 
 ## Remaining real property service prerequisites
 
-- The current QEMU virt kernel forbids CONFIG_NET; AF_UNIX is needed by
-  the Android property service socket. A separately reviewed profile
-  should enable only necessary local IPC, not network devices.
+- The minimal QEMU virt profile still forbids CONFIG_NET. The separate
+  property overlay enables NET, UNIX, INET, AUDIT and SELinux because
+  this pinned kernel explicitly requires INET for SELinux. NETDEVICES,
+  IPv6, packet sockets, netfilter and other selected protocols are forbidden.
+  QEMU still runs with -nic none. IPv4 loopback remains possible; this is
+  not a kernel without networking. SELinux disable/development options
+  are forbidden; an actual policy must still be built and loaded.
 - PropertyInit creates /dev/__properties__/property_info and calls
   __system_property_area_init. The latter reports failure on failed
   SELinux label writes. The guest needs a compatible SELinux setup
@@ -42,3 +46,11 @@ property_info and a digest record, not a property area or service.
 No real property area, property service, Android init or watch boot has
 been confirmed. No change to the six-entry base initramfs or hardware
 configuration. safe_to_flash=false.
+
+## Separate kernel profile
+
+In a fresh disposable pinned kernel checkout, use the existing virt build
+recipe with the optional final argument property. CI workflow
+r800-qemu-property.yml compiles the resulting profile and attempts the
+embedded minimal PID1 boot. Configuration and boot evidence do not establish
+SELinux policy loading, property labels or AF_UNIX service behavior.
