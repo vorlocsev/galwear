@@ -14,7 +14,7 @@ class VsyncTimingTests(unittest.TestCase):
         parse = source[source.index("static int64_t parse_hw_vsync("):
                        source.index("static int64_t read_hw_vsync(")]
         timer = source[source.index("static int64_t next_timer_vsync("):
-                       source.index("static void *vsync_loop(")]
+                       source.index("/* Re-open failed TE nodes")]
         period = next(line for line in source.splitlines()
                       if line.startswith("#define VSYNC_PERIOD_NS "))
         harness = """
