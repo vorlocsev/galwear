@@ -28,6 +28,7 @@ compile() {
     fi
     sha256sum "$OUT/$target"
 }
+compile tzlite/fsfreeze.c bin/fsfreeze
 compile loopdio.c bin/loopdio
 compile r800boost.c bin/r800boost
 compile r800keys.c bin/r800keys
@@ -49,5 +50,5 @@ grep -Eq 'Class:[[:space:]]*ELF32' "$OUT/evidence/gpsbridge-object.elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$OUT/evidence/gpsbridge-object.elf.txt"
 grep -Eq 'Type:[[:space:]]*REL' "$OUT/evidence/gpsbridge-object.elf.txt"
 sha256sum "$OUT/gpsbridge.o"
-echo "Eight static executables; GPS bridge object only. No device access or execution."
+echo "Nine static executables; GPS bridge object only. No device access or execution."
 echo "safe_to_flash=false"
