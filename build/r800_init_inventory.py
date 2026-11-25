@@ -152,7 +152,10 @@ def audit(root):
     graphics_services = [s for s in services if s["name"] == "surfaceflinger" or
         any("graphics." in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
         any(part in s["name"].lower() for part in ("composer", "gralloc", "allocator", "mapper", "mali"))]
-    relevant = [s for s in services if s in graphics_services or s["name"] in APEX_SERVICES + binder_services or
+    audio_services = [s for s in services if s["name"] == "audioserver" or
+        any("android.hardware.audio" in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
+        any(part in s["name"].lower() for part in ("audio", "soundtrigger"))]
+    relevant = [s for s in services if s in graphics_services or s in audio_services or s["name"] in APEX_SERVICES + binder_services or
                 s["name"].startswith("zygote") or "art" in s["name"].split("-")]
     duplicates = []
     by_name = {}
@@ -195,6 +198,7 @@ def audit(root):
             "files": files, "services": relevant, "activation_commands": evidence,
             "binder_commands": binder_commands,
             "graphics_services": graphics_services,
+            "audio_services": audio_services,
             "art_environment": environment, "duplicate_services": duplicates,
             "unresolved_imports": unresolved, "unknown_top_level": unknown,
             "missing_evidence": missing, "errors": errors,
