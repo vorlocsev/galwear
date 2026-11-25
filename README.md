@@ -102,9 +102,17 @@ The scripts are in `build/`. The kernel patch, kernel config, device tree, HALs 
 tools are in `src/`. Google's and Samsung's images go in `images/`, which git
 ignores.
 
-1. Kernel: apply `src/kernel/r800-wearos.patch` to the AOSP Exynos 9110 4.19
-   kernel and build it with `src/kernel/r800.config`. Pack it with
-   `build/mkboot.sh` and `src/dt/r800.dts`.
+1. Kernel (non-release): supply a clean local Exynos 9110 4.19 checkout at
+   commit `50db73fc799f20a7120a8b5f653b16cc123d856f`. Run
+   `sh build/kbuild-native.sh /path/to/kernel /path/to/new-build` (new output
+   directory outside both source trees). This checks patch applicability, clones
+   the local source, builds the AArch64 initramfs, runs olddefconfig and attempts
+   the kernel Image build. It leaves the original checkout unchanged. Install
+   Clang, LLD, LLVM utilities, kernel build dependencies and the required
+   cross-binutils separately. The full kernel build has not yet been verified
+   against the pinned source; the output is not a boot image or flash approval.
+   Historical packaging uses `build/mkboot.sh` and `src/dt/r800.dts` and remains
+   subject to separate recovery and bootloader validation.
 2. Payload: run `build/mkpayload-release.sh`.
 3. Package: run `build/mkrelease.sh`. It needs Samsung's combination firmware
    `COMBINATION-FT40_R800XXU1ARI2`.
