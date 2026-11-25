@@ -275,8 +275,10 @@ DT_RELA, DT_RELASZ, DT_RELAENT = 7, 8, 9
 DT_JMPREL, DT_PLTRELSZ, DT_PLTREL = 23, 2, 20
 MAX_RELOCATIONS = 262144
 # Other relocation encodings are reported, never treated as checked.
-PACKED_RELOCATION_TAGS = (0x6000000f, 0x60000010, 0x60000011, 0x60000012,
-                          35, 36, 37, 0x6fffe000, 0x6fffe001, 0x6fffe003)
+DT_ANDROID_REL, DT_ANDROID_RELSZ = 0x6000000f, 0x60000010
+DT_ANDROID_RELA, DT_ANDROID_RELASZ = 0x60000011, 0x60000012
+PACKED_RELOCATION_TAGS = (35, 36, 37, 0x6fffe000, 0x6fffe001, 0x6fffe003)
+MAX_PACKED_BYTES = 16 * 1024 * 1024
 
 
 def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
@@ -297,6 +299,27 @@ def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
         if len(tags.get(tag, [])) != 1:
             raise ValueError("Missing or duplicate relocation tag: " + hex(tag))
         return tags[tag][0]
+
+    def check_record(summary, target, info):
+        sym, typ = (info >> 32, info & 0xffffffff) if wide else (info >> 8, info & 255)
+        summary["types"][str(typ)] = summary["types"].get(str(typ), 0) + 1
+        if sym and symbol_count is None:
+            result["symbol_indices_checked"] = False
+        elif symbol_count is not None and sym >= symbol_count:
+            raise ValueError("Relocation symbol index out of bounds")
+        if typ in relative and sym:
+            raise ValueError("Relative relocation has nonzero symbol index")
+        if typ == 0:
+            return
+        width = widths.get(typ, 1)
+        if typ not in widths:
+            unsupported.add(typ)
+        targets = [flags for va, mem, flags in memory
+                   if va <= target and width <= mem - (target - va)]
+        if not targets:
+            raise ValueError("Relocation target outside PT_LOAD memory")
+        if not any(flags & 2 for flags in targets):
+            result["nonwritable_targets"] += 1
 
     def table(label, addr, size, rela):
         nonlocal total
@@ -320,25 +343,80 @@ def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
         ranges.append((off, off + size))
         for p in range(off, off + size, step):
             target, info, *_ = struct.unpack_from(fmt, data, p)
-            sym, typ = (info >> 32, info & 0xffffffff) if wide else (info >> 8, info & 255)
-            summary["types"][str(typ)] = summary["types"].get(str(typ), 0) + 1
-            if sym and symbol_count is None:
-                result["symbol_indices_checked"] = False
-            elif symbol_count is not None and sym >= symbol_count:
-                raise ValueError("Relocation symbol index out of bounds")
-            if typ in relative and sym:
-                raise ValueError("Relative relocation has nonzero symbol index")
-            if typ == 0:
-                continue
-            width = widths.get(typ, 1)
-            if typ not in widths:
-                unsupported.add(typ)
-            targets = [flags for va, mem, flags in memory
-                       if va <= target and width <= mem - (target - va)]
-            if not targets:
-                raise ValueError("Relocation target outside PT_LOAD memory")
-            if not any(flags & 2 for flags in targets):
-                result["nonwritable_targets"] += 1
+            check_record(summary, target, info)
+
+    def packed_table(label, addr, size, rela):
+        nonlocal total
+        if not 4 <= size <= MAX_PACKED_BYTES:
+            raise ValueError("Invalid APS2 table size")
+        offsets = {fo + addr - va for va, fo, fs in loads
+                   if va <= addr and size <= fs - (addr - va)}
+        if len(offsets) != 1:
+            raise ValueError("APS2 table not uniquely file-backed")
+        off = offsets.pop()
+        if any(off < end and begin < off + size for begin, end in ranges):
+            raise ValueError("Overlapping relocation tables")
+        ranges.append((off, off + size))
+        end = off + size
+        if data[off:off + 4] != b"APS2":
+            raise ValueError("Invalid APS2 signature")
+        cursor = off + 4
+        bits = 64 if wide else 32
+        max_word = (1 << bits) - 1
+
+        def sleb():
+            nonlocal cursor
+            value, shift = 0, 0
+            # APS2 encodes signed machine words; allow the extra sign byte
+            # needed for a positive value covering all unsigned word bits.
+            for _ in range((bits + 7) // 7):
+                if cursor >= end:
+                    raise ValueError("Truncated APS2 SLEB128")
+                byte = data[cursor]
+                cursor += 1
+                value |= (byte & 127) << shift
+                shift += 7
+                if not byte & 128:
+                    if byte & 64:
+                        value -= 1 << shift
+                    if not -(1 << (bits - 1)) <= value <= max_word:
+                        raise ValueError("APS2 SLEB128 overflow")
+                    return value
+            raise ValueError("APS2 SLEB128 too long")
+
+        count, target = sleb(), sleb()
+        if not 0 <= count <= MAX_RELOCATIONS - total or not 0 <= target <= max_word:
+            raise ValueError("Invalid APS2 count or initial offset")
+        total += count
+        summary = {"kind": label, "encoding": "APS2_RELA" if rela else "APS2_REL",
+                   "count": count, "types": {}}
+        result["tables"].append(summary)
+        remaining, addend = count, 0
+        while remaining:
+            group, flags = sleb(), sleb()
+            if not 1 <= group <= remaining or not 0 <= flags <= 15:
+                raise ValueError("Invalid APS2 group size or flags")
+            by_info, by_offset, by_addend, has_addend = (bool(flags & bit) for bit in (1, 2, 4, 8))
+            if (by_addend and not has_addend) or (has_addend and not rela):
+                raise ValueError("Invalid APS2 addend flags")
+            delta = sleb() if by_offset else None
+            info = sleb() if by_info else None
+            add_delta = sleb() if has_addend and by_addend else None
+            if not has_addend:
+                addend = 0
+            for _ in range(group):
+                target += delta if by_offset else sleb()
+                value = info if by_info else sleb()
+                if not 0 <= target <= max_word:
+                    raise ValueError("APS2 offset overflow")
+                if has_addend:
+                    addend += add_delta if by_addend else sleb()
+                    if not -(1 << (bits - 1)) <= addend < (1 << (bits - 1)):
+                        raise ValueError("APS2 addend overflow")
+                check_record(summary, target, value & max_word)
+            remaining -= group
+        if cursor != end:
+            raise ValueError("Unexpected trailing APS2 bytes")
 
     for label, a, s, e, rela in (("REL", DT_REL, DT_RELSZ, DT_RELENT, False),
                                   ("RELA", DT_RELA, DT_RELASZ, DT_RELAENT, True)):
@@ -354,6 +432,10 @@ def relocation_inventory(tags, data, loads, memory, cls, symbol_count):
         if kind not in (DT_REL, DT_RELA):
             raise ValueError("Invalid DT_PLTREL encoding")
         table("PLT", single(DT_JMPREL), single(DT_PLTRELSZ), kind == DT_RELA)
+    for label, a, s, rela in (("ANDROID_REL", DT_ANDROID_REL, DT_ANDROID_RELSZ, False),
+                               ("ANDROID_RELA", DT_ANDROID_RELA, DT_ANDROID_RELASZ, True)):
+        if a in tags or s in tags:
+            packed_table(label, single(a), single(s), rela)
     result["unsupported_types"] = sorted(unsupported)
     return result
 
