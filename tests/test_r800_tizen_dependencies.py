@@ -7,6 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"build"))
 from r800_tizen_dependencies import audit, resolve_guest, interpreter
+from r800_stage_tizen import stage
 from test_android_linker_audit import fixture, version_fixture
 
 class TizenDependencyTests(unittest.TestCase):
@@ -45,6 +46,29 @@ class TizenDependencyTests(unittest.TestCase):
         self.put("/usr/lib/libx.so",version_fixture("arm",define="VER_1"))
         r=audit(self.root,[self.target])
         self.assertEqual(r["problems"][0]["reason"],"VERSION_NOT_PROVIDED")
+
+    def test_stage_closure_and_alias(self):
+        self.put(self.target,fixture("arm",needed=["libx.so"]))
+        self.put("/usr/lib/libx-real.so",fixture("arm"))
+        (self.root/"usr/lib/libx.so").symlink_to("libx-real.so")
+        t=tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        output=Path(t.name)/"staged"
+        report=stage(self.root,output,[self.target])
+        self.assertEqual(report["status"],"TIZEN_ELF_SUBSET_ONLY")
+        self.assertEqual((output/"lib/libx.so").read_bytes(),
+                         (output/"usr/lib/libx-real.so").read_bytes())
+        self.assertFalse((output/"lib/libx.so").is_symlink())
+        self.assertFalse(report["safe_to_flash"])
+
+    def test_stage_missing_dependency(self):
+        self.put(self.target,fixture("arm",needed=["libx.so"]))
+        t=tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        output=Path(t.name)/"staged"
+        with self.assertRaisesRegex(ValueError,"Unresolved"):
+            stage(self.root,output,[self.target])
+        self.assertFalse(output.exists())
 
     def test_missing_provider(self):
         self.put(self.target,fixture("arm",needed=["libx.so"]))
