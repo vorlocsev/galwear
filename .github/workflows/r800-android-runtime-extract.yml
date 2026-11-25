@@ -26,6 +26,9 @@ on:
       - build/r800_qemu_rootfs_relabel.py
       - build/r800_qemu_property_service.py
       - build/r800_property_pipeline.py
+      - build/r800_rootfs_relabel_policy_gate.py
+      - build/r800_qemu_system_init.py
+      - tests/test_rootfs_relabel_policy_gate.py
       - tests/test_property_pipeline.py
       - tests/test_qemu_property_service.py
       - src/android/rootfs-relabel-probe.c
@@ -82,6 +85,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_qemu_rootfs_relabel.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_property_service.py' -v
           python3 -m unittest discover -s tests -p 'test_property_pipeline.py' -v
+          python3 -m unittest discover -s tests -p 'test_rootfs_relabel_policy_gate.py' -v
           python3 -m unittest discover -s tests -p 'test_android_sepolicy_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_android_stock_policy.py' -v
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/android-stock-policy-probe.c -o "$RUNNER_TEMP/stock-policy-init"
