@@ -158,7 +158,10 @@ def audit(root):
     bluetooth_services = [s for s in services if
         any("android.hardware.bluetooth" in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
         any(part in s["name"].lower() for part in ("bluetooth", "btattach", "hciattach"))]
-    relevant = [s for s in services if s in graphics_services or s in audio_services or s in bluetooth_services or s["name"] in APEX_SERVICES + binder_services or
+    wifi_services = [s for s in services if
+        any("android.hardware.wifi" in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
+        any(part in s["name"].lower() for part in ("wifi", "wlan", "supplicant", "hostapd", "wificond"))]
+    relevant = [s for s in services if s in graphics_services or s in audio_services or s in bluetooth_services or s in wifi_services or s["name"] in APEX_SERVICES + binder_services or
                 s["name"].startswith("zygote") or "art" in s["name"].split("-")]
     duplicates = []
     by_name = {}
@@ -203,6 +206,7 @@ def audit(root):
             "graphics_services": graphics_services,
             "audio_services": audio_services,
             "bluetooth_services": bluetooth_services,
+            "wifi_services": wifi_services,
             "art_environment": environment, "duplicate_services": duplicates,
             "unresolved_imports": unresolved, "unknown_top_level": unknown,
             "missing_evidence": missing, "errors": errors,
