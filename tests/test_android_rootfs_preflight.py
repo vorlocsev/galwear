@@ -22,6 +22,7 @@ class PreflightTests(unittest.TestCase):
         self.init.write_bytes(b"static-init")
         self.layout = {"status": "INIT_EXPERIMENTAL_ROOTFS_STAGED_ONLY",
                        "safe_to_flash": False, "files": {},
+                       "selected_libraries": {"libc.so": "runtime:apex/com.android.runtime/lib64/bionic/libc.so"},
                        "interpreter_aliases": {"system/bin/linker64": "/" + a.LINKER},
                        "linkerconfig_sha256": a.sha(a.CONFIG)}
         self.metadata = {}
