@@ -6,8 +6,11 @@ set -eu
 SRC=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUT=$1
 [ ! -e "$OUT" ] && [ ! -L "$OUT" ] || { echo "output must not exist" >&2; exit 2; }
-command -v clang >/dev/null
-command -v ld.lld >/dev/null
+for tool in clang ld.lld; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "missing build tool: $tool" >&2; exit 127; }
+done
+clang --version
+ld.lld --version
 mkdir -- "$OUT"
 OUT=$(CDPATH= cd -- "$OUT" && pwd)
 case "$OUT" in
