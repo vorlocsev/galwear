@@ -330,3 +330,35 @@ a legitimate init-to-client transition, validate enforcing mode and
 separate policy denial from read-only protocol errors. Prior stock
 policy reports cannot establish acceptance of this modified policy.
 No flashing, permissive fallback or blanket property write grant.
+
+
+## Combined original property-service virt experiment
+
+Build the diagnostic PID1 using the separate service mode:
+
+    bash build/r800_aosp_selinux_transition_build.sh /absolute/aosp-r48 /absolute/new-service-boot service
+
+Use build/r800_qemu_property_service.py --help for the full argument list.
+It requires the prior stock rootfs relabel report, exact stock product
+tree, the same staged original libinit harness/client binaries, and the
+separately built GalWear fixture product tree. It reconstructs the
+stock preflight archive and compares its digest before substituting
+the fixture's audited contexts and policy. The fixture policy is not
+the stock policy.
+
+The fixture's explicit /system/bin/galwear_property_service mapping to
+init_exec is reserved for the experimental PID1 harness. The guest
+restores all selected labels, then execs only this harness. It never
+execs original Android init. The service uses PropertyInit and
+StartPropertyService from libinit and stops property-change dispatch
+because the normal init event loop is absent. The client runs in its
+dedicated domain, uses Bionic public APIs, and additionally checks
+protocol-v2 raw replies for read-only (0x000b) and MAC denial (0x0018).
+All expected markers and client exit status must precede heartbeat.
+A transport failure alone cannot establish either rejection.
+
+No build, relabel, policy transition, linker resolution or socket
+transaction has been verified by a real guest yet. AOSP build/linkage,
+RAM filesystem labels, inherited console permissions, boot default
+properties, and kernel policy compatibility may still block execution.
+No permissive fallback or production release.
