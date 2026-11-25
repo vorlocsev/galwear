@@ -77,6 +77,47 @@ class GuestAbiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside ABI completion"):
             a.inspect_abi(LOG.replace(a.END + b"\n", b"").replace(a.SHMEM_EXPECTED[0], a.END + b"\n" + a.SHMEM_EXPECTED[0]))
 
+    def test_bionic_identity_required(self):
+        with self.assertRaisesRegex(ValueError, "libc identity"):
+            a.inspect_abi(LOG, bionic=True)
+        log = LOG.replace(a.START + b"\n", a.START + b"\n" + a.BIONIC_MARKER + b"\n")
+        self.assertTrue(a.inspect_abi(log, bionic=True)["bionic_tested"])
+        with self.assertRaisesRegex(ValueError, "libc identity"):
+            a.inspect_abi(log)
+
+    def test_wrong_bionic_api(self):
+        log = LOG.replace(a.START + b"\n", a.START + b"\n" + a.BIONIC_MARKER.replace(b"api=30", b"api=29") + b"\n")
+        with self.assertRaisesRegex(ValueError, "libc identity"):
+            a.inspect_abi(log, bionic=True)
+
+    def test_late_bionic_identity(self):
+        log = LOG.replace(a.END + b"\n", a.BIONIC_MARKER + b"\n" + a.END + b"\n")
+        with self.assertRaisesRegex(ValueError, "startup window"):
+            a.inspect_abi(log, bionic=True)
+
+    def test_bionic_evidence_must_match_binary_and_glibc(self):
+        from unittest.mock import patch
+        import r800_initramfs_spec
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            compiled = root / "compiled.json"
+            glibc = root / "glibc.json"
+            binary = root / "init"
+            report = {"status": "BIONIC_STATIC_COMPILE_ONLY", "ndk_revision": "27.3.13750724",
+                      "android_api": 30, "init_sha256": "bionic", "safe_to_flash": False}
+            baseline = {"status": "VIRT_GUEST_KERNEL_ABI_ONLY", "generic_kernel_sha256": "kernel",
+                        "guest_kernel_syscalls_tested": True, "bionic_tested": False,
+                        "init_sha256": "glibc", "safe_to_flash": False}
+            compiled.write_text(json.dumps(report))
+            glibc.write_text(json.dumps(baseline))
+            with patch.object(r800_initramfs_spec, "validate_init", return_value={"sha256": "bionic"}):
+                self.assertEqual(a.verify_bionic(compiled, glibc, binary, "kernel")["android_api"], 30)
+                with self.assertRaisesRegex(ValueError, "glibc baseline"):
+                    a.verify_bionic(compiled, glibc, binary, "other-kernel")
+                compiled.write_text(json.dumps({**report, "init_sha256": "wrong"}))
+                with self.assertRaisesRegex(ValueError, "compile evidence mismatch"):
+                    a.verify_bionic(compiled, glibc, binary, "kernel")
+
     def test_baseline_kernel_hash_and_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
