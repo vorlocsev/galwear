@@ -11,6 +11,12 @@ SOURCE=$1
 REPO=$2
 OUT=$3
 BASE=50db73fc799f20a7120a8b5f653b16cc123d856f
+ISOLATE=${R800_STORAGE_ISOLATION:-false}
+case "$ISOLATE" in
+    true) [ -n "${R800_SMOKE_INITRAMFS_LIST:-}" ] || { echo "Storage isolation requires embedded /init"; exit 2; } ;;
+    false) ;;
+    *) echo "Invalid storage isolation mode"; exit 2 ;;
+esac
 
 [ -d "$SOURCE/.git" ] || { echo "No disposable source Git tree"; exit 2; }
 [ ! -e "$OUT" ] || { echo "Out directory already exists; refusing overwrite"; exit 2; }
@@ -56,6 +62,10 @@ p.write_text(s.replace(old, 'CONFIG_INITRAMFS_SOURCE=""'))
 PY
 fi
 
+if [ "$ISOLATE" = true ]; then
+    python3 "$REPO/build/r800_storage_isolation.py" prepare --config "$OUT/.config"
+fi
+
 export KBUILD_BUILD_USER=galwear-ci
 export KBUILD_BUILD_HOST=github-actions
 export KBUILD_BUILD_TIMESTAMP="Thu Jan  1 00:00:00 UTC 1970"
@@ -83,11 +93,19 @@ if [ -n "${R800_SMOKE_INITRAMFS_LIST:-}" ]; then
         echo "Kernel olddefconfig did not preserve embedded initramfs source"; exit 2;
     }
 fi
+if [ "$ISOLATE" = true ]; then
+    python3 "$REPO/build/r800_storage_isolation.py" verify --config "$OUT/.config" \
+        --report "$OUT/storage-isolation-evidence.json"
+fi
 make -C "$SOURCE" O="$OUT" -j2 Image
 test -s "$OUT/arch/arm64/boot/Image" || {
     echo "Kernel Image missing from smoke build"; exit 2;
 }
 
+if [ "$ISOLATE" = true ]; then
+    python3 "$REPO/build/r800_storage_isolation.py" verify --config "$OUT/.config" \
+        --report "$OUT/storage-isolation-evidence.json"
+fi
 echo "PASS: kernel Image compiled in isolated smoke environment"
 if [ -n "${R800_SMOKE_INITRAMFS_LIST:-}" ]; then
     echo "NOTE: experimental initramfs embedded. /init NOT boot-tested; Image is NOT flashable"
