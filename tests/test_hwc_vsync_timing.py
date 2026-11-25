@@ -78,7 +78,7 @@ int main(void) {
     def test_te_retry_and_poll_classification(self):
         source = SOURCE.read_text()
         helpers = source[source.index("#define R800_TE_RETRY_NS"):
-                         source.index("static void *vsync_loop(")]
+                         source.index("/* The HWC1 ABI guarantees")]
         harness = r"""
 #include <assert.h>
 #include <stdint.h>

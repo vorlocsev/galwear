@@ -133,6 +133,7 @@ struct r800_hwc {
 	int vsync_enabled;
 	unsigned long vsync_epoch;
 	int vsync_stop, vsync_started;
+	unsigned int callback_active, callback_waiters;
 	int blanked;
 	int power_unknown;                 /* failed transition: do not present until recovered */
 	int real_blanked;
@@ -937,6 +938,57 @@ static int te_retry_due(int fd, int64_t now, int64_t retry_at)
 	return fd < 0 && now >= retry_at;
 }
 
+/* The HWC1 ABI guarantees that vsync() does not call back into HAL hooks.
+ * Pin the registration until dispatch completes, without holding lock
+ * during framework code. Pending replacements block new acquisitions. */
+static const hwc_procs_t *r800_callback_acquire(struct r800_hwc *h,
+					      unsigned long epoch)
+{
+	const hwc_procs_t *procs = NULL;
+	pthread_mutex_lock(&h->lock);
+	if (!h->vsync_stop && h->vsync_enabled && h->vsync_epoch == epoch &&
+	    !h->callback_waiters && h->procs && h->procs->vsync) {
+		procs = h->procs;
+		h->callback_active++;
+	}
+	pthread_mutex_unlock(&h->lock);
+	return procs;
+}
+
+static void r800_callback_release(struct r800_hwc *h)
+{
+	pthread_mutex_lock(&h->lock);
+	if (--h->callback_active == 0)
+		pthread_cond_broadcast(&h->cond);
+	pthread_mutex_unlock(&h->lock);
+}
+
+static void r800_callback_replace(struct r800_hwc *h, const hwc_procs_t *procs)
+{
+	pthread_mutex_lock(&h->lock);
+	/* Defensive handling of a contract-violating reentrant registration:
+	 * the currently executing callback must remain valid until it returns. */
+	if (h->callback_active && h->vsync_started &&
+	    pthread_equal(pthread_self(), h->vsync_thread)) {
+		if (!h->vsync_stop) {
+			h->procs = procs;
+			h->vsync_epoch++;
+		}
+		pthread_mutex_unlock(&h->lock);
+		return;
+	}
+	h->callback_waiters++;
+	while (h->callback_active)
+		pthread_cond_wait(&h->cond, &h->lock);
+	if (!h->vsync_stop) {
+		h->procs = procs;
+		h->vsync_epoch++;
+	}
+	h->callback_waiters--;
+	pthread_cond_broadcast(&h->cond);
+	pthread_mutex_unlock(&h->lock);
+}
+
 static void *vsync_loop(void *arg)
 {
 	struct r800_hwc *h = arg;
@@ -1026,15 +1078,12 @@ static void *vsync_loop(void *arg)
 			sw_count++;
 		}
 
-		/* Synchronize the callback snapshot; close joins in-flight calls.
-		 * Registration changes still require caller-owned callback lifetime. */
-		pthread_mutex_lock(&h->lock);
-		if (!h->vsync_stop && h->vsync_enabled && h->vsync_epoch == epoch)
-			procs = h->procs;
-		pthread_mutex_unlock(&h->lock);
-		if (procs && procs->vsync && ts > last_sent) {
+		if (ts > last_sent)
+			procs = r800_callback_acquire(h, epoch);
+		if (procs) {
 			last_sent = ts;
 			procs->vsync(procs, 0, ts);
+			r800_callback_release(h);
 		}
 		if (((hw_count + sw_count) & 1023) == 0)
 			LOGI("vsync: %lu from TE, %lu filled in", hw_count, sw_count);
@@ -1254,10 +1303,7 @@ static int r800_query(hwc_composer_device_1_t *dev, int what, int *value)
 static void r800_register_procs(hwc_composer_device_1_t *dev, hwc_procs_t const *procs)
 {
 	struct r800_hwc *h = (struct r800_hwc *)dev;
-	pthread_mutex_lock(&h->lock);
-	if (!h->vsync_stop)
-		h->procs = procs;
-	pthread_mutex_unlock(&h->lock);
+	r800_callback_replace(h, procs);
 }
 
 static int r800_get_display_configs(hwc_composer_device_1_t *dev, int disp, uint32_t *configs, size_t *num)
