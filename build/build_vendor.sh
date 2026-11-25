@@ -20,7 +20,7 @@ done
 mkdir -- "$WORK"
 python3 "$REPO/build/r800_vendor_inputs.py" --base "$SRC" --j4 "$J4" --overlay "$S" --effects "$EFFECTS" > "$WORK/input-evidence.json"
 OUT=$WORK/tree; BASE_MNT=$WORK/base; J4_MNT=$WORK/j4; DST_MNT=$WORK/dst
-IMAGE=$WORK/vendor.candidate.img
+IMAGE=$WORK/vendor.incomplete.img
 mkdir -- "$OUT" "$BASE_MNT" "$J4_MNT" "$DST_MNT"
 cleanup() {
     rc=$?
@@ -205,21 +205,29 @@ P
 # identity: this is a Galaxy Watch, not the TicWatch the images came from
 sed -i -e 's/^ro.product.vendor.model=.*/ro.product.vendor.model=Galaxy Watch/'        -e 's/^ro.product.vendor.brand=.*/ro.product.vendor.brand=samsung/'        -e 's/^ro.product.vendor.manufacturer=.*/ro.product.vendor.manufacturer=Samsung/' $OUT/build.prop
 du -sh $OUT; find $OUT -type f | wc -l
-# image: 16 MB ext4, keep xattrs
+# image: 64 MiB ext4, keep xattrs
 truncate -s 64M "$IMAGE"
 mkfs.ext4 -q -b 4096 -m 0 -I 256 -O ^metadata_csum,^64bit -L vendor $IMAGE
 mount -t ext4 -o loop,nodev,nosuid,noexec "$IMAGE" "$DST_MNT"
 tar --xattrs --xattrs-include='*' -C $OUT -cf - . | tar --xattrs --xattrs-include='*' -C $DST_MNT -xpf -
 setfattr -n security.selinux -v u:object_r:vendor_file:s0 $DST_MNT
 # label anything that came out unlabeled (dirs created by tar, our new dirs)
-find $DST_MNT -path $DST_MNT/lost+found -prune -o -print | while read f; do getfattr -n security.selinux "$f" >/dev/null 2>&1 || setfattr -n security.selinux -v u:object_r:vendor_file:s0 "$f"; done
-echo "unlabeled left: $(find $DST_MNT -path $DST_MNT/lost+found -prune -o -print | while read f; do getfattr -n security.selinux "$f" >/dev/null 2>&1 || echo x; done | wc -l)"
+find "$DST_MNT" -path "$DST_MNT/lost+found" -prune -o -print0 | while IFS= read -r -d "" f; do
+    getfattr -h -n security.selinux "$f" >/dev/null 2>&1 || setfattr -h -n security.selinux -v u:object_r:vendor_file:s0 "$f"
+done
+find "$DST_MNT" -path "$DST_MNT/lost+found" -prune -o -print0 | while IFS= read -r -d "" f; do
+    getfattr -h -n security.selinux "$f" >/dev/null || { echo "missing SELinux label: $f" >&2; exit 2; }
+done
 echo "label check: $(getfattr -n security.selinux --only-values $DST_MNT/bin/vndservicemanager) / $(getfattr -n security.selinux --only-values $DST_MNT/etc/init/init.r800.rc) / $(getfattr -n security.selinux --only-values $DST_MNT/etc/selinux/precompiled_sepolicy)"
 ls $DST_MNT $DST_MNT/etc $DST_MNT/etc/init
 umount "$DST_MNT"
 e2fsck -fn "$IMAGE"
 python3 "$REPO/build/r800_vendor_inputs.py" --base "$SRC" --j4 "$J4" --overlay "$S" --effects "$EFFECTS" > "$WORK/input-evidence-after.json"
 cmp "$WORK/input-evidence.json" "$WORK/input-evidence-after.json"
+umount "$J4_MNT"
+umount "$BASE_MNT"
+mv -- "$IMAGE" "$WORK/vendor.candidate.img"
+IMAGE=$WORK/vendor.candidate.img
 sha256sum "$IMAGE" > "$WORK/vendor-sha256.txt"
 echo "NON-RELEASE vendor candidate: $IMAGE"
 echo "HAL compatibility and SELinux policy not verified; safe_to_flash=false"
