@@ -72,6 +72,18 @@ class PolicyAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "contexts missing"):
             a.audit(self.root, self.tool)
 
+    def test_rootfs_identity(self):
+        contexts = {a.CONTEXTS[0]: "b"*64}
+        policy = {"property_contexts_sha256": contexts}
+        rootfs = {"status": "VIRT_ANDROID_ROOTFS_PREFLIGHT_ONLY",
+                  "safe_to_flash": False, "property_contexts_sha256": contexts,
+                  "archive_sha256": "a"*64}
+        self.assertEqual(a.verify_rootfs(policy, rootfs), "a"*64)
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            a.verify_rootfs(policy, {**rootfs, "property_contexts_sha256": {}})
+        with self.assertRaisesRegex(ValueError, "archive identity"):
+            a.verify_rootfs(policy, {**rootfs, "archive_sha256": "bad"})
+
     def test_checkfc_failure(self):
         with patch.object(a.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "checkfc")):
             with self.assertRaises(subprocess.CalledProcessError):
