@@ -1076,3 +1076,38 @@ not an independent Soong variant attestation or proof of non-stub
 behavior. stub_exclusion_proven remains false. Seven synthetic
 regressions are added; execution of these tests, actual AOSP build
 and QEMU service acceptance are not confirmed.
+
+
+## Functional Bionic client acceptance
+
+The diagnostic property client now checks calloc zero initialization,
+realloc preservation, writes to the expanded buffer and free; a real
+pthread create/join, independent pthread-specific key values and
+thread-local errno; direct libm sqrt and dynamic libdl lookup via
+RTLD_NOLOAD, dlsym, dladdr, dlclose; and negative dlsym/dlerror
+behavior. The client links libdl and libm explicitly. All checks run
+after the client domain/protocol observation and before its first
+property socket write. They use bounded allocations and no external
+network or additional property grants.
+
+Both RAM and EXT4 service parsers require exactly the four ordered
+r800-bionic markers in that window. The EXT4 runner additionally
+compares the reported libm provider path with the selected client
+ELF dependency graph. This is guest-reported behavior, not a
+comprehensive verification of every Bionic API, native ELF TLS
+relocations, or independent proof of all library implementations.
+The new thread and loader behavior may reveal further SELinux
+or runtime prerequisites. No SELinux rules are relaxed.
+
+Actual host verification: eight isolated Python console-contract
+tests passed after fixing a wrong-order test fixture which had
+accidentally reconstructed its original sequence. Both files were
+checked against their repository Git blobs:
+94e9ba01989ebd796f795c4d8ff9fd4b538f4b7d
+(contract) and c3046b20a3e27df8d3443a6a9c6724b6ca25f8a4
+(tests). This was not a full checkout test or AOSP compilation.
+The new C client has not been built against Android 11 or executed
+in QEMU. Old property-only logs cannot pass the new contract.
+Rebuild the service and image artifacts at the current source commit.
+Full CI, actual Bionic execution, and real SM-R800 boot remain
+unconfirmed; safe_to_flash remains false.
