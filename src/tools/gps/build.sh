@@ -2,6 +2,7 @@
 # Tizen ARM32 soft-float GPS bridge, build only, never run on host.
 # Usage: build.sh <NDK r27c> <local Tizen library directory> <new-output-file>
 set -eu
+export PYTHONDONTWRITEBYTECODE=1
 XTRA_ABI=${R800_XTRA_ABI:-0}
 PEER_UID=${R800_GPS_PEER_UID:--1}
 PEER_GID=${R800_GPS_PEER_GID:--1}
@@ -43,7 +44,7 @@ for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
 done
 (cd "$SR" && sha256sum -c "$TMP/input.txt")
 (cd "$TMP/libs" && sha256sum -c "$TMP/input.txt")
-"$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
+"$TC/clang" --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 \
     -DR800_XTRA_ABI="$XTRA_ABI" -DR800_GPS_PEER_UID="$PEER_UID" -DR800_GPS_PEER_GID="$PEER_GID" -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
     -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
     -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-e,_start \
