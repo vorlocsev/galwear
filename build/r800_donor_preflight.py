@@ -7,13 +7,15 @@ import json
 import re
 import stat
 import sys
+import tarfile
+from r800_android_linker_audit import inspect
 from pathlib import Path
 
 from r800_android_userspace_preflight import read_regular
 from r800_boot_candidate import inspect_template, PARTITION
 from r800_vendor_inputs import image_info, file_info
-from r800_stage_components import dex, static_arm
-from r800_payload_candidate import ASSET_SIZES, RADIO_FILES, BINS, DIRS
+from r800_stage_components import static_arm
+from r800_payload_candidate import ASSET_SIZES, RADIO_FILES
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "installer"))
 from r800_build_provenance import validate_combination
@@ -113,12 +115,12 @@ def audit(donors, components, expected_sha):
             rows[name] = {"status": "STRUCTURE_PASS_ONLY", **fn(checked(root, name))}
         except FileNotFoundError:
             rows[name] = {"status": "MISSING"}
-        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, tarfile.TarError) as exc:
             rows[name] = {"status": "REJECTED", "reason": str(exc)}
     try:
         rows["compiled-components"] = {"status": "STRUCTURE_PASS_ONLY",
                                       **verify_components(components, expected_sha)}
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, tarfile.TarError) as exc:
         rows["compiled-components"] = {"status": "REJECTED", "reason": str(exc)}
     check("samsung/combination.tar.md5", combo)
     check("samsung/boot-template.img", boot)
@@ -147,7 +149,9 @@ def audit(donors, components, expected_sha):
             if raw[:5] != b"\x7fELF\x02":
                 static_arm(raw)
             else:
-                # AArch64 donor utilities are separately inspected by userspace checks.
+                elf = inspect(raw)
+                if elf["abi"] != "arm64" or elf["needed"]:
+                    raise ValueError("Expected standalone AArch64 executable")
                 info["arm64_runtime_unverified"] = True
             return info
         check("payload/bin/" + name, tool)
