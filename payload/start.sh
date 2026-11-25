@@ -431,12 +431,12 @@ ifconfig wlan0 up > /tmp/ifup.log 2>&1
 log "ifup wlan0 rc=$? $(head -c 200 /tmp/ifup.log)"
 
 # Scan first so the log shows what the radio can hear.
-/usr/sbin/iw dev wlan0 scan > /tmp/scan.txt 2>&1
+/data/r800dev/bin/iw dev wlan0 scan > /tmp/scan.txt 2>&1
 log "scan rc=$? bss=$(grep -c '^BSS ' /tmp/scan.txt) $(head -c 120 /tmp/scan.txt | tr '\n' ' ')"
 grep 'SSID:' /tmp/scan.txt | head -10 | logfile "ssid "
 
 # Foreground process in the background (not -B), so its stdout/stderr and exit are visible.
-/sbin/wpa_supplicant -d -i wlan0 -D nl80211 -c /data/r800dev/wpa.conf > /tmp/wpa.log 2>&1 &
+/data/r800dev/bin/wpa_supplicant -d -i wlan0 -D nl80211 -c /data/r800dev/wpa.conf > /tmp/wpa.log 2>&1 &
 WPA=$!
 for i in $(seq 1 40); do grep -q "CTRL-EVENT-CONNECTED" /tmp/wpa.log 2>/dev/null && break; kill -0 $WPA 2>/dev/null || break; sleep 1; done
 log "wpa pid=$WPA alive=$(kill -0 $WPA 2>/dev/null && echo yes || echo no) lines=$(wc -l < /tmp/wpa.log) after ${i}s"
@@ -444,7 +444,7 @@ head -12 /tmp/wpa.log | logfile "wpa-head> "
 tail -8 /tmp/wpa.log | logfile "wpa-tail> "
 ls -la /var/run/wpa_supplicant 2>&1 | logfile "ctrl: "
 grep -E 'CTRL-EVENT|Trying to|Associat|authenticat|WPA: |reason=|status_code|nl80211: (Connect|Associat|Authent|Scan)|Failed|SME' /tmp/wpa.log | grep -v ctrl_iface | tail -30 | logfile "wpa> "
-/sbin/wpa_cli -i wlan0 status 2>&1 | logfile "wpa_cli: "
+/data/r800dev/bin/wpa_cli -i wlan0 status 2>&1 | logfile "wpa_cli: "
 
 udhcpc -i wlan0 -s /data/r800dev/udhcpc.sh -b -t 15 -T 2 -x hostname:r800
 for i in $(seq 1 20); do ip -4 addr show wlan0 | grep -q inet && break; sleep 1; done
