@@ -17,6 +17,7 @@ import r800_art_launch
 import r800_binder_inventory
 import r800_vintf_inventory
 import r800_graphics_inventory
+import r800_display_inventory
 
 NAME = re.compile(r"[A-Za-z0-9_.+~-]{1,255}")
 TARGETS = ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager",
@@ -724,7 +725,7 @@ def symbol_candidates(seen, edges):
             "ambiguous": ambiguous, "incomplete": incomplete, "limit_exceeded": False}
 
 
-def audit(root: Path, targets=TARGETS, kernel_config=None) -> dict:
+def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
     targets = tuple(targets)
     queue = list(targets)
     seen, errors, unresolved, ambiguous = {}, [], [], []
@@ -811,6 +812,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None) -> dict:
     binder_inventory = r800_binder_inventory.audit(root, init_inventory, art_inventory, art_launch, kernel_config)
     vintf_inventory = r800_vintf_inventory.audit(root)
     graphics_inventory = r800_graphics_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config)
+    display_inventory = r800_display_inventory.audit(root, kernel_config, dtb)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -837,6 +839,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None) -> dict:
             "binder_inventory": binder_inventory,
             "vintf_inventory": vintf_inventory,
             "graphics_inventory": graphics_inventory,
+            "display_inventory": display_inventory,
             "namespace_inventory": namespace_inventory,
             "namespace_scope": namespace_scope,
             "android_namespace_resolution_verified": False,
@@ -848,10 +851,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", required=True, type=Path)
     p.add_argument("--output", required=True, type=Path)
+    p.add_argument("--dtb", type=Path, help="Optional exact target DTB for static display inventory")
     args = p.parse_args()
     if args.output.resolve().is_relative_to(args.root.resolve()):
         p.error("Report must be outside guest root")
-    result = audit(args.root)
+    dtb = read_regular(args.dtb, r800_display_inventory.MAX_DTB) if args.dtb else None
+    result = audit(args.root, dtb=dtb)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(result["status"])
     return 0 if result["status"] == "CANDIDATES_FOUND_ONLY" else 2
