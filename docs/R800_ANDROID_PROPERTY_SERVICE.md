@@ -575,3 +575,47 @@ The next gate must establish a legitimate init-domain executable
 transition on labeled mounts, with only deliberately enabled execution.
 Actual compilation, stock policy load and effective label readback
 remain unverified.
+
+
+## EXT4 diagnostic init-domain transition
+
+This separate experiment replaces only canonical /system/bin/init
+in a NEW system image with a static second-stage probe. Original
+system image and original policy remain unchanged. Bootstrap-only
+init layouts are rejected rather than guessing the entrypoint.
+
+    aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static \
+      src/initramfs/ext4-init-domain-probe.c -o /absolute/ext4-second-stage
+    aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static \
+      -DGALWEAR_LABEL_PROBE -DGALWEAR_TRANSITION_PROBE \
+      src/initramfs/virt-readonly-disks.c -o /absolute/ext4-first-stage
+
+Generate the existing initramfs spec JSON for each binary with
+r800_initramfs_spec.py. Build the separate system image using the
+existing system image builder with --transition-init and
+--transition-compile-evidence, pointing at the second-stage binary
+and its spec. Its distinct status is ANDROID_SYSTEM_EXT4_TRANSITION_STATIC_ONLY.
+The normal read-only and label-only runners reject this status.
+
+Run build/r800_qemu_ext4_init_transition.py (see --help) with both
+original and transition system image reports/directories, the accepted
+original noexec labeled-mount report, both diagnostic binaries and
+their compile evidence, and the same context/APEX images and stock
+policy. The host requires matching selected inode metadata except
+the explicitly substituted init payload hash. This compares selected
+inode reports, not every byte or unlisted inode of the two images.
+
+All disks remain read-only, nodev and nosuid. Only /system is mounted
+without noexec; other partitions retain noexec. This allows execution
+on the system mount, not an inode-specific noexec exemption. The
+first stage loads stock policy and checks all selected labels before
+execve of the fixed diagnostic path. The second stage checks PID 1,
+u:r:init:s0, enforcing=1, /proc/self/exe, init_exec label and system
+mount flags before heartbeat. No setcon, restorecon or setenforce
+is used. The original init, dynamic linker and Property Service
+are not executed. Stock policy may deny one of the diagnostic
+checks; do not weaken the policy to make the test pass.
+
+Actual image creation, compilation and guest execution remain
+unverified. The next gate is a dynamic libinit service fixture with
+its dedicated policy and separately audited executable mounts.
