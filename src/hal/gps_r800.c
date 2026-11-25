@@ -27,14 +27,21 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#ifndef R800_GPS_HOST_TEST
 #include <android/log.h>
 #include <hardware/hardware.h>
+#endif
 #include "gps_wire.h"
 #include "../tools/gps/gps_frame.h"
 
+#ifdef R800_GPS_HOST_TEST
+#define LOGI(...) ((void)0)
+#define LOGE(...) ((void)0)
+#else
 #define LOG_TAG "gps-r800"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#endif
 
 #ifndef SOCK_PATH
 #define SOCK_PATH "/oem/r800dev/gps.sock"
@@ -117,10 +124,12 @@ typedef struct {
 	int (*set_position_mode)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 	const void *(*get_extension)(const char *);
 } GpsInterface;
+ #ifndef R800_GPS_HOST_TEST
 struct gps_device_t {
 	struct hw_device_t common;
 	const GpsInterface *(*get_gps_interface)(struct gps_device_t *);
 };
+#endif
 #define GPS_CAPABILITY_SCHEDULING 0x01
 #define GPS_STATUS_SESSION_BEGIN 1
 #define GPS_STATUS_SESSION_END 2
@@ -135,7 +144,7 @@ static int sock_failed; /* protected by lock; only reader closes published fd */
 static int want_on;          /* framework asked for a session */
 /* All lifecycle state below is protected by lock. The reader owns callback
  * delivery and the published fd. The framework may create detached threads. */
-static int running, starting, reader_alive, reader_id_valid;
+static int running, starting, reader_alive, reader_id_valid, cleaning;
 static pthread_t reader_id;
 static pthread_cond_t state_changed = PTHREAD_COND_INITIALIZER;
 
@@ -367,7 +376,8 @@ static void handle_line(char *l)
             return;
         if (cb && cb->nmea_cb)
             cb->nmea_cb(ts, sentence, (int)strlen(sentence));
-        handle_nmea_sv(sentence);
+        if (reader_running())
+            handle_nmea_sv(sentence);
     } else if (!strncmp(l, "STATUS ", 7)) {
         int st;
         if (gps_wire_parse_status(l + 7, &st))
@@ -484,7 +494,7 @@ static int gps_init(GpsCallbacks *callbacks)
     if (!callbacks->create_thread_cb)
         return -EINVAL;
     pthread_mutex_lock(&lock);
-    if (starting || reader_alive || running) {
+    if (starting || reader_alive || running || cleaning) {
         pthread_mutex_unlock(&lock);
         return -EBUSY;
     }
@@ -558,8 +568,10 @@ static void gps_cleanup(void)
         pthread_mutex_unlock(&lock);
         return;
     }
+    ++cleaning;
     while (starting || reader_alive)
         pthread_cond_wait(&state_changed, &lock);
+    --cleaning;
     pthread_mutex_unlock(&lock);
 }
 
@@ -605,7 +617,7 @@ static int gps_set_position_mode(uint32_t mode, uint32_t rec, uint32_t interval,
 				 uint32_t acc, uint32_t t)
 {
 	LOGI("set_position_mode mode %u recurrence %u interval %u", mode, rec, interval);
-	(void)acc; (void)t;
+	(void)mode; (void)rec; (void)interval; (void)acc; (void)t;
 	return 0;
 }
 
@@ -615,11 +627,12 @@ static const void *gps_get_extension(const char *name)
 	return NULL;
 }
 
-static const GpsInterface iface = {
+static const GpsInterface iface __attribute__((used)) = {
 	sizeof(GpsInterface), gps_init, gps_start, gps_stop, gps_cleanup, gps_inject_time,
 	gps_inject_location, gps_delete_aiding_data, gps_set_position_mode, gps_get_extension,
 };
 
+#ifndef R800_GPS_HOST_TEST
 static const GpsInterface *get_iface(struct gps_device_t *d)
 {
 	(void)d;
@@ -661,3 +674,5 @@ struct hw_module_t HAL_MODULE_INFO_SYM = {
 	.author = "r800-wearos",
 	.methods = &methods,
 };
+
+#endif /* !R800_GPS_HOST_TEST */
