@@ -23,6 +23,7 @@ PROBES = (
     ("transition", "virt-readonly-disks.c", ("GALWEAR_LABEL_PROBE", "GALWEAR_TRANSITION_PROBE")),
     ("second-stage", "ext4-init-domain-probe.c", ()),
     ("service", "virt-readonly-disks.c", ("GALWEAR_LABEL_PROBE", "GALWEAR_SERVICE_PROBE")),
+    ("thread-event", "virt-thread-event-probe.c", ()),
 )
 
 
@@ -53,6 +54,7 @@ def compile_probes(p):
         evidence = p.out/(name+"-compile.json")
         p.step(f"02-{index:02d}-compile-{name}",["aarch64-linux-gnu-gcc","-std=c11",
             "-Wall","-Wextra","-Werror","-O2","-static",
+            *(["-pthread"] if name == "thread-event" else []),
             *["-D"+d for d in defines],REPO/"src/initramfs"/source,"-o",binary])
         p.py(f"02-{index:02d}-spec-{name}","r800_initramfs_spec.py",
              ["--init",binary,"--list",p.out/(name+".list")],
@@ -83,6 +85,9 @@ def execute(p,a):
          o/"artifact-origin.json","AOSP_SELECTED_ARTIFACT_ORIGIN_ONLY")
     probes = compile_probes(p)
     common = ["--kernel",a.kernel,"--baseline",a.baseline,"--config-evidence",a.config_evidence]
+    p.py("02-thread-event-boot","r800_qemu_thread_event.py",
+         [*common,*probes["thread-event"],"--out-dir",o/"thread-event-boot"],
+         o/"thread-event.json","VIRT_BLOCK_THREAD_EVENT_ONLY")
     rootfs = ["--staged",staged,"--preflight-init",b/"preflight-init"]
 
     def images(prefix, product, host, system_options, system_status):
