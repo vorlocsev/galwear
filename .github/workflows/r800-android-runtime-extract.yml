@@ -8,6 +8,8 @@ on:
       - .github/workflows/r800-android-runtime-extract.yml
       - build/r800_android_runtime_extract.py
       - build/r800_android_gsi_import.py
+      - build/r800_aosp_runtime_build.sh
+      - tests/test_aosp_runtime_build.py
       - tests/test_android_gsi_import.py
       - build/r800_android_dynamic_audit.py
       - tests/test_android_runtime_extract.py
@@ -35,3 +37,4 @@ jobs:
           python3 -m py_compile build/r800_android_runtime_extract.py build/r800_android_gsi_import.py
           python3 -m unittest discover -s tests -p 'test_android_runtime_extract.py' -v
           python3 -m unittest discover -s tests -p 'test_android_gsi_import.py' -v
+          python3 -m unittest discover -s tests -p 'test_aosp_runtime_build.py' -v
