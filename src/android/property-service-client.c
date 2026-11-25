@@ -2,7 +2,11 @@
  * Bionic public client API; original libinit property service required.
  */
 #include <fcntl.h>
+#include <errno.h>
 #include <stdint.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/un.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/system_properties.h>
@@ -37,6 +41,37 @@ static int check(const char *name, const char *value, uint32_t *serial)
     __system_property_read_callback(pi, receive, &c);
     *serial = c.serial;
     return c.calls != 1 || !c.matches;
+}
+
+/* Android 11 protocol v2 status values, checked separately from Bionic's -1. */
+static int transfer(int fd, void *buffer, size_t length, int sending)
+{
+    unsigned char *p = buffer;
+    while (length) {
+        ssize_t n = sending ? send(fd, p, length, MSG_NOSIGNAL) : recv(fd, p, length, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return 1;
+        p += n;
+        length -= (size_t)n;
+    }
+    return 0;
+}
+
+static int exact_rejection(const char *name, const char *value, uint32_t expected)
+{
+    struct sockaddr_un addr = {.sun_family = AF_UNIX, .sun_path = "/dev/socket/property_service"};
+    struct timeval timeout = {.tv_sec = 5};
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return 1;
+    uint32_t cmd = 0x00020001, nl = (uint32_t)strlen(name), vl = (uint32_t)strlen(value), status = 0;
+    int failed = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) ||
+        connect(fd, (struct sockaddr *)&addr, sizeof(addr)) ||
+        transfer(fd, &cmd, sizeof(cmd), 1) ||
+        transfer(fd, &nl, sizeof(nl), 1) || transfer(fd, (void *)name, nl, 1) ||
+        transfer(fd, &vl, sizeof(vl), 1) || transfer(fd, (void *)value, vl, 1) ||
+        transfer(fd, &status, sizeof(status), 0) || status != expected;
+    return close(fd) || failed;
 }
 
 static int correct_domain(void)
@@ -75,13 +110,15 @@ int main(int argc, char **argv)
     puts("r800-property-client: socket-update=PASS serial-changed=PASS");
     if (__system_property_find(readonly) ||
         __system_property_set(readonly, "first") || check(readonly, "first", &ignored) ||
-        __system_property_set(readonly, "second") == 0 || check(readonly, "first", &ignored))
+        __system_property_set(readonly, "second") == 0 ||
+        exact_rejection(readonly, "second", 0x000B) || check(readonly, "first", &ignored))
         return 4;
-    puts("r800-property-client: read-only-rejected=PASS");
+    puts("r800-property-client: read-only-rejected=PASS status=0x000b");
     if (check(denied, "seeded", &ignored) ||
         __system_property_set(denied, "forbidden") == 0 ||
+        exact_rejection(denied, "forbidden", 0x0018) ||
         check(denied, "seeded", &ignored) || check(version, "2", &ignored))
         return 5;
-    puts("r800-property-client: denied-write=PASS value-unchanged=PASS");
+    puts("r800-property-client: denied-write=PASS status=0x0018 value-unchanged=PASS");
     return 0;
 }
