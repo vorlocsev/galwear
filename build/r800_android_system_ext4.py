@@ -95,6 +95,27 @@ def materialize(tree, entries):
             path.symlink_to(target)
 
 
+def canned_config(entries, partition):
+    """Diagnostic-only fs_config: exact modes, root ownership, zero capabilities.
+
+    Android 11 e2fsdroid passes an empty path for the filesystem root.
+    Its canned parser represents that key by a leading slash then space.
+    lost+found is handled separately by e2fsdroid itself.
+    """
+    if partition not in entries or entries[partition][0] & 0o170000 != 0o040000:
+        raise ValueError("Missing partition root")
+    lines = []
+    for name, (mode, data, major, minor) in sorted(entries.items()):
+        if (not PATH.fullmatch(name) or str(Path(name)) != name
+                or ".." in Path(name).parts or
+                not (name == partition or name.startswith(partition + "/"))
+                or mode & 0o170000 not in MODES or mode & 0o7000 or major or minor):
+            raise ValueError("Invalid canned fs_config entry")
+        key = "/" if name == partition else name
+        lines.append(f"{key} 0 0 {mode & 0o777:04o} capabilities=0")
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
 def inspect_inode(image, name, item, expected, scratch, debugfs, partition="system"):
     mode, data, _, _ = item
     kind = mode & 0o170000
@@ -105,15 +126,22 @@ def inspect_inode(image, name, item, expected, scratch, debugfs, partition="syst
     if not re.search(r"^Inode:\s+\d+\s+Type:\s+"+MODES[kind][0]+r"\b", info, re.M):
         raise ValueError("Unexpected inode type: "+name)
     m = re.search(r"\bMode:\s+0?([0-7]{3,4})\b", info)
-    if not m or int(m[1], 8) & 0o7000:
-        raise ValueError("Missing mode or unexpected special mode bits: "+name)
+    if not m or int(m[1], 8) != mode & 0o7777:
+        raise ValueError("Unexpected inode mode: "+name)
+    owner = re.search(r"^User:\s*(\d+)\s+Group:\s*(\d+)\b", info, re.M)
+    if not owner or (int(owner[1]), int(owner[2])) != (0, 0):
+        raise ValueError("Unexpected inode ownership: "+name)
+    attrs = invoke([debugfs, "-R", "ea_list "+rel, image]).stdout.decode("utf-8")
+    if "security.capability" in attrs:
+        raise ValueError("Unexpected file capabilities: "+name)
     label_file = scratch/"label"
     if label_file.exists():
         label_file.unlink()
     invoke([debugfs, "-R", f"ea_get -f {label_file} {rel} security.selinux", image])
     if snapshot(label_file, 1024) != expected.encode("ascii")+b"\0":
         raise ValueError("EXT4 SELinux xattr mismatch: "+name)
-    result = {"context": expected, "mode": m[1], "type": MODES[kind][0]}
+    result = {"context": expected, "mode": m[1], "type": MODES[kind][0],
+              "uid": 0, "gid": 0, "file_capabilities_present": False}
     if kind == 0o100000:
         target = scratch/"payload"
         if target.exists():
@@ -200,6 +228,8 @@ def build(a):
             from r800_galwear_policy_fixture import FILE, LABEL as CLIENT_LABEL, SERVICE, SERVICE_LABEL
             if expected.get(FILE[1:]) != CLIENT_LABEL or expected.get(SERVICE[1:]) != SERVICE_LABEL:
                 raise ValueError("Dedicated fixture executable labels required")
+        fs_config = scratch/"fs_config"
+        fs_config.write_bytes(canned_config(entries, "system"))
         materialize(scratch, entries)
         image = scratch/"system.ext4"
         with image.open("xb") as f:
@@ -208,7 +238,7 @@ def build(a):
                 "-O", "none,extent,filetype,dir_index,ext_attr,sparse_super,large_file",
                 image], timeout=120)
         invoke([a.e2fsdroid.resolve(strict=True), "-e", "-T", "0", "-S", ctx,
-                "-a", "/system", "-f", scratch/"system", image], timeout=300)
+                "-C", fs_config, "-a", "/system", "-f", scratch/"system", image], timeout=300)
         ext4(image)
         if image.stat().st_size != IMAGE_SIZE:
             raise ValueError("Unexpected EXT4 size")
@@ -234,6 +264,7 @@ def build(a):
             "experimental_linker_config_sha256": sha(configs[0][1]) if service else None,
             "image_sha256": before, "image_bytes": IMAGE_SIZE,
             "e2fsdroid_sha256": e2fsdroid_hash,
+            "diagnostic_fs_config_sha256": sha(canned_config(entries, "system")),
             "policy_sha256": policy["policy_sha256"], "platform_file_contexts_sha256": sha(fc),
             "property_contexts_sha256": rootfs["property_contexts_sha256"],
             "verified_system_entries": observed, "e2fsck_read_only_passed": True,
