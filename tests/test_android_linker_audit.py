@@ -421,6 +421,29 @@ def signed_avb_fixture(algorithm=1):
     return bytes(out), key
 
 
+def verity_fixture(count=17, algorithm="sha256", block_size=512):
+    import hashlib
+    salt = b"galwear-test-salt"
+    payload = b"".join(bytes([i % 251]) * block_size for i in range(count))
+    source = payload
+    levels = []
+    while len(source) > block_size:
+        level = b"".join(hashlib.new(algorithm, salt + source[i:i + block_size]).digest()
+                         for i in range(0, len(source), block_size))
+        source = level.ljust((len(level) + block_size - 1) // block_size * block_size, bytes(1))
+        levels.insert(0, source)
+    tree = b"".join(levels)
+    root = hashlib.new(algorithm, salt + source).digest()
+    return payload, tree, salt, root
+
+
+def check_verity(payload, tree, salt, root, algorithm="sha256", block_size=512):
+    blob = payload + tree
+    return audit.r800_apex_inventory.r800_avb_inventory.verify_hashtree(
+        lambda offset, length: blob[offset:offset + length],
+        len(payload), len(payload), len(tree), block_size, block_size, algorithm, salt, root)
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -1294,6 +1317,64 @@ class LinkerTests(unittest.TestCase):
         payload, key = signed_avb_fixture()
         with self.assertRaisesRegex(ValueError, "fingerprint"):
             avb.inspect(io.BytesIO(payload), 0, len(payload), key, "not-a-hash")
+
+    def test_verity_single_block_no_tree(self):
+        payload, tree, salt, root = verity_fixture(1)
+        out = check_verity(payload, tree, salt, root)
+        self.assertEqual(out["status"], "HASHTREE_MATCHES_DESCRIPTOR")
+        self.assertEqual(out["levels"], 0)
+        self.assertEqual(out["data_blocks_checked"], 1)
+
+    def test_verity_multiple_levels_sha256_sha512(self):
+        for algorithm in ("sha256", "sha512"):
+            with self.subTest(algorithm=algorithm):
+                payload, tree, salt, root = verity_fixture(137, algorithm)
+                out = check_verity(payload, tree, salt, root, algorithm)
+                self.assertEqual(out["status"], "HASHTREE_MATCHES_DESCRIPTOR")
+                self.assertEqual(out["data_blocks_checked"], 137)
+                self.assertGreater(out["levels"], 1)
+                self.assertEqual(out["tree_blocks_checked"], len(tree) // 512)
+
+    def test_verity_changed_payload(self):
+        payload, tree, salt, root = verity_fixture()
+        changed = bytes([payload[0] ^ 1]) + payload[1:]
+        out = check_verity(changed, tree, salt, root)
+        self.assertEqual(out["status"], "TREE_BLOCK_MISMATCH")
+        self.assertEqual(out["mismatch_level"], 0)
+
+    def test_verity_changed_upper_level(self):
+        payload, tree, salt, root = verity_fixture()
+        changed = bytes([tree[0] ^ 1]) + tree[1:]
+        out = check_verity(payload, changed, salt, root)
+        self.assertEqual(out["status"], "TREE_BLOCK_MISMATCH")
+        self.assertEqual(out["mismatch_level"], 1)
+
+    def test_verity_tree_padding_checked(self):
+        payload, tree, salt, root = verity_fixture()
+        changed = tree[:-1] + bytes([1])
+        self.assertEqual(check_verity(payload, changed, salt, root)["status"], "TREE_BLOCK_MISMATCH")
+
+    def test_verity_root_and_size_mismatches(self):
+        payload, tree, salt, root = verity_fixture()
+        self.assertEqual(check_verity(payload, tree, salt, bytes(32))["status"], "ROOT_DIGEST_MISMATCH")
+        self.assertEqual(check_verity(payload, tree[:-512], salt, root)["status"], "TREE_SIZE_MISMATCH")
+
+    def test_verity_unsupported_geometry(self):
+        payload, tree, salt, root = verity_fixture()
+        avb = audit.r800_apex_inventory.r800_avb_inventory
+        out = avb.verify_hashtree(lambda o, n: self.fail("Unexpected read"),
+            len(payload), len(payload), len(tree), 512, 1024, "sha256", salt, root)
+        self.assertEqual(out["status"], "UNSUPPORTED_GEOMETRY")
+
+    def test_avb_tree_mismatch_separate_from_structural_status(self):
+        import io
+        payload, key = avb_fixture()
+        out = audit.r800_apex_inventory.r800_avb_inventory.inspect(
+            io.BytesIO(payload), 0, len(payload), key)
+        self.assertEqual(out["status"], "AVB_STRUCTURE_ONLY")
+        self.assertEqual(out["hashtree_status"], "TREE_SIZE_MISMATCH")
+        self.assertFalse(out["hashtree_verified"])
+        self.assertFalse(out["payload_authenticated"])
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
