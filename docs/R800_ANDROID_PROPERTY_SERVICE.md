@@ -399,3 +399,32 @@ must not already exist. Re-run boot in a new output directory if inputs
 need correction; automatic resume and full AOSP hosted CI are not enabled.
 Only synthetic orchestration tests are added to lightweight CI.
 No release, device operations, or claim of verified Android boot.
+
+
+## Audit finding: kernel-domain full relabel is not a stock Android contract
+
+Android init's initial kernel-domain restorecon of its own executable
+is not authorization to restore every system, vendor or APEX path.
+Android 11 policy typically assumes those partitions already contain
+their labels. The exact compiled policy must be checked rather than
+assuming permission from a related source tree.
+
+Install host SETools (Ubuntu package setools) before the boot phase.
+The new r800_rootfs_relabel_policy_gate.py invokes sesearch on the
+audited stock policy for the necessary unconditional relabelfrom and
+relabelto permissions for rootfs, init_exec and system_file. A missing
+permission produces ROOTFS_RELABEL_POLICY_BLOCKED, exit 3, and an
+explicit list in relabel-policy-gate.json. The combined pipeline stops
+before expanded relabel. A successful query does not establish actual
+filesystem xattr support, APEX labels, SELinux constraints or execution.
+
+The intended alternative if blocked is a labeled read-only partition
+image produced with the original file_contexts and Android image
+tools, not a broad allow rule for kernel. This alternative has not
+been implemented yet. The generic boot parser also rejects initramfs
+unpack failures so embedded fallback cannot masquerade as a successful
+external archive. Build phase evidence now requires exact expected
+report paths and status names rather than trusting a saved status.
+
+No actual compiled policy query, complete AOSP build, or QEMU boot has
+been verified in this audit.
