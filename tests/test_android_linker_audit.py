@@ -469,6 +469,66 @@ class LinkerTests(unittest.TestCase):
         self.assertEqual(out["unsupported_symbol_objects"], ["/init"])
         self.assertFalse(out["symbol_resolution_verified"])
 
+    def test_symbol_provider_in_direct_dependency(self):
+        root = audit.inspect(classified_symbol_fixture())
+        lib = audit.inspect(classified_symbol_fixture(section=1))
+        out = audit.symbol_candidates({"init": root, "lib": lib},
+                                      {"init": {"libx.so": ["lib"]}})
+        self.assertEqual(out["matched"], 1)
+        self.assertEqual(out["missing_strong"], [])
+
+    def test_symbol_provider_in_transitive_cycle(self):
+        root = audit.inspect(classified_symbol_fixture())
+        lib = audit.inspect(classified_symbol_fixture(section=1))
+        out = audit.symbol_candidates({"init": root, "bridge": lib, "lib": lib},
+                                      {"init": {"a": ["bridge"]},
+                                       "bridge": {"b": ["lib"]}, "lib": {"c": ["bridge"]}})
+        self.assertEqual(out["ambiguous"][0]["providers"], ["bridge", "lib"])
+
+    def test_unrelated_target_does_not_provide_symbol(self):
+        root = audit.inspect(classified_symbol_fixture())
+        lib = audit.inspect(classified_symbol_fixture(section=1))
+        out = audit.symbol_candidates({"init": root, "unrelated": lib}, {})
+        self.assertEqual(len(out["missing_strong"]), 1)
+        self.assertEqual(out["matched"], 0)
+
+    def test_missing_weak_symbol_is_separate(self):
+        root = audit.inspect(classified_symbol_fixture(binding=2))
+        out = audit.symbol_candidates({"init": root}, {})
+        self.assertEqual(len(out["missing_weak"]), 1)
+        self.assertEqual(out["missing_strong"], [])
+
+    def test_incomplete_dependency_does_not_prove_missing_symbol(self):
+        root = audit.inspect(classified_symbol_fixture())
+        out = audit.symbol_candidates({"init": root, "lib": None},
+                                      {"init": {"libx.so": ["lib"]}})
+        self.assertEqual(len(out["incomplete"]), 1)
+        self.assertEqual(out["missing_strong"], [])
+
+    def test_nondefault_export_does_not_match_unversioned_import(self):
+        root = audit.inspect(classified_symbol_fixture())
+        lib = audit.inspect(classified_symbol_fixture(
+            section=1, version_kind="define", version_hidden=True))
+        out = audit.symbol_candidates({"init": root, "lib": lib},
+                                      {"init": {"libx.so": ["lib"]}})
+        self.assertEqual(len(out["missing_strong"]), 1)
+
+    def test_versioned_import_matches_named_provider(self):
+        root = audit.inspect(classified_symbol_fixture(version_kind="need"))
+        lib = audit.inspect(classified_symbol_fixture(
+            section=1, version_kind="define", version_hidden=True))
+        out = audit.symbol_candidates({"init": root, "lib": lib, "other": lib},
+                                      {"init": {"libx.so": ["lib"], "other.so": ["other"]}})
+        self.assertEqual(out["matched"], 1)
+        self.assertEqual(out["ambiguous"], [])
+
+    def test_wrong_abi_cannot_provide_symbol(self):
+        root = audit.inspect(classified_symbol_fixture("arm64"))
+        lib = audit.inspect(classified_symbol_fixture("arm", section=1))
+        out = audit.symbol_candidates({"init": root, "lib": lib},
+                                      {"init": {"libx.so": ["lib"]}})
+        self.assertEqual(len(out["missing_strong"]), 1)
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
