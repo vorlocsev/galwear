@@ -2341,6 +2341,72 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["sensor_inventory"]["heart_rate_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def nfc_fixture(self):
+        self.put("init.rc", b"service vendor.nfc /vendor/bin/hw/nfc-service\n"
+                 b"    interface android.hardware.nfc@1.2::INfc default\n")
+        self.put_art_executable("vendor/bin/hw/nfc-service", "arm")
+        self.put("vendor/lib/libnfc-nci.so", fixture("arm"))
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"><hal format="hidl"><name>android.hardware.nfc</name><fqname>@1.2::INfc/default</fqname></hal></manifest>')
+        self.put("vendor/firmware/nfc/nfc-test.bin", b"synthetic")
+        self.put("vendor/etc/libnfc-nci.conf", b"NFC_NCI_DEV_NODE=/dev/nfc\n")
+
+    def inspect_nfc(self, kernel=None, dtb=None):
+        return audit.r800_nfc_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel, dtb)
+
+    def test_nfc_static_candidates(self):
+        self.nfc_fixture()
+        out = self.inspect_nfc({"CONFIG_NFC_NCI": "y"})
+        self.assertEqual(len(out["hal_declarations"]), 1)
+        self.assertTrue(out["services"][0]["elf"])
+        self.assertEqual(out["firmware_candidates"]["/vendor/firmware/nfc/nfc-test.bin"]["bytes"], 9)
+        self.assertEqual(out["config_evidence"]["/vendor/etc/libnfc-nci.conf"], {"NFC_NCI_DEV_NODE": "PRESENT"})
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["tag_read_verified"])
+
+    def test_nfc_dt_controller_i2c(self):
+        nodes = {"/": {}, "/i2c@1000": {"compatible": b"samsung,i2c\0"},
+                 "/i2c@1000/nfc@28": {"compatible": b"fixture,nfc\0",
+                                      "firmware-name": b"fixture.bin\0"}}
+        out = audit.r800_nfc_inventory.dt_inventory(nodes)
+        self.assertEqual(out[0]["transport_candidates"], ["i2c"])
+        self.assertEqual(out[0]["firmware_names"], ["fixture.bin"])
+        self.assertTrue(out[0]["enabled"])
+
+    def test_nfc_dt_disabled_parent(self):
+        nodes = {"/": {}, "/spi": {"status": b"disabled\0"},
+                 "/spi/nfc": {"compatible": b"fixture,nfc\0"}}
+        self.assertFalse(audit.r800_nfc_inventory.dt_inventory(nodes)[0]["enabled"])
+
+    def test_nfc_wrong_library_abi(self):
+        self.nfc_fixture()
+        self.put("vendor/lib/libnfc-nci.so", fixture("arm64"))
+        out = self.inspect_nfc()
+        self.assertIsNone(out["libraries"]["/vendor/lib/libnfc-nci.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_nfc_fake_device(self):
+        self.nfc_fixture()
+        self.put("dev/nfc", b"fake")
+        out = self.inspect_nfc()
+        self.assertFalse(out["device_nodes"]["/dev/nfc"])
+        self.assertTrue(any("not a character device" in e for e in out["errors"]))
+
+    def test_hardware_kernel_config_parser(self):
+        out = audit.parse_kernel_config(b"CONFIG_NFC=y\n# CONFIG_NFC_NCI is not set\n")
+        self.assertEqual(out, {"CONFIG_NFC": "y", "CONFIG_NFC_NCI": "n"})
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            audit.parse_kernel_config(b"CONFIG_NFC=y\nCONFIG_NFC=m\n")
+
+    def test_nfc_report_integrated_kernel_config(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",), kernel_config={"CONFIG_NFC": "y"})
+        self.assertEqual(out["nfc_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertEqual(out["nfc_inventory"]["kernel_config"]["CONFIG_NFC"], "y")
+        self.assertFalse(out["nfc_inventory"]["secure_element_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
