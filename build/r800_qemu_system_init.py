@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import re
 import time
 
 from r800_cpio_audit import inspect_cpio, MAX_ARCHIVE_BYTES
@@ -18,6 +19,10 @@ SCHEMA = "galwear-r800-generic-arm64-system-v1"
 MAX_KERNEL = 128 * 1024 * 1024
 TIMEOUT = 90
 MAX_LOG = 8 * 1024 * 1024
+STARTUP_LIMIT = 60.0
+HEARTBEAT_GAP_LIMIT = 15.0
+FATAL = re.compile(rb'Kernel panic|Attempted to kill init|Failed to execute /init|\bOops:|Internal error:|BUG:|Unable to handle kernel|soft lockup|hard lockup|RCU.*stall|rcu:.*stalls|blocked for more than|No working init found|Synchronous Abort', re.I)
+WARNING = re.compile(rb'WARNING:|\bWARN(?:ING)?\b|probe.*fail|failed to probe|deferred probe|failed to initialize|initcall.*returned -[0-9]+', re.I)
 
 
 def create_archive(binary: Path) -> bytes:
@@ -44,6 +49,71 @@ def create_archive(binary: Path) -> bytes:
     return bytes(out)
 
 
+def classify_console(lines: list[bytes]) -> dict:
+    fatal = [line for line in lines if FATAL.search(line)]
+    warnings = [line for line in lines if WARNING.search(line) and not FATAL.search(line)]
+    if fatal:
+        raise ValueError("Kernel panic, Oops, lockup or other critical diagnostic: "
+                         + fatal[0][:300].decode("utf-8", errors="replace"))
+    return {"critical_diagnostics_detected": False,
+            "warning_count": len(warnings),
+            "warning_samples": [line[:300].decode("utf-8", errors="replace") for line in warnings[:20]]}
+
+
+class LiveHeartbeat:
+    """Host monotonic observation times, not guest clock measurements."""
+
+    def __init__(self, start: float):
+        self.start = start
+        self.marker = None
+        self.beats = []
+        self.pending = b""
+
+    def feed(self, data: bytes, now: float) -> None:
+        parts = (self.pending + data).split(b"\n")
+        self.pending = parts.pop()
+        if len(self.pending) > 65536:
+            raise ValueError("Unterminated virtual console line")
+        for line in parts:
+            line = line.rstrip(b"\r")
+            if FATAL.search(line):
+                classify_console([line])
+            if line == EXPECTED.rstrip(b"\n"):
+                if self.marker is not None:
+                    raise ValueError("Duplicate live startup marker")
+                self.marker = now
+            elif line.startswith(HEARTBEAT_PREFIX):
+                if self.marker is None:
+                    raise ValueError("Live heartbeat before startup marker")
+                expected = HEARTBEAT_PREFIX + f"{len(self.beats) + 1:08x}".encode()
+                if line != expected:
+                    raise ValueError("Invalid live heartbeat sequence")
+                previous = self.beats[-1] if self.beats else self.marker
+                if now - previous > HEARTBEAT_GAP_LIMIT:
+                    raise ValueError("Live heartbeat gap exceeded")
+                self.beats.append(now)
+
+    def check(self, now: float) -> None:
+        if self.marker is None:
+            if now - self.start > STARTUP_LIMIT:
+                raise ValueError("Startup marker deadline exceeded")
+        elif now - (self.beats[-1] if self.beats else self.marker) > HEARTBEAT_GAP_LIMIT:
+            raise ValueError("Live heartbeat stalled")
+
+    def evidence(self, now: float) -> dict:
+        self.check(now)
+        if self.marker is None or len(self.beats) < 2:
+            raise ValueError("Insufficient timed heartbeat observations")
+        gaps = [b - a for a, b in zip([self.marker] + self.beats[:-1], self.beats)]
+        return {"host_monotonic_observation": True,
+                "startup_seconds": round(self.marker - self.start, 3),
+                "observed_heartbeat_count": len(self.beats),
+                "maximum_observed_gap_seconds": round(max(gaps), 3),
+                "last_heartbeat_age_seconds": round(now - self.beats[-1], 3),
+                "heartbeat_gap_limit_seconds": HEARTBEAT_GAP_LIMIT,
+                "guest_alive_at_timeout_proven": False}
+
+
 def inspect_console(log: bytes, timed_out: bool) -> dict:
     normalized = log.replace(b"\r\n", b"\n")
     lines = normalized.splitlines()
@@ -55,9 +125,7 @@ def inspect_console(log: bytes, timed_out: bool) -> dict:
     idx = lines.index(marker)
     if not any(b"Run /init as init process" in line for line in lines[:idx]):
         raise ValueError("No kernel evidence of launching /init")
-    if any(b"Kernel panic" in line or b"Attempted to kill init" in line
-           or b"Failed to execute /init" in line for line in lines):
-        raise ValueError("Kernel panic or init execution failure")
+    diagnostics = classify_console(lines)
     if any(line.startswith(HEARTBEAT_PREFIX) for line in lines[:idx]):
         raise ValueError("Heartbeat before startup marker")
     count = inspect_heartbeats([line for line in lines[idx + 1:]
@@ -66,7 +134,7 @@ def inspect_console(log: bytes, timed_out: bool) -> dict:
             "heartbeat_count": count, "heartbeat_sequence_verified": True,
             "qemu_process_alive_until_host_timeout": True,
             "guest_progress_after_marker_verified": True,
-            "guest_alive_at_timeout_proven": False}
+            "guest_alive_at_timeout_proven": False, **diagnostics}
 
 
 def kernel_bytes(path: Path) -> bytes:
@@ -133,17 +201,22 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
         command += ["-initrd", str(archive.resolve())]
     timed_out = False
     log_path = out / "generic-console.log"
-    with log_path.open("wb") as stream:
+    with log_path.open("wb") as stream, log_path.open("rb") as reader:
+        monitor = LiveHeartbeat(time.monotonic())
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream,
                                 stderr=subprocess.STDOUT)
         try:
-            deadline = time.monotonic() + TIMEOUT
+            deadline = monitor.start + TIMEOUT
             while proc.poll() is None:
                 if log_path.stat().st_size > MAX_LOG:
                     raise ValueError("Virtual console exceeded log limit")
-                remaining = deadline - time.monotonic()
+                now = time.monotonic()
+                monitor.feed(reader.read(MAX_LOG + 1), now)
+                monitor.check(now)
+                remaining = deadline - now
                 if remaining <= 0:
                     timed_out = True
+                    end_observed = now
                     break
                 try:
                     proc.wait(timeout=min(0.25, remaining))
@@ -157,6 +230,10 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
                 stream.truncate(MAX_LOG)
                 raise ValueError("Virtual console exceeded log limit; artifact truncated")
     observed = inspect_console(log_path.read_bytes(), timed_out)
+    timing = monitor.evidence(end_observed)
+    if timing["observed_heartbeat_count"] != observed["heartbeat_count"]:
+        raise ValueError("Live and final heartbeat counts differ")
+    observed.update(timing)
     if validate_init(binary) != elf:
         raise ValueError("Init changed during virtual boot")
     return {"schema": SCHEMA, "status": "VIRT_EMBEDDED_PID1_BOOT_ONLY" if embedded_archive else "GENERIC_ARM64_PID1_BOOT_ONLY",
