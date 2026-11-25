@@ -13,7 +13,7 @@ from r800_android_rootfs_preflight import CONTEXTS, snapshot, sha
 from r800_android_file_contexts import FILE_CONTEXTS, MAX_CONTEXTS
 from r800_android_sepolicy_audit import audit, MAX_POLICY
 from r800_android_init_dependencies import regular
-from r800_android_system_ext4 import expected_label, materialize, inspect_inode, invoke
+from r800_android_system_ext4 import expected_label, materialize, inspect_inode, invoke, canned_config
 from r800_android_runtime_extract import digest, ext4
 
 PARTITIONS = ("system_ext", "product", "vendor", "odm")
@@ -82,6 +82,8 @@ def build(a):
                 if rel in FILE_CONTEXTS and not any(rel == p and sha(item[1]) == h for p,_,h in files):
                     raise ValueError("File context snapshot mismatch")
             expected = {n: expected_label(merged,n,v[0],a.matchpathcon) for n,v in entries.items()}
+            fs_config = scratch/(partition+"-fs_config")
+            fs_config.write_bytes(canned_config(entries, partition))
             materialize(scratch, entries)
             image = scratch/(partition+".ext4")
             with image.open("xb") as stream:
@@ -89,7 +91,7 @@ def build(a):
             invoke([a.mke2fs,"-F","-t","ext4","-b","4096","-I","256","-m","0",
                     "-O","none,extent,filetype,dir_index,ext_attr,sparse_super,large_file",image])
             invoke([a.e2fsdroid.resolve(strict=True),"-e","-T","0","-S",
-                    ",".join(str(p) for _,p,_ in files),"-a","/"+partition,
+                    ",".join(str(p) for _,p,_ in files),"-C",fs_config,"-a","/"+partition,
                     "-f",scratch/partition,image], timeout=300)
             ext4(image)
             if image.stat().st_size != SIZE:
@@ -100,7 +102,8 @@ def build(a):
                         for n,v in sorted(entries.items())}
             if digest(image,SIZE) != before:
                 raise ValueError("Partition changed during audit")
-            reports[partition] = {"sha256":before,"bytes":SIZE,"entries":observed}
+            reports[partition] = {"sha256":before,"bytes":SIZE,"entries":observed,
+                                  "diagnostic_fs_config_sha256":sha(fs_config.read_bytes())}
         if digest(a.e2fsdroid,128*1024*1024) != tool_sha:
             raise ValueError("Image builder changed")
         a.out.mkdir(exist_ok=False)
