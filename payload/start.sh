@@ -145,6 +145,17 @@ if [ -f /data/r800dev/android/BOOT_ANDROID ]; then
 	fi
 	[ -f "$VI" ] || android_abort "vendor image missing"
 	android_require "vendor mount" mount -o loop,ro "$VI" /newroot/vendor
+	# Radio firmware and Broadcom vendor library must be visible before Android
+	# starts vendor HAL services, not in a racing background helper.
+	FW=/data/r800dev/fw
+	[ -d /newroot/vendor/data/r800dev/fw ] || android_abort "vendor firmware mountpoint missing"
+	for name in bcmdhd_sta.bin nvram_net.txt bcmdhd_clm.blob \
+		bt/BCM43012B0_002.001.021.0153.0156.hcd bt/bt_vendor.conf bt/libbt-vendor.so; do
+		[ -s "$FW/$name" ] || android_abort "radio input missing: $name"
+	done
+	android_require "radio firmware bind" mount --bind "$FW" /newroot/vendor/data/r800dev/fw
+	[ -f /newroot/vendor/lib/libbt-vendor.so ] || android_abort "Bluetooth library mountpoint missing"
+	android_require "Broadcom vendor library bind" mount --bind "$FW/bt/libbt-vendor.so" /newroot/vendor/lib/libbt-vendor.so
 	# vendor.img's build.prop still has debug.sf.nobootanimation=1 from the
 	# bring-up (no GPU driver then): the Wear OS boot animation exited after 0.5 s
 	# and the splash stayed until SysUI's "Starting...". Bind a copy without it.
