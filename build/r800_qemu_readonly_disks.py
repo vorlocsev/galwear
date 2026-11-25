@@ -68,12 +68,12 @@ def inventory(a):
             path,expected,size = records[name]
             verify_image(path,name,expected,size)
             disks.append({"name":name,"path":path,"sha256":expected,"bytes":size,
-                          "device":"vd"+chr(ord("a")+len(disks))})
+                          "manifest_slot":"vd"+chr(ord("a")+len(disks))})
     return policy,disks
 
 
 def disk_archive(binary, disks):
-    data = "".join(d["name"]+" "+d["device"]+"\n" for d in disks).encode("ascii")
+    data = "".join(d["name"]+" "+d["manifest_slot"]+"\n" for d in disks).encode("ascii")
     return newc([(p,(0o040755,b"",0,0)) for p in ("dev","proc","sys","data")]+[
         ("dev/console",(0o020600,b"",5,1)),("init",(0o100755,binary,0,0)),
         ("galwear-disks.list",(0o100400,data,0,0))])
