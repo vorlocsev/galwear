@@ -19,6 +19,7 @@
  * or C runtime: the few libc calls are declared here and _start is our own.
  */
 #include "gps_frame.h"
+#include "gps_command.h"
 
 typedef unsigned int size_t;
 typedef unsigned short uint16_t;
@@ -258,7 +259,8 @@ static const GpsInterface *gps;
 static int64_t clk_ms(int id)
 {
 	struct { long sec, nsec; } ts = { 0, 0 };
-	clock_gettime(id, &ts);
+	if (clock_gettime(id, &ts) != 0)
+		return -1;
 	return (int64_t)ts.sec * 1000 + ts.nsec / 1000000;
 }
 
@@ -273,8 +275,14 @@ static int inject_utc(int64_t utc, int64_t boot_ref, int unc)
 {
 	int64_t mono = clk_ms(1);
 	int r;
-	if (boot_ref > 0)
-		utc += clk_ms(7) - boot_ref;
+	if (utc <= 0 || utc > GPS_UTC_MAX || unc < 0 || mono < 0)
+		return -1;
+	if (boot_ref > 0) {
+		int64_t boot = clk_ms(7);
+		if (boot < boot_ref || boot - boot_ref > GPS_UTC_MAX - utc)
+			return -1;
+		utc += boot - boot_ref;
+	}
 	r = gps->inject_time(utc, mono, unc);
 	printf("inject_time %lld ref %lld unc %d -> %d\n", utc, mono, unc, r);
 	fflush(0);
@@ -286,21 +294,20 @@ static int inject_utc(int64_t utc, int64_t boot_ref, int unc)
 static void xtra_download_cb(void) {}
 static GpsXtraCallbacks xcbs = { sizeof(GpsXtraCallbacks), xtra_download_cb, 0 };
 static char lto_buf[256 * 1024];
+static const GpsXtraInterface *xtra;
 
 /* load lto2.dat into the engine (what Tizen's plugin does after downloading it) */
 static void inject_lto(void)
 {
-	static const GpsXtraInterface *x;
-	static int inited;
 	int fd, n = 0, r;
-	if (!inited) {
-		inited = 1;
-		x = gps->get_extension ? gps->get_extension("gps-xtra") : 0;
+	if (!xtra) {
+		const GpsXtraInterface *candidate = gps->get_extension ? gps->get_extension("gps-xtra") : 0;
 		xcbs.create_thread_cb = cbs.create_thread_cb;
-		if (x && x->init)
-			x->init(&xcbs);
+		if (candidate && candidate->size >= sizeof(GpsXtraInterface) &&
+		    candidate->init && candidate->inject_xtra_data && candidate->init(&xcbs) == 0)
+			xtra = candidate;
 	}
-	if (!x || !x->inject_xtra_data) {
+	if (!xtra) {
 		printf("lto: no gps-xtra\n");
 		fflush(0);
 		return;
@@ -318,7 +325,7 @@ static void inject_lto(void)
 		n += k;
 	}
 	close(fd);
-	r = n > 0 ? x->inject_xtra_data(lto_buf, n) : -1;
+	r = n > 0 ? xtra->inject_xtra_data(lto_buf, n) : -1;
 	printf("lto: injected %d bytes -> %d\n", n, r);
 	fflush(0);
 }
@@ -374,6 +381,7 @@ static int session(int on)
 		/* gpsd restarted under us: reconnect the client library and retry */
 		printf("start failed, re-init\n");
 		fflush(0);
+		xtra = 0;
 		gps->cleanup();
 		r = gps->init(&cbs);
 		if (r != 0)
@@ -437,16 +445,17 @@ static int serve(void)
 						on = 0;
 				} else if (!strncmp(s, "TIME ", 5)) {
 					/* TIME <utc_ms> [<elapsedRealtime_ms> <unc_ms>] */
-					char *e;
-					int64_t t = strtoll(s + 5, &e, 10), ref = strtoll(e, &e, 10);
-					int unc = (int)strtoll(e, &e, 10);
-					inject_utc(t, ref, unc > 0 ? unc : 1000);
+					struct gps_time_command t;
+					if (!gps_parse_time(s + 5, &t))
+						goto disconnected;
+					inject_utc(t.utc, t.elapsed, t.uncertainty);
 				} else if (!strncmp(s, "LOC ", 4)) {
 					/* LOC <lat> <lon> <acc_m>: Android's network location */
-					char *e;
-					double lat = strtod(s + 4, &e), lon = strtod(e, &e);
-					float acc = (float)strtod(e, &e);
-					int r = gps->inject_location(lat, lon, acc > 0 ? acc : 1000);
+					struct gps_loc_command loc;
+					if (!gps_parse_loc(s + 4, &loc))
+						goto disconnected;
+					float acc = (float)loc.accuracy;
+					int r = gps->inject_location(loc.lat, loc.lon, acc);
 					printf("inject_location (android) acc %.0f -> %d\n",
 					       (double)acc, r);
 					fflush(0);
