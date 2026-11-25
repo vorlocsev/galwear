@@ -173,7 +173,11 @@ def audit(root):
     health_services = [s for s in services if
         any("android.hardware.health" in arg for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
         any(term in s["name"].lower() for term in ("health", "charger", "battery"))]
-    relevant = [s for s in services if s in graphics_services or s in audio_services or s in bluetooth_services or s in wifi_services or s in gnss_services or s in sensor_services or s in nfc_services or s in health_services or s["name"] in APEX_SERVICES + binder_services or
+    power_services = [s for s in services if
+        any(arg.startswith(("android.hardware.power", "android.hardware.thermal", "android.system.suspend"))
+            for o in s["options"] if o["name"] == "interface" for arg in o["args"]) or
+        any(term in s["name"].lower() for term in ("power", "thermal", "suspend", "perfd"))]
+    relevant = [s for s in services if s in graphics_services or s in audio_services or s in bluetooth_services or s in wifi_services or s in gnss_services or s in sensor_services or s in nfc_services or s in health_services or s in power_services or s["name"] in APEX_SERVICES + binder_services or
                 s["name"].startswith("zygote") or "art" in s["name"].split("-")]
     duplicates = []
     by_name = {}
@@ -223,6 +227,7 @@ def audit(root):
             "sensor_services": sensor_services,
             "nfc_services": nfc_services,
             "health_services": health_services,
+            "power_services": power_services,
             "art_environment": environment, "duplicate_services": duplicates,
             "unresolved_imports": unresolved, "unknown_top_level": unknown,
             "missing_evidence": missing, "errors": errors,
