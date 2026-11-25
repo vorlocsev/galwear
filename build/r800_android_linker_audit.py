@@ -52,7 +52,8 @@ def inspect(data: bytes) -> dict:
     if not loads:
         raise ValueError("Missing PT_LOAD")
     result = {"abi": "arm64" if cls == 2 else "arm", "needed": [],
-              "has_dynamic": dynamic is not None, "custom_search_path": False}
+              "has_dynamic": dynamic is not None, "custom_search_path": False,
+              "elf_type": "ET_DYN" if etype == 3 else "ET_EXEC"}
     if dynamic is None:
         return result
     off, size = dynamic
@@ -105,6 +106,7 @@ def directories(abi):
 def audit(root: Path, targets=TARGETS) -> dict:
     queue = list(targets)
     seen, errors, unresolved, ambiguous = {}, [], [], []
+    unsupported_search_paths = []
     while queue:
         name = queue.pop(0)
         if name in seen:
@@ -119,6 +121,8 @@ def audit(root: Path, targets=TARGETS) -> dict:
             errors.append(name + ": " + str(exc))
             continue
         seen[name] = info
+        if info["custom_search_path"]:
+            unsupported_search_paths.append(name)
         for dep in info["needed"]:
             candidates = {}
             for directory in directories(info["abi"]):
@@ -127,6 +131,9 @@ def audit(root: Path, targets=TARGETS) -> dict:
                     resolved = guest_path(root, path)
                     child = inspect(read_regular(resolved, MAX_ELF))
                     if child["abi"] == info["abi"]:
+                        if child["elf_type"] != "ET_DYN" or not child["has_dynamic"]:
+                            errors.append(path + ": dependency is not a dynamic ET_DYN object")
+                            continue
                         candidates.setdefault(str(resolved), path)
                 except FileNotFoundError:
                     continue
@@ -146,9 +153,10 @@ def audit(root: Path, targets=TARGETS) -> dict:
             present = False
         apex[name] = {"expanded_tree_present": present}
     return {"schema": "galwear-r800-linker-inventory-v1",
-            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous) else "REVIEW_REQUIRED",
+            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths) else "REVIEW_REQUIRED",
             "objects": seen, "missing_candidates": unresolved, "ambiguous_candidates": ambiguous,
-            "errors": errors, "apex": apex, "android_namespace_resolution_verified": False,
+            "errors": errors, "unsupported_search_paths": unsupported_search_paths,
+            "apex": apex, "android_namespace_resolution_verified": False,
             "symbol_versions_verified": False, "apex_activation_verified": False,
             "android_boot_tested": False, "safe_to_flash": False}
 
