@@ -28,6 +28,9 @@ on:
       - src/initramfs/shared-memory-probe.c
       - build/r800_qemu_guest_abi.py
       - build/r800_bionic_compile.sh
+      - build/r800_android_dynamic_audit.py
+      - src/initramfs/bionic-dynamic-probe.c
+      - tests/test_android_dynamic_audit.py
       - build/r800_qemu_abi_probe.py
       - tests/test_qemu_guest_abi.py
   workflow_dispatch:
@@ -45,6 +48,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh -n build/r800_qemu_virt_compile.sh
+          python3 -m unittest discover -s tests -p 'test_android_dynamic_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_system_init.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_user_init.py' -v
@@ -114,6 +118,12 @@ jobs:
             --baseline "$RUNNER_TEMP/virt-boot-evidence.json" \
             --out-dir "$RUNNER_TEMP/virt-bionic-boot" \
             --report "$RUNNER_TEMP/virt-bionic-evidence.json"
+      - name: Build and inspect dynamic Android PIE (no runtime execution)
+        run: |
+          mkdir "$RUNNER_TEMP/virt-dynamic"
+          toolchain="$ANDROID_SDK_ROOT/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$toolchain/aarch64-linux-android30-clang" -std=c11 -Wall -Wextra -Werror -O2 -fPIE -pie -ldl src/initramfs/bionic-dynamic-probe.c -o "$RUNNER_TEMP/virt-dynamic/probe"
+          LC_ALL=C python3 build/r800_android_dynamic_audit.py --probe "$RUNNER_TEMP/virt-dynamic/probe" --readelf "$toolchain/llvm-readelf" --report "$RUNNER_TEMP/virt-dynamic/evidence.json"
       - name: Record source and patch identity
         if: always()
         run: |
@@ -142,5 +152,6 @@ jobs:
             ${{ runner.temp }}/virt-bionic-init/clang-version.txt
             ${{ runner.temp }}/virt-bionic-evidence.json
             ${{ runner.temp }}/virt-bionic-boot/generic-console.log
+            ${{ runner.temp }}/virt-dynamic/evidence.json
           if-no-files-found: warn
           retention-days: 7
