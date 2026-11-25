@@ -22,9 +22,9 @@ CONFIG_NAME = re.compile(r"(?:audio_policy_configuration|audio_policy_volumes|au
 
 def parse_config(raw):
     text = raw.decode("utf-8")
-    # Permit ordinary XML comments while still rejecting DTD/entity declarations.
-    declarations = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    if "<!" in declarations or "\0" in text:
+    # Reject DTD/entity declarations in the original input, including across PIs.
+    # XML comments and CDATA do not enable external or internal entity definitions.
+    if "<!DOCTYPE" in text or "<!ENTITY" in text or "\0" in text:
         raise ValueError("Unsupported audio XML declaration")
     try:
         root = ET.fromstring(text)
