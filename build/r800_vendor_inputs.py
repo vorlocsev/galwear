@@ -13,7 +13,9 @@ from r800_android_linker_audit import inspect
 MAX_IMAGE = 4 * 1024**3
 MAX_LIBRARY = 64 * 1024**2
 OVERLAY = ("etc/init/init.r800.rc", "etc/fstab.r800", "ueventd.rc",
-           "etc/vintf/manifest.xml", "hwcomposer.r800.so", "lights.r800.so")
+           "etc/vintf/manifest.xml", "audio/audio_policy_configuration.xml",
+           "hwcomposer.r800.so", "lights.r800.so", "audio.primary.r800.so",
+           "gps.r800.so", "sensors.r800.so")
 
 
 def checked_file(path, maximum):
