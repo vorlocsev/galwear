@@ -7,6 +7,7 @@ A build tree and an extracted runtime APEX may be separate inputs.
 """
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -132,9 +133,13 @@ def main():
     p.add_argument("--runtime-root", type=Path)
     p.add_argument("--readelf", default="readelf")
     p.add_argument("--report", type=Path, required=True)
+    p.add_argument("--resolved-manifest", type=Path)
     a = p.parse_args()
     try:
         result = graph(a.product_out, a.runtime_root, a.readelf)
+        if a.resolved_manifest is not None:
+            from r800_aosp_artifact_origin import manifest_digest
+            result["resolved_manifest_sha256"] = manifest_digest(a.resolved_manifest)
         rc = 0
     except (OSError, ValueError, subprocess.SubprocessError, RuntimeError) as exc:
         result = {"status": "REJECT", "reason": str(exc), "safe_to_flash": False}
