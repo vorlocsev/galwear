@@ -56,6 +56,59 @@ class SystemBootTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "before startup"):
             a.inspect_console(START + BEATS + a.EXPECTED + BEATS, True)
 
+    def test_critical_diagnostics_rejected_even_after_heartbeats(self):
+        for line in (b"Oops: 96000004", b"Internal error: Oops", b"BUG: soft lockup",
+                     b"watchdog: hard lockup", b"rcu: INFO: rcu_preempt detected stalls",
+                     b"INFO: task init blocked for more than 120 seconds",
+                     b"Unable to handle kernel paging request", b"No working init found"):
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(ValueError, "critical diagnostic"):
+                    a.inspect_console(START + a.EXPECTED + BEATS + line + b"\n", True)
+
+    def test_driver_warning_is_reported_not_hidden(self):
+        warning = b"[ 2.0] driver probe failed with error -22\n"
+        report = a.inspect_console(START + warning + a.EXPECTED + BEATS, True)
+        self.assertEqual(report["warning_count"], 1)
+        self.assertIn("probe failed", report["warning_samples"][0])
+        self.assertFalse(report["critical_diagnostics_detected"])
+
+    def test_live_timing_and_split_lines(self):
+        monitor = a.LiveHeartbeat(0)
+        monitor.feed(a.EXPECTED[:10], 1)
+        monitor.feed(a.EXPECTED[10:], 2)
+        first, second = BEATS.splitlines(keepends=True)
+        monitor.feed(first, 7)
+        monitor.feed(second, 12)
+        report = monitor.evidence(15)
+        self.assertEqual(report["observed_heartbeat_count"], 2)
+        self.assertEqual(report["maximum_observed_gap_seconds"], 5)
+        self.assertEqual(report["last_heartbeat_age_seconds"], 3)
+
+    def test_live_startup_timeout(self):
+        monitor = a.LiveHeartbeat(0)
+        with self.assertRaisesRegex(ValueError, "deadline"):
+            monitor.check(a.STARTUP_LIMIT + 1)
+
+    def test_live_stall_after_two_heartbeats(self):
+        monitor = a.LiveHeartbeat(0)
+        monitor.feed(a.EXPECTED, 2)
+        first, second = BEATS.splitlines(keepends=True)
+        monitor.feed(first, 7)
+        monitor.feed(second, 12)
+        with self.assertRaisesRegex(ValueError, "stalled"):
+            monitor.evidence(12 + a.HEARTBEAT_GAP_LIMIT + 1)
+
+    def test_late_heartbeat_cannot_reset_stall(self):
+        monitor = a.LiveHeartbeat(0)
+        monitor.feed(a.EXPECTED, 1)
+        with self.assertRaisesRegex(ValueError, "gap exceeded"):
+            monitor.feed(BEATS.splitlines(keepends=True)[0], 2 + a.HEARTBEAT_GAP_LIMIT)
+
+    def test_live_fatal_error_is_immediate(self):
+        monitor = a.LiveHeartbeat(0)
+        with self.assertRaisesRegex(ValueError, "critical diagnostic"):
+            monitor.feed(b"BUG: soft lockup\n", 1)
+
     def test_cpio_contains_exact_init(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
