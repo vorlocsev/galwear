@@ -18,6 +18,9 @@ DIRS = ("/lib", "/usr/lib", "/usr/lib/sensor")
 MAX_NODES = 256
 MAX_FILE = 64*1024**2
 MAX_TOTAL = 256*1024**2
+MAX_SYMBOLS = 131072
+MAX_SYMBOL_NAME_BYTES = 16*1024**2
+MAX_SYMBOL_COMPARISONS = 4000000
 
 def resolve_guest(root, guest):
     """Resolve guest absolute symlinks within donor root, never on host."""
@@ -78,11 +81,86 @@ def interpreter(raw):
         raise ValueError("Unexpected Tizen ARM soft-float interpreter")
     return paths[0] if paths else None
 
+def audit_symbols(targets, aliases, objects, edges):
+    """Potential glibc providers within each target's static closure.
+
+    This is not glibc lookup order, LD_PRELOAD, dlopen, or relocation execution.
+    Separate target scopes prevent an unrelated daemon from satisfying imports.
+    """
+    graph = {name: {} for name in objects}
+    for edge in edges:
+        source = aliases.get(edge["from"])
+        provider = aliases.get(edge["provider"])
+        if source in graph:
+            graph[source].setdefault(edge["needed"], set()).add(provider)
+    reports = {}
+    budget = MAX_SYMBOL_COMPARISONS
+    for target in targets:
+        pending = [aliases.get(target)]
+        reached = set()
+        incomplete = False
+        while pending:
+            name = pending.pop()
+            if name in reached:
+                continue
+            reached.add(name)
+            if name not in objects:
+                incomplete = True
+                continue
+            pending.extend(p for group in graph[name].values() for p in group)
+        index = {}
+        missing, weak_missing, ambiguous, unknown = [], [], [], []
+        matched = 0
+        for name in sorted(reached - {None}):
+            info = objects.get(name)
+            if info is None:
+                continue
+            if info["has_dynamic"] and info["dynamic_symbol_count"] is None:
+                incomplete = True
+            for symbol in info["symbol_exports"]:
+                index.setdefault(symbol["name"], []).append((name, symbol))
+        for name in sorted(reached - {None}):
+            info = objects.get(name)
+            if info is None:
+                continue
+            for symbol in info["symbol_imports"]:
+                record = {"from":name, **symbol}
+                allowed = reached
+                if symbol["version_library"] is not None:
+                    allowed = graph[name].get(symbol["version_library"], set())
+                candidates = set()
+                for provider, export in index.get(symbol["name"], ()):
+                    budget -= 1
+                    if budget < 0:
+                        return {"targets":reports,"limit_exceeded":True}
+                    if provider not in allowed or (symbol["type"] == 6) != (export["type"] == 6):
+                        continue
+                    if symbol["version"] is not None:
+                        if symbol["version"] != export["version"]:
+                            continue
+                    elif export["version_hidden"]:
+                        continue
+                    candidates.add(provider)
+                if not candidates:
+                    (unknown if incomplete else weak_missing if symbol["weak"] else missing).append(record)
+                elif len(candidates) > 1:
+                    ambiguous.append({**record,"providers":sorted(candidates)})
+                else:
+                    matched += 1
+        reports[target] = {"matched":matched,"missing_strong":missing,
+                           "missing_weak":weak_missing,"ambiguous":ambiguous,
+                           "incomplete":unknown,"inventory_incomplete":incomplete}
+    return {"targets":reports,"limit_exceeded":False}
+
+
 def audit(root, targets=TARGETS):
     root = root.resolve(strict=True)
+    targets = tuple(targets)
     queue = deque(targets)
     visited, files, edges, problems, aliases = set(), {}, [], [], {}
     total = 0
+    objects = {}
+    symbol_count = symbol_name_bytes = 0
     while queue:
         guest = queue.popleft()
         if guest in visited:
@@ -106,12 +184,23 @@ def audit(root, targets=TARGETS):
             if flags & 0x400:  # EF_ARM_ABI_FLOAT_HARD
                 raise ValueError("Hard-float ARM ELF incompatible with Tizen soft-float contract")
             interp = interpreter(raw)
+            symbols = info["symbol_imports"] + info["symbol_exports"] + info["unsupported_symbols"]
+            symbol_count += len(symbols)
+            symbol_name_bytes += sum(len(s["name"].encode("utf-8","surrogateescape")) for s in symbols)
+            if symbol_count > MAX_SYMBOLS or symbol_name_bytes > MAX_SYMBOL_NAME_BYTES:
+                raise ValueError("Tizen symbol inventory budget exceeded")
+            objects[canonical] = info
+            reloc = info["relocations"]
             if info["custom_search_path"]:
                 problems.append({"path":guest,"reason":"RPATH/RUNPATH requires review"})
             files[canonical] = {"bytes":len(raw), "sha256":hashlib.sha256(raw).hexdigest(),
                                 "needed":info["needed"], "interpreter":interp,
                                 "elf_type":info["elf_type"], "has_dynamic":info["has_dynamic"],
                                 "soname":info["soname"], "arm_flags":flags,
+                                "dynamic_symbol_count":info["dynamic_symbol_count"],
+                                "tls_segment":info["tls_segment"],
+                                "tls_symbol_count":info["tls_symbol_count"],
+                                "relocations":reloc,
                                 "version_needs":info["version_needs"],
                                 "version_definitions":info["version_definitions"]}
             for need in info["version_needs"]:
@@ -172,7 +261,16 @@ def audit(root, targets=TARGETS):
                 issue = {"path":edge["from"],"needed":edge["needed"],
                          "version":need["version"],"reason":"VERSION_NOT_PROVIDED"}
                 (weak_missing if need["weak"] else problems).append(issue)
+    symbol_report = audit_symbols(targets, aliases, objects, edges)
+    # A static scope may omit executable exports from dlopen callers.
+    # Report rather than claim that these are definitive runtime failures.
+    relocation_review = sorted(name for name, info in objects.items()
+        if info["unsupported_symbols"] or info["relocations"]["unsupported_types"]
+        or info["relocations"]["packed_tags"] or info["relocations"]["nonwritable_targets"]
+        or not info["relocations"]["symbol_indices_checked"]
+        or not info["relocations"]["tls_symbol_types_checked"])
     return {"status":"TIZEN_DEPENDENCY_REVIEW_REQUIRED" if problems else "TIZEN_STATIC_CLOSURE_ONLY",
+            "symbol_candidates":symbol_report,"relocation_review_objects":relocation_review,
             "files":files,"edges":edges,"problems":problems,"aliases":aliases,
             "version_records_checked":versions_checked,"weak_versions_missing":weak_missing,
             "dlopen_plugins_verified":False,"symbol_resolution_verified":False,
