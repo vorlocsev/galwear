@@ -1,0 +1,17 @@
+# Experimental generic-virt property client. Not production watch policy.
+type galwear_property_client, domain, coredomain;
+type galwear_property_client_exec, exec_type, file_type, system_file_type;
+
+init_daemon_domain(galwear_property_client)
+
+system_internal_prop(galwear_fixture_prop)
+system_internal_prop(galwear_denied_prop)
+system_internal_prop(galwear_protocol_prop)
+
+set_prop(galwear_property_client, galwear_fixture_prop)
+get_prop(galwear_property_client, galwear_denied_prop)
+get_prop(galwear_property_client, galwear_protocol_prop)
+
+# Keep the negative control writable by init, but never by this client.
+neverallow galwear_property_client galwear_denied_prop:property_service set;
+neverallow galwear_property_client galwear_protocol_prop:property_service set;
