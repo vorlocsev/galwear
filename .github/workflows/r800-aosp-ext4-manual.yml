@@ -39,7 +39,7 @@ jobs:
           test -f "$BLOCK_BUNDLE/block-baseline.json"
           test -f "$BLOCK_BUNDLE/virt-config-evidence.json"
           test -f "$LIBRARY_CHOICES"
-          for tool in repo git python3 aarch64-linux-gnu-gcc qemu-system-aarch64 mke2fs e2fsck debugfs matchpathcon readelf; do
+          for tool in repo git python3 aarch64-linux-gnu-gcc qemu-system-aarch64 mke2fs e2fsck debugfs matchpathcon readelf seinfo sesearch; do
             command -v "$tool" >/dev/null
           done
           EVIDENCE_ROOT="$RUNNER_TEMP/galwear-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
