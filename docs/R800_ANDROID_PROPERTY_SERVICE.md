@@ -798,3 +798,47 @@ the new suite are wired into lightweight CI. The repository-wide suite
 has not been executed in the current environment. GitHub cloning
 failed DNS resolution and the public Actions API was inaccessible.
 No kernel, QEMU, AOSP or hardware acceptance is inferred.
+
+
+## Host filesystem tool compatibility audit (2026-11-25)
+
+Android 11's canned_fs_config.cpp (AOSP android-11.0.0_r48) and
+the Android 11-derived e2fsdroid/perms.c sources confirm that -C
+selects a canned permission table; otherwise the default Android
+fs_config may override mode, UID, GID and file capabilities. The
+root key is represented by "/ " because e2fsdroid passes an empty
+path for the filesystem root and the canned parser strips a leading
+slash. All diagnostic partition builders now generate a bounded
+canned table with exact staged permission bits, UID/GID zero and
+capabilities=0. This deliberately is NOT production Android DAC
+metadata. The selected-inode inspector requires exact mode and
+ownership, rejects file capabilities, and still verifies the NUL-
+terminated security.selinux bytes and the payload digest. The
+generated table hash is recorded. e2fsdroid handles lost+found
+separately; this remains a selected-inode audit.
+
+The Android 11-derived e2fsdroid source confirms -e raw input, -S
+context paths, -T timestamps, -a guest mountpoint, -f input tree,
+and NUL-terminated label xattrs. The host matchpathcon source
+confirms -N/-n/-f/-m mode lookup. debugfs ea_get -f writes raw bytes,
+and stat reports the mode, owner, and fast-link destination.
+Exact source-built e2fsdroid behavior still needs execution.
+
+The new real host-tool tests create a synthetic disposable EXT4
+image, write a test inode and label via debugfs, and exercise the
+production read-only inspector. They check mismatched labels, mode
+and UID, unchanged image hashes on readback, and matchpathcon
+file-type selection. CI installs selinux-utils and e2fsprogs.
+Neither tool suite is installed in the current execution container;
+no real host-tool test or CI success is claimed.
+
+An additional kernel-source blocker is now explicit: pinned
+security/selinux/hooks.c at 50db73fc799f20a7120a8b5f653b16cc123d856f
+checks nosuid/NNP during a domain-changing exec. An unapproved
+transition can fall back to the old SID. Read-only executable mounts
+currently retain nosuid. The next acceptance audit must inspect
+compiled policy capability nnp_nosuid_transition, process2
+nosuid_transition permissions and any applicable type bounds for
+kernel->init and init->galwear_property_client. Source declarations
+alone do not prove these permissions. Do not relax flags or policy
+to manufacture a successful transition.
