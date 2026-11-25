@@ -21,7 +21,7 @@ TIMEOUT = 90
 MAX_LOG = 8 * 1024 * 1024
 STARTUP_LIMIT = 60.0
 HEARTBEAT_GAP_LIMIT = 15.0
-FATAL = re.compile(rb'Kernel panic|Attempted to kill init|Failed to execute /init|\bOops:|Internal error:|BUG:|Unable to handle kernel|soft lockup|hard lockup|RCU.*stall|rcu:.*stalls|blocked for more than|No working init found|Initramfs unpacking failed|invalid magic at start of compressed archive|Synchronous Abort', re.I)
+FATAL = re.compile(rb'Kernel panic|Attempted to kill init|Failed to execute /init|\bOops:|Internal error:|BUG:|Unable to handle kernel|soft lockup|hard lockup|RCU.*stall|rcu:.*stalls|blocked for more than|No working init found|Initramfs unpacking failed|invalid magic at start of compressed archive|Synchronous Abort|r800-virt-disk: FAIL|r800-disk-label: FAIL', re.I)
 WARNING = re.compile(rb'WARNING:|\bWARN(?:ING)?\b|probe.*fail|failed to probe|deferred probe|failed to initialize|initcall.*returned -[0-9]+', re.I)
 
 
