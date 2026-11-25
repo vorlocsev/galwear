@@ -206,6 +206,51 @@ def symbol_inventory(tags, data, loads, cls, strings, result):
         name = struct.unpack_from("<I", data, pos + i * entry_size)[0]
         if name >= len(strings) or strings.find(b"\0", name, min(len(strings), name + 4096)) < 0:
             raise ValueError("Invalid dynamic symbol name")
+    need_by_index = {v["index"]: v for v in result["version_needs"]}
+    def_by_index = {v["index"]: v for v in result["version_definitions"]}
+    imports, exports, unsupported = [], [], []
+    name_bytes = 0
+    for i in range(1, count):
+        entry = struct.unpack_from(fmt, data, pos + i * entry_size)
+        if cls == 2:
+            name, info, other, section, _, _ = entry
+        else:
+            name, _, _, info, other, section = entry
+        binding, typ, visibility = info >> 4, info & 15, other & 3
+        if binding == 0:
+            continue
+        end = strings.find(b"\0", name, min(len(strings), name + 4096))
+        if end == name:
+            # Unnamed nonlocal symbols cannot be matched by name.
+            continue
+        raw_version = vers[i] if vers is not None else 1
+        index = raw_version & 0x7fff
+        requirement = need_by_index.get(index)
+        definition = def_by_index.get(index)
+        name_bytes += end - name
+        if len(imports) + len(exports) + len(unsupported) >= 32768 or name_bytes > 4 * 1024 * 1024:
+            raise ValueError("Symbol inventory exceeds reporting limit")
+        record = {"name": strings[name:end].decode("utf-8", "surrogateescape"),
+                  "index": i, "binding": binding, "type": typ,
+                  "visibility": visibility, "weak": binding == 2,
+                  "version": (requirement or definition or {}).get("version"),
+                  "version_library": (requirement or {}).get("library"),
+                  "version_hidden": bool(raw_version & 0x8000)}
+        if binding not in (1, 2) or section == 0xffff:
+            unsupported.append({**record, "reason": "binding_or_extended_section"})
+        elif section == 0:
+            if visibility in (1, 2, 3) or index == 0 or definition is not None:
+                unsupported.append({**record, "reason": "nonstandard_undefined_symbol"})
+            else:
+                imports.append(record)
+        elif visibility in (0, 3) and index != 0:
+            if requirement is not None:
+                unsupported.append({**record, "reason": "defined_symbol_with_version_requirement"})
+            else:
+                exports.append(record)
+    result["symbol_imports"] = imports
+    result["symbol_exports"] = exports
+    result["unsupported_symbols"] = unsupported
     if gnu is not None:
         first, buckets, bloom, bits, shift, chains = gnu
         for i, (bucket, value) in enumerate(chains, first):
@@ -266,7 +311,8 @@ def inspect(data: bytes) -> dict:
               "elf_type": "ET_DYN" if etype == 3 else "ET_EXEC", "soname": None,
               "version_needs": [], "version_definitions": [], "versym_present": False,
               "dynamic_symbol_count": None, "symbol_table_status": "NOT_PRESENT",
-              "versym_indices_checked": False}
+              "versym_indices_checked": False, "symbol_imports": [],
+              "symbol_exports": [], "unsupported_symbols": []}
     if dynamic is None:
         return result
     off, size = dynamic
@@ -331,6 +377,9 @@ def audit(root: Path, targets=TARGETS) -> dict:
     seen, errors, unresolved, ambiguous = {}, [], [], []
     unsupported_search_paths, soname_mismatches = [], []
     version_mismatches, unbound_version_needs = [], []
+    unsupported_symbol_objects = []
+    inventory_records = 0
+    inventory_name_bytes = 0
     while queue:
         name = queue.pop(0)
         if name in seen:
@@ -344,7 +393,15 @@ def audit(root: Path, targets=TARGETS) -> dict:
         except (OSError, ValueError) as exc:
             errors.append(name + ": " + str(exc))
             continue
+        symbols = info["symbol_imports"] + info["symbol_exports"] + info["unsupported_symbols"]
+        inventory_records += len(symbols)
+        inventory_name_bytes += sum(len(v["name"].encode("utf-8", "surrogateescape")) for v in symbols)
+        if inventory_records > 131072 or inventory_name_bytes > 16 * 1024 * 1024:
+            errors.append("Aggregate symbol inventory exceeds reporting limit")
+            break
         seen[name] = info
+        if info["unsupported_symbols"]:
+            unsupported_symbol_objects.append(name)
         if info["custom_search_path"]:
             unsupported_search_paths.append(name)
         for requirement in info["version_needs"]:
@@ -388,11 +445,13 @@ def audit(root: Path, targets=TARGETS) -> dict:
             present = False
         apex[name] = {"expanded_tree_present": present}
     return {"schema": "galwear-r800-linker-inventory-v1",
-            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs) else "REVIEW_REQUIRED",
+            "status": "CANDIDATES_FOUND_ONLY" if not (errors or unresolved or ambiguous or unsupported_search_paths or soname_mismatches or version_mismatches or unbound_version_needs or unsupported_symbol_objects) else "REVIEW_REQUIRED",
             "objects": seen, "missing_candidates": unresolved, "ambiguous_candidates": ambiguous,
             "errors": errors, "unsupported_search_paths": unsupported_search_paths,
             "soname_mismatches": soname_mismatches,
             "version_mismatches": version_mismatches, "unbound_version_needs": unbound_version_needs,
+            "unsupported_symbol_objects": unsupported_symbol_objects,
+            "symbol_resolution_verified": False,
             "apex": apex, "android_namespace_resolution_verified": False,
             "symbol_versions_verified": False, "apex_activation_verified": False,
             "android_boot_tested": False, "safe_to_flash": False}
