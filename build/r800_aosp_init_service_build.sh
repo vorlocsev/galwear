@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Compile original Android init and an experimental libinit harness, never run them on host.
 set -euo pipefail
-[[ $# == 2 ]] || { echo "usage: $0 <synced-aosp-root> <new-output-dir>" >&2; exit 2; }
+[[ $# == 2 || $# == 3 ]] || { echo "usage: $0 <synced-aosp-root> <new-output-dir> [extracted-runtime-root]" >&2; exit 2; }
 TOOLS=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(realpath "$1")
 OUT=$(realpath -m "$2")
+RUNTIME=""
+if [[ $# == 3 ]]; then RUNTIME=$(realpath "$3"); test -d "$RUNTIME"; fi
 test ! -e "$OUT"
 [[ "$OUT" != "$ROOT" && "$OUT" != "$ROOT/"* ]]
 cd "$ROOT"
@@ -46,6 +48,11 @@ m -j4 init_second_stage galwear_property_service galwear_property_client
 PRODUCT_OUT=$(get_build_var PRODUCT_OUT)
 set -u
 python3 "$TOOLS/r800_android_init_inventory.py" --product-out "$PRODUCT_OUT" --report "$OUT/init-inventory.json"
+if [[ -n "$RUNTIME" ]]; then
+    python3 "$TOOLS/r800_android_init_dependencies.py" --product-out "$PRODUCT_OUT" --runtime-root "$RUNTIME" --report "$OUT/init-dependencies.json"
+else
+    python3 "$TOOLS/r800_android_init_dependencies.py" --product-out "$PRODUCT_OUT" --report "$OUT/init-dependencies.json"
+fi
 git -C system/core rev-parse HEAD > "$OUT/system-core-commit.txt"
 sha256sum system/core/init/property_service.cpp system/core/init/property_service.h \
     system/core/init/Android.bp "$OVERLAY/Android.bp" "$OVERLAY/property-service-harness.cpp" \
