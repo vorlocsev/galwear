@@ -77,6 +77,35 @@ def version_fixture(abi="arm64", need=None, define=None, malformed=None):
     return data
 
 
+def symbol_fixture(abi="arm64", malformed=None):
+    data = fixture(abi)
+    data.extend(b"\0" * 512)
+    wide = abi == "arm64"
+    strings = b"\0symbol\0"
+    data[400:400 + len(strings)] = strings
+    entsize = 24 if wide else 16
+    tags = [(5, 0x1000 + 400), (10, len(strings)),
+            (audit.DT_SYMTAB, 0x1000 + 600),
+            (audit.DT_SYMENT, entsize if malformed != "entry" else 1),
+            (audit.DT_HASH, 0x1000 + 800),
+            (audit.DT_VERSYM, 0x1000 + 900), (0, 0)]
+    fmt = "<qQ" if wide else "<iI"
+    size = len(tags) * struct.calcsize(fmt)
+    for i, pair in enumerate(tags):
+        struct.pack_into(fmt, data, 224 + i * struct.calcsize(fmt), *pair)
+    struct.pack_into("<I", data, 600 + entsize, 99 if malformed == "name" else 1)
+    struct.pack_into("<IIIII", data, 800, 1, 2, 2 if malformed == "bucket" else 1,
+                     0, 1 if malformed == "cycle" else 0)
+    struct.pack_into("<HH", data, 900, 0, 3 if malformed == "version" else 1)
+    if wide:
+        struct.pack_into("<QQ", data, 96, len(data), len(data))
+        struct.pack_into("<QQ", data, 152, size, size)
+    else:
+        struct.pack_into("<II", data, 68, len(data), len(data))
+        struct.pack_into("<II", data, 100, size, size)
+    return data
+
+
 class LinkerTests(unittest.TestCase):
     def setUp(self):
         t = tempfile.TemporaryDirectory()
@@ -251,6 +280,34 @@ class LinkerTests(unittest.TestCase):
         self.assertEqual(out["status"], "REVIEW_REQUIRED")
         self.assertEqual(out["version_mismatches"][0]["version"], "VER_1")
         self.assertFalse(out["safe_to_flash"])
+
+    def test_sysv_symbol_table_both_abis(self):
+        for abi in ("arm", "arm64"):
+            with self.subTest(abi=abi):
+                result = audit.inspect(symbol_fixture(abi))
+                self.assertEqual(result["dynamic_symbol_count"], 2)
+                self.assertEqual(result["symbol_table_status"], "SYSV_STRUCTURE_CHECKED")
+                self.assertTrue(result["versym_indices_checked"])
+
+    def test_sysv_bad_entry_size(self):
+        with self.assertRaisesRegex(ValueError, "DT_SYMENT"):
+            audit.inspect(symbol_fixture(malformed="entry"))
+
+    def test_sysv_bad_bucket(self):
+        with self.assertRaisesRegex(ValueError, "hash index"):
+            audit.inspect(symbol_fixture(malformed="bucket"))
+
+    def test_sysv_cyclic_chain(self):
+        with self.assertRaisesRegex(ValueError, "Cyclic"):
+            audit.inspect(symbol_fixture(malformed="cycle"))
+
+    def test_dynamic_symbol_bad_name(self):
+        with self.assertRaisesRegex(ValueError, "symbol name"):
+            audit.inspect(symbol_fixture(malformed="name"))
+
+    def test_unknown_versym_index(self):
+        with self.assertRaisesRegex(ValueError, "unknown version index"):
+            audit.inspect(symbol_fixture(malformed="version"))
 
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
