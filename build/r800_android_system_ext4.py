@@ -93,10 +93,12 @@ def materialize(tree, entries):
             path.symlink_to(target)
 
 
-def inspect_inode(image, name, item, expected, scratch, debugfs):
+def inspect_inode(image, name, item, expected, scratch, debugfs, partition="system"):
     mode, data, _, _ = item
     kind = mode & 0o170000
-    rel = name[len("system"):] or "/"
+    if name != partition and not name.startswith(partition + "/"):
+        raise ValueError("Inode outside selected partition")
+    rel = name[len(partition):] or "/"
     info = invoke([debugfs, "-R", "stat "+rel, image]).stdout.decode("utf-8")
     if not re.search(r"^Inode:\s+\d+\s+Type:\s+"+MODES[kind][0]+r"\b", info, re.M):
         raise ValueError("Unexpected inode type: "+name)
