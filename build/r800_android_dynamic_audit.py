@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -26,7 +27,8 @@ def inspect_elf(path: Path, readelf: str = "readelf") -> dict:
     if data[:6] != b"\x7fELF\x02\x01" or int.from_bytes(data[18:20], "little") != 183:
         raise ValueError("Expected little-endian AArch64 ELF")
     info = subprocess.run([readelf, "-W", "-h", "-l", "-d", str(path)],
-                          capture_output=True, text=True, check=True, timeout=15)
+                          capture_output=True, text=True, check=True, timeout=15,
+                          env={**os.environ, "LC_ALL": "C"})
     if info.stderr:
         raise ValueError("ELF inspection diagnostic: " + info.stderr[:300])
     text = info.stdout
@@ -61,7 +63,7 @@ def runtime_file(root: Path, relative: str) -> Path:
     return path
 
 
-def inventory(probe: Path, root: Path, readelf: str) -> dict:
+def inventory(probe: Path, root: Path | None, readelf: str) -> dict:
     info = inspect_elf(probe, readelf)
     validate_probe(info)
     result = {"status": "DYNAMIC_PROBE_STATIC_ONLY", "probe": info,
@@ -90,6 +92,9 @@ def inventory(probe: Path, root: Path, readelf: str) -> dict:
             "linker64": linker, "libraries": libraries,
             "runtime_authenticity_verified": False,
             "runtime_stub_exclusion_proven": False,
+            "planned_guest_paths": {INTERP: "/" + RUNTIME + "/bin/linker64",
+                                    **{"/" + RUNTIME + "/lib64/bionic/" + name: lib["sha256"]
+                                       for name, lib in sorted(libraries.items())}},
             "linkerconfig_required_for_full_android": True}
 
 
