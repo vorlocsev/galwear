@@ -6,9 +6,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"build"))
 from r800_extract_ext4 import extract, HCD
+import r800_extract_ext4 as extractor
 
 
 @unittest.skipUnless(shutil.which("debugfs") and shutil.which("mkfs.ext4"), "e2fsprogs unavailable")
@@ -75,6 +77,54 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.make_image()
         with self.assertRaisesRegex(ValueError,"SHA-256"):
             extract(self.image, self.output, "tizen", "0"*64)
+
+    def test_debugfs_uses_verified_private_snapshot(self):
+        self.put("lib/libc-2.24.so", b"synthetic libc")
+        sha = self.make_image()
+        real_command = extractor.command
+        paths = set()
+
+        def observe(tool, image, request, cwd=None):
+            self.assertNotEqual(image, self.image)
+            self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(), sha)
+            paths.add(image)
+            return real_command(tool, image, request, cwd=cwd)
+
+        with mock.patch.object(extractor, "command", side_effect=observe):
+            result = extract(self.image, self.output, "tizen", sha)
+        self.assertEqual(len(paths), 1)
+        self.assertFalse(next(iter(paths)).exists())
+        self.assertTrue(result["snapshot_verified"])
+        self.assertEqual((self.output/"tizen/libc.so.6").read_bytes(), b"synthetic libc")
+
+    def test_donor_changed_after_snapshot_rejected(self):
+        self.put("lib/libc-2.24.so", b"synthetic libc")
+        sha = self.make_image()
+        real_command = extractor.command
+        changed = False
+
+        def mutate(tool, image, request, cwd=None):
+            nonlocal changed
+            if not changed:
+                with self.image.open("r+b") as stream:
+                    stream.seek(0)
+                    stream.write(b"changed")
+                changed = True
+            return real_command(tool, image, request, cwd=cwd)
+
+        with mock.patch.object(extractor, "command", side_effect=mutate):
+            with self.assertRaisesRegex(ValueError, "Donor image changed"):
+                extract(self.image, self.output, "tizen", sha)
+        self.assertTrue(changed)
+        self.assertFalse(self.output.exists())
+
+    def test_donor_symlink_rejected(self):
+        sha = self.make_image()
+        link = self.root/"donor-link.img"
+        link.symlink_to(self.image)
+        with self.assertRaisesRegex(ValueError, "regular donor image"):
+            extract(link, self.output, "tizen", sha)
+        self.assertFalse(self.output.exists())
 
 if __name__=="__main__":
     unittest.main()
