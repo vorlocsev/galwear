@@ -1701,6 +1701,74 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["art_launch"]["system_server_started"])
         self.assertFalse(out["safe_to_flash"])
 
+    def binder_fixture(self):
+        self.art_launch_fixture()
+        rc = b"service zygote /system/bin/app_process32 --zygote --start-system-server\n"
+        for name, path in audit.r800_binder_inventory.SERVICES.items():
+            rc += ("service " + name + " " + path + "\n    class core\n").encode()
+            self.put_art_executable(path)
+        rc += b"on init\n    start servicemanager\n    export SYSTEMSERVERCLASSPATH /system/framework/services.jar\n"
+        self.put("init.rc", rc)
+        self.put("system/framework/services.jar", jar_fixture({"classes.dex": dex_fixture()}))
+        self.put("ueventd.rc", b"/dev/binder 0666 root root\n/dev/hwbinder 0666 root root\n")
+        return {"CONFIG_ANDROID_BINDER_IPC": "y", "CONFIG_COMPAT": "y",
+                "CONFIG_ANDROID_BINDER_DEVICES": '"binder,hwbinder,vndbinder"'}
+
+    def inspect_binder(self, kernel=None):
+        init = audit.r800_init_inventory.audit(self.root)
+        art = audit.r800_art_inventory.audit(self.root, init)
+        launch = audit.r800_art_launch.audit(self.root, init, audit.r800_art_precompiled.audit(self.root))
+        return audit.r800_binder_inventory.audit(self.root, init, art, launch, kernel)
+
+    def test_binder_static_manager_inventory(self):
+        config = self.binder_fixture()
+        out = self.inspect_binder(config)
+        self.assertEqual(out["status"], "STATIC_BINDER_INVENTORY_ONLY")
+        self.assertEqual(len(out["managers"]), 3)
+        self.assertEqual(len(out["ueventd_rules"]), 2)
+        self.assertEqual(out["init_commands"][0]["args"], ["servicemanager"])
+        self.assertFalse(out["binder_transaction_verified"])
+
+    def test_binder_missing_kernel_evidence(self):
+        self.binder_fixture()
+        out = self.inspect_binder()
+        self.assertEqual(out["kernel"]["status"], "NOT_PROVIDED")
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_binder_incomplete_kernel_config(self):
+        config = self.binder_fixture()
+        config["CONFIG_ANDROID_BINDER_DEVICES"] = '"binder"'
+        out = self.inspect_binder(config)
+        self.assertIn("CONFIG_ANDROID_BINDER_DEVICES", out["kernel"]["missing"])
+
+    def test_binder_regular_file_is_not_device(self):
+        config = self.binder_fixture()
+        self.put("dev/binder", b"fake")
+        out = self.inspect_binder(config)
+        self.assertFalse(out["device_nodes"]["binder"]["character_device_present"])
+        self.assertTrue(any("not a character device" in e for e in out["errors"]))
+
+    def test_binder_unresolved_ueventd_import(self):
+        config = self.binder_fixture()
+        self.put("ueventd.rc", b"import /vendor/ueventd.rc\n/dev/binder 9999 root root\n")
+        out = self.inspect_binder(config)
+        self.assertEqual(len(out["unresolved_ueventd_imports"]), 1)
+        self.assertTrue(any("malformed Binder permission" in e for e in out["errors"]))
+
+    def test_binder_systemserver_missing_jar(self):
+        config = self.binder_fixture()
+        (self.root / "system/framework/services.jar").unlink()
+        out = self.inspect_binder(config)
+        self.assertEqual(out["system_server"]["missing_or_unverified"], ["/system/framework/services.jar"])
+        self.assertFalse(out["system_server_started"])
+
+    def test_binder_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["binder_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["binder_inventory"]["service_registration_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
