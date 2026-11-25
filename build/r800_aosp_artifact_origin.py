@@ -43,7 +43,6 @@ def manifest_digest(path):
 
 
 def selected(layout, graph, runtime):
-    from r800_android_init_rootfs import HASH
     if layout.get("status")!="INIT_EXPERIMENTAL_ROOTFS_STAGED_ONLY":
         raise ValueError("Staged rootfs required")
     files=layout["files"]
@@ -57,7 +56,7 @@ def selected(layout, graph, runtime):
                             or origin=="runtime" and APEX.fullmatch(rel)):
             raise ValueError("Non-installed or unsupported ELF source: "+source)
         node=graph["nodes"][source]
-        if (not HASH.fullmatch(entry["sha256"]) or type(entry["size_bytes"]) is not int
+        if (not HEX.fullmatch(entry["sha256"]) or type(entry["size_bytes"]) is not int
                 or not 0<entry["size_bytes"]<=32*1024*1024
                 or any(node[field]!=entry[field] for field in ("sha256","size_bytes"))):
             raise ValueError("Selected ELF differs from recorded build graph: "+source)
