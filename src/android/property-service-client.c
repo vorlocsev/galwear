@@ -2,6 +2,10 @@
  * Bionic public client API; original libinit property service required.
  */
 #include <fcntl.h>
+#include <dlfcn.h>
+#include <math.h>
+#include <pthread.h>
+#include <stdlib.h>
 #include <errno.h>
 #include <stdint.h>
 #include <sys/socket.h>
@@ -88,6 +92,104 @@ static int correct_domain(void)
     return n == (ssize_t)(sizeof(expected)-1) && !memcmp(buf, expected, (size_t)n);
 }
 
+/* Bounded functional checks in the disposable guest only. */
+static int memory_probe(void)
+{
+    unsigned char *p = calloc(64, 1);
+    if (!p) return 1;
+    for (size_t i = 0; i < 64; ++i) {
+        if (p[i] != 0) {
+            free(p);
+            return 1;
+        }
+        p[i] = (unsigned char)(i ^ 0x5a);
+    }
+    unsigned char *q = realloc(p, 128);
+    if (!q) {
+        free(p);
+        return 1;
+    }
+    int failed = 0;
+    for (size_t i = 0; i < 64; ++i)
+        if (q[i] != (unsigned char)(i ^ 0x5a)) failed = 1;
+    memset(q + 64, 0xa5, 64);
+    for (size_t i = 64; i < 128; ++i)
+        if (q[i] != 0xa5) failed = 1;
+    free(q);
+    return failed;
+}
+
+struct thread_probe {
+    pthread_key_t key;
+    int child_value;
+    int failed;
+};
+
+static void *thread_worker(void *arg)
+{
+    struct thread_probe *p = arg;
+    p->failed = pthread_getspecific(p->key) != NULL ||
+                pthread_setspecific(p->key, &p->child_value) != 0 ||
+                pthread_getspecific(p->key) != &p->child_value;
+    errno = EDOM;
+    if (errno != EDOM) p->failed = 1;
+    return arg;
+}
+
+static int tls_probe(void)
+{
+    int parent = 17;
+    struct thread_probe p = {.child_value = 29, .failed = 1};
+    pthread_t thread;
+    void *result = NULL;
+    if (pthread_key_create(&p.key, NULL)) return 1;
+    if (pthread_setspecific(p.key, &parent)) {
+        pthread_key_delete(p.key);
+        return 1;
+    }
+    if (pthread_create(&thread, NULL, thread_worker, &p)) {
+        pthread_key_delete(p.key);
+        return 1;
+    }
+    errno = ERANGE;
+    if (pthread_join(thread, &result)) {
+        /* Do not return with a potentially live worker referencing this stack. */
+        _exit(22);
+    }
+    int failed = errno != ERANGE || result != &p || p.failed ||
+                 pthread_getspecific(p.key) != &parent || parent != 17;
+    return pthread_key_delete(p.key) || failed;
+}
+
+static int linker_probe(void)
+{
+    /* Explicit libm dependency, with a second call through libdl. */
+    double (*volatile direct_sqrt)(double) = sqrt;
+    if (direct_sqrt(81.0) != 9.0) return 1;
+    void *handle = dlopen("libm.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!handle) return 1;
+    dlerror();
+    void *symbol = dlsym(handle, "sqrt");
+    const char *error = dlerror();
+    int failed = error != NULL || symbol == NULL;
+    if (!failed) {
+        double (*fn)(double) = (double (*)(double))symbol;
+        Dl_info info = {0};
+        if (fn(144.0) != 12.0 || !dladdr(symbol, &info) || !info.dli_fname ||
+            (strcmp(info.dli_fname, "/system/lib64/bootstrap/libm.so") &&
+             strcmp(info.dli_fname, "/system/lib64/libm.so") &&
+             strcmp(info.dli_fname, "/apex/com.android.runtime/lib64/bionic/libm.so"))) {
+            failed = 1;
+        } else {
+            printf("r800-bionic: libm-provider=%s\n", info.dli_fname);
+        }
+    }
+    dlerror();
+    void *missing = dlsym(handle, "galwear_missing_symbol_20261125");
+    if (missing != NULL || dlerror() == NULL) failed = 1;
+    return dlclose(handle) || failed;
+}
+
 int main(int argc, char **argv)
 {
     const char *name = "debug.galwear.service";
@@ -112,6 +214,12 @@ int main(int argc, char **argv)
         fflush(stderr);
     }
     puts("r800-property-client: domain=u:r:galwear_property_client:s0 protocol=2");
+    if (memory_probe()) return 20;
+    puts("r800-bionic: memory=PASS");
+    if (tls_probe()) return 21;
+    puts("r800-bionic: pthread-tls=PASS");
+    if (linker_probe()) return 23;
+    puts("r800-bionic: libdl-libm=PASS missing-symbol=PASS");
     if (__system_property_find(name) ||
         __system_property_set(name, "ready") ||
         check(name, "ready", &initial))
