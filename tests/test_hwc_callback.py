@@ -93,7 +93,7 @@ int main(void)
     def test_dispatch_pins_registration_and_releases_it(self):
         source = SOURCE.read_text()
         loop = source[source.index("static void *vsync_loop("):
-                      source.index("static int r800_event_control(")]
+                      source.index("static int r800_set_vsync_irq_locked(")]
         self.assertLess(loop.index("r800_callback_acquire(h, epoch)"),
                         loop.index("procs->vsync(procs, 0, ts)"))
         self.assertLess(loop.index("procs->vsync(procs, 0, ts)"),
