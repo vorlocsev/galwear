@@ -132,30 +132,68 @@ def symbol_inventory(tags, data, loads, cls, strings, result):
     if single(DT_SYMENT) != entry_size:
         raise ValueError("Invalid DT_SYMENT")
     offset(symaddr, entry_size)
-    if DT_HASH not in tags:
+    if DT_HASH not in tags and DT_GNU_HASH not in tags:
         result["symbol_table_status"] = "COUNT_NOT_AVAILABLE"
         return
-    addr = single(DT_HASH)
-    buckets, count = struct.unpack_from("<II", data, offset(addr, 8))
-    if not 1 <= buckets <= MAX_DYNAMIC_SYMBOLS or not 1 <= count <= MAX_DYNAMIC_SYMBOLS:
-        raise ValueError("Invalid SYSV hash dimensions")
-    pos = offset(addr, 8 + 4 * (buckets + count))
-    indices = struct.unpack_from("<" + str(buckets + count) + "I", data, pos + 8)
-    if any(i >= count for i in indices):
-        raise ValueError("SYSV hash index out of bounds")
-    if indices[buckets] != 0:
-        raise ValueError("Nonzero SYSV chain zero entry")
-    # Each chain node is traversed at most once globally.
-    complete = {0}
-    for start in indices[:buckets]:
-        visiting = set()
-        i = start
-        while i not in complete:
-            if i in visiting:
-                raise ValueError("Cyclic SYSV hash chain")
-            visiting.add(i)
-            i = indices[buckets + i]
-        complete.update(visiting)
+    count = None
+    if DT_HASH in tags:
+        addr = single(DT_HASH)
+        buckets, count = struct.unpack_from("<II", data, offset(addr, 8))
+        if not 1 <= buckets <= MAX_DYNAMIC_SYMBOLS or not 1 <= count <= MAX_DYNAMIC_SYMBOLS:
+            raise ValueError("Invalid SYSV hash dimensions")
+        pos = offset(addr, 8 + 4 * (buckets + count))
+        indices = struct.unpack_from("<" + str(buckets + count) + "I", data, pos + 8)
+        if any(i >= count for i in indices):
+            raise ValueError("SYSV hash index out of bounds")
+        if indices[buckets] != 0:
+            raise ValueError("Nonzero SYSV chain zero entry")
+        # Each chain node is traversed at most once globally.
+        complete = {0}
+        for start in indices[:buckets]:
+            visiting = set()
+            i = start
+            while i not in complete:
+                if i in visiting:
+                    raise ValueError("Cyclic SYSV hash chain")
+                visiting.add(i)
+                i = indices[buckets + i]
+            complete.update(visiting)
+    gnu = None
+    if DT_GNU_HASH in tags:
+        addr = single(DT_GNU_HASH)
+        buckets, first, bloom_size, shift = struct.unpack_from("<IIII", data, offset(addr, 16))
+        if (not 1 <= buckets <= MAX_DYNAMIC_SYMBOLS or
+                not 1 <= first <= MAX_DYNAMIC_SYMBOLS or
+                not 1 <= bloom_size <= MAX_DYNAMIC_SYMBOLS or
+                bloom_size & (bloom_size - 1) or shift >= 32):
+            raise ValueError("Invalid GNU hash dimensions")
+        word = 8 if cls == 2 else 4
+        bits = word * 8
+        header_size = 16 + bloom_size * word + buckets * 4
+        pos = offset(addr, header_size)
+        bloom = struct.unpack_from("<" + str(bloom_size) + ("Q" if cls == 2 else "I"), data, pos + 16)
+        heads = struct.unpack_from("<" + str(buckets) + "I", data, pos + 16 + bloom_size * word)
+        starts = sorted((head, bucket) for bucket, head in enumerate(heads) if head)
+        chains = []
+        expected = first
+        for head, bucket in starts:
+            if head != expected or head >= MAX_DYNAMIC_SYMBOLS:
+                raise ValueError("Overlapping or noncontiguous GNU hash buckets")
+            while True:
+                if expected >= MAX_DYNAMIC_SYMBOLS:
+                    raise ValueError("GNU hash chain exceeds inspection limit")
+                entry_addr = addr + header_size + 4 * (expected - first)
+                value, = struct.unpack_from("<I", data, offset(entry_addr, 4))
+                chains.append((bucket, value))
+                expected += 1
+                if value & 1:
+                    break
+        if chains:
+            offset(addr, header_size + 4 * len(chains))
+        if count is not None and count != expected:
+            raise ValueError("SYSV and GNU hash symbol counts disagree")
+        count = expected
+        gnu = (first, buckets, bloom, bits, shift, chains)
     pos = offset(symaddr, count * entry_size)
     vers = None
     if DT_VERSYM in tags:
@@ -168,8 +206,22 @@ def symbol_inventory(tags, data, loads, cls, strings, result):
         name = struct.unpack_from("<I", data, pos + i * entry_size)[0]
         if name >= len(strings) or strings.find(b"\0", name, min(len(strings), name + 4096)) < 0:
             raise ValueError("Invalid dynamic symbol name")
+    if gnu is not None:
+        first, buckets, bloom, bits, shift, chains = gnu
+        for i, (bucket, value) in enumerate(chains, first):
+            name, = struct.unpack_from("<I", data, pos + i * entry_size)
+            end = strings.find(b"\0", name, min(len(strings), name + 4096))
+            h = 5381
+            for byte in strings[name:end]:
+                h = (h * 33 + byte) & 0xffffffff
+            if h % buckets != bucket or (h & ~1) != (value & ~1):
+                raise ValueError("GNU hash chain does not match symbol name")
+            mask = (1 << (h % bits)) | (1 << ((h >> shift) % bits))
+            if bloom[(h // bits) % len(bloom)] & mask != mask:
+                raise ValueError("GNU hash Bloom filter misses symbol")
     result["dynamic_symbol_count"] = count
-    result["symbol_table_status"] = "SYSV_STRUCTURE_CHECKED"
+    result["symbol_table_status"] = ("SYSV_AND_GNU_STRUCTURE_CHECKED" if DT_HASH in tags and gnu is not None
+                                     else "GNU_STRUCTURE_CHECKED" if gnu is not None else "SYSV_STRUCTURE_CHECKED")
     result["versym_indices_checked"] = vers is not None
 
 
