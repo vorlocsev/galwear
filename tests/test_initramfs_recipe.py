@@ -75,6 +75,36 @@ class InitramfsRecipeTests(unittest.TestCase):
         with self.assertRaisesRegex(spec.InitramfsError, "LOAD segment"):
             spec.validate_init(self.init)
 
+    def test_entry_must_be_file_backed_and_executable(self):
+        cases = (
+            ("outside LOAD", 24, "<Q", 0x500000),
+            ("non-executable LOAD", 68, "<I", 4),
+            ("misaligned entry", 24, "<Q", 0x400101),
+            ("partial instruction", 96, "<Q", 2),
+            ("entry in zero-fill tail", 96, "<Q", 0),
+        )
+        for label, offset, fmt, value in cases:
+            with self.subTest(label=label):
+                data = bytearray(fake_aarch64_elf())
+                struct.pack_into(fmt, data, offset, value)
+                self.init.write_bytes(data)
+                with self.assertRaisesRegex(spec.InitramfsError, "entry must"):
+                    spec.validate_init(self.init)
+
+    def test_load_file_size_cannot_exceed_memory_size(self):
+        data = bytearray(fake_aarch64_elf())
+        struct.pack_into("<Q", data, 104, 16)
+        self.init.write_bytes(data)
+        with self.assertRaisesRegex(spec.InitramfsError, "memory size"):
+            spec.validate_init(self.init)
+
+    def test_load_virtual_address_overflow_rejected(self):
+        data = bytearray(fake_aarch64_elf())
+        struct.pack_into("<Q", data, 80, (1 << 64) - 16)
+        self.init.write_bytes(data)
+        with self.assertRaisesRegex(spec.InitramfsError, "memory size"):
+            spec.validate_init(self.init)
+
     def test_symlink_input_refused(self):
         link = self.folder / "link-init"
         try:
