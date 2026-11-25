@@ -26,6 +26,8 @@
 
 #include <android/log.h>
 #include <hardware/hardware.h>
+#include "gps_wire.h"
+#include "../tools/gps/gps_frame.h"
 
 #define LOG_TAG "gps-r800"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -123,17 +125,23 @@ struct gps_device_t {
 static GpsCallbacks *cb;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int sock = -1;
+static int sock_failed; /* protected by lock; only reader closes published fd */
 static int want_on;          /* framework asked for a session */
 static volatile int running; /* reader thread alive */
 
 /* call with lock held */
-static void send_line(const char *s)
+static int send_line(const char *s)
 {
-	if (sock >= 0 && write(sock, s, strlen(s)) < 0) {
-		LOGE("send '%s': %s", s, strerror(errno));
-		close(sock);
-		sock = -1;
-	}
+    size_t n = strlen(s);
+    if (sock < 0 || sock_failed)
+        return -ENOTCONN;
+    if (send(sock, s, n, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)n) {
+        LOGE("bridge send failed or partial");
+        sock_failed = 1;
+        shutdown(sock, SHUT_RDWR);
+        return -EIO;
+    }
+    return 0;
 }
 
 static void report_status(uint16_t st)
@@ -303,38 +311,43 @@ static void handle_nmea_sv(const char *s)
 
 static void handle_line(char *l)
 {
-	if (!strncmp(l, "FIX ", 4)) {
-		GpsLocation loc;
-		unsigned flags;
-		long long ts;
-		memset(&loc, 0, sizeof(loc));
-		loc.size = sizeof(loc);
-		if (sscanf(l + 4, "%u %lf %lf %lf %f %f %f %lld", &flags, &loc.latitude,
-			   &loc.longitude, &loc.altitude, &loc.speed, &loc.bearing, &loc.accuracy,
-			   &ts) == 8) {
-			loc.flags = (uint16_t)flags;
-			loc.timestamp = ts;
-			if (cb && cb->location_cb)
-				cb->location_cb(&loc);
-		}
-	} else if (!strncmp(l, "NMEA ", 5)) {
-		char *p = l + 5, *s;
-		long long ts = strtoll(p, &s, 10);
-		if (*s == ' ')
-			s++;
-		if (cb && cb->nmea_cb)
-			cb->nmea_cb(ts, s, strlen(s));
-		handle_nmea_sv(s);
-	} else if (!strncmp(l, "STATUS ", 7)) {
-		report_status((uint16_t)atoi(l + 7));
-	}
+    if (!strncmp(l, "FIX ", 4)) {
+        struct gps_wire_fix f;
+        GpsLocation loc;
+        if (!gps_wire_parse_fix(l + 4, &f))
+            return;
+        memset(&loc, 0, sizeof(loc));
+        loc.size = sizeof(loc);
+        loc.flags = (uint16_t)f.flags;
+        loc.latitude = f.lat;
+        loc.longitude = f.lon;
+        loc.altitude = f.alt;
+        loc.speed = (float)f.speed;
+        loc.bearing = (float)f.bearing;
+        loc.accuracy = (float)f.accuracy;
+        loc.timestamp = f.utc;
+        if (cb && cb->location_cb)
+            cb->location_cb(&loc);
+    } else if (!strncmp(l, "NMEA ", 5)) {
+        long long ts;
+        const char *sentence;
+        if (!gps_wire_parse_nmea(l + 5, &ts, &sentence))
+            return;
+        if (cb && cb->nmea_cb)
+            cb->nmea_cb(ts, sentence, (int)strlen(sentence));
+        handle_nmea_sv(sentence);
+    } else if (!strncmp(l, "STATUS ", 7)) {
+        int st;
+        if (gps_wire_parse_status(l + 7, &st))
+            report_status((uint16_t)st);
+    }
 }
 
 /* connects (retrying), re-sends the wanted state, then reads lines forever */
 static void reader(void *arg)
 {
-	char buf[4096];
-	size_t have = 0;
+	char buf[256];
+	struct gps_frame frame = {{0}, 0};
 	(void)arg;
 
 	while (running) {
@@ -358,35 +371,40 @@ static void reader(void *arg)
 			LOGI("connected to %s", SOCK_PATH);
 			pthread_mutex_lock(&lock);
 			sock = fd;
+			sock_failed = 0;
 			if (want_on)
 				send_line("START\n");
 			pthread_mutex_unlock(&lock);
-			have = 0;
+			frame.used = 0;
+			memset(&sv_cur, 0, sizeof(sv_cur));
+			memset(used, 0, sizeof(used));
 		}
-		ssize_t n = read(fd, buf + have, sizeof(buf) - 1 - have);
-		if (n <= 0) {
-			LOGE("bridge connection lost");
-			pthread_mutex_lock(&lock);
-			if (sock == fd) {
-				close(sock);
-				sock = -1;
-			}
-			pthread_mutex_unlock(&lock);
-			sleep(1);
+		ssize_t n = read(fd, buf, sizeof(buf));
+		if (n < 0 && errno == EINTR)
 			continue;
+		if (n <= 0)
+			goto disconnected;
+		for (ssize_t i = 0; i < n; ++i) {
+			int state = gps_frame_byte(&frame, (unsigned char)buf[i]);
+			if (state < 0)
+				goto disconnected;
+			if (state == 1) {
+				handle_line(frame.line);
+				frame.used = 0;
+			}
 		}
-		have += n;
-		buf[have] = 0;
-		char *start = buf, *nl;
-		while ((nl = strchr(start, '\n'))) {
-			*nl = 0;
-			handle_line(start);
-			start = nl + 1;
+		continue;
+disconnected:
+		LOGE("bridge connection lost or malformed frame");
+		pthread_mutex_lock(&lock);
+		if (sock == fd) {
+			sock = -1;
+			sock_failed = 0;
 		}
-		have = strlen(start);
-		memmove(buf, start, have);
-		if (have >= sizeof(buf) - 1)
-			have = 0;   /* overlong line: drop */
+		close(fd);
+		pthread_mutex_unlock(&lock);
+		frame.used = 0;
+		sleep(1);
 	}
 }
 
@@ -434,22 +452,37 @@ static void gps_cleanup(void)
 static int gps_inject_time(GpsUtcTime t, int64_t ref, int unc)
 {
 	char l[96];
-	/* ref = elapsedRealtime when t was valid; gpsbridge turns it into its clock */
-	snprintf(l, sizeof(l), "TIME %lld %lld %d\n", (long long)t, (long long)ref, unc);
+	struct gps_time_command parsed;
+	int n = snprintf(l, sizeof(l), "%lld %lld %d", (long long)t, (long long)ref, unc);
+	if (n <= 0 || n >= (int)sizeof(l) || !gps_parse_time(l, &parsed))
+		return -EINVAL;
+	n = snprintf(l, sizeof(l), "TIME %lld %lld %d\n", parsed.utc, parsed.elapsed, parsed.uncertainty);
+	if (n <= 0 || n >= (int)sizeof(l))
+		return -EINVAL;
 	pthread_mutex_lock(&lock);
-	send_line(l);
+	int rc = send_line(l);
 	pthread_mutex_unlock(&lock);
-	return 0;
+	return rc;
 }
 
 static int gps_inject_location(double lat, double lon, float acc)
 {
 	char l[96];
-	snprintf(l, sizeof(l), "LOC %.6f %.6f %.0f\n", lat, lon, (double)acc);
+	struct gps_loc_command parsed;
+	int n;
+	if (!(lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&
+	      acc > 0 && acc <= 40000000))
+		return -EINVAL;
+	n = snprintf(l, sizeof(l), "%.8f %.8f %.6f", lat, lon, (double)acc);
+	if (n <= 0 || n >= (int)sizeof(l) || !gps_parse_loc(l, &parsed))
+		return -EINVAL;
+	n = snprintf(l, sizeof(l), "LOC %.8f %.8f %.6f\n", parsed.lat, parsed.lon, parsed.accuracy);
+	if (n <= 0 || n >= (int)sizeof(l))
+		return -EINVAL;
 	pthread_mutex_lock(&lock);
-	send_line(l);
+	int rc = send_line(l);
 	pthread_mutex_unlock(&lock);
-	return 0;
+	return rc;
 }
 
 static void gps_delete_aiding_data(uint16_t f) { (void)f; }

@@ -10,7 +10,7 @@ export PYTHONDONTWRITEBYTECODE=1
 echo "SOURCE_SHA=$(git rev-parse HEAD)"
 cc --version
 clang --version
-for test in frame command lto output; do
+for test in frame command lto output wire; do
     cc -std=c11 -O2 -Wall -Wextra -Werror -UNDEBUG \
         -fsanitize=undefined -fno-sanitize-recover=all \
         "tests/test_r800_gps_$test.c" -o "$TMP/test-$test"
