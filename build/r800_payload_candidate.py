@@ -11,6 +11,9 @@ import sys
 import tarfile
 import tempfile
 
+from r800_android_linker_audit import inspect
+from r800_android_userspace_preflight import read_regular
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "installer"))
 from r800_build_provenance import validate_payload
 
@@ -38,6 +41,8 @@ def inventory(src, release):
             if required:
                 raise
             return
+        if any(ord(ch) < 32 or ch == "\\" for ch in name):
+            raise ValueError("Unsafe payload member name")
         if name in entries or len(entries) >= MAX_FILES:
             raise ValueError("Payload member count or duplicate path")
         if path.name in STATE or path.name.lower().endswith((".log", ".bak", ".old", ".key", ".pem")):
@@ -87,9 +92,16 @@ def inventory(src, release):
         add(checked("android/" + name), "android/" + name, required=False)
     add(checked("android/overlay"), "android/overlay", required=False, recursive=True)
     for name in HALS:
-        add(checked("hwc/" + name), "hwc/" + name)
+        path = checked("hwc/" + name)
+        add(path, "hwc/" + name)
+        elf = inspect(read_regular(path, 64 * 1024**2))
+        if elf["abi"] != "arm" or elf["elf_type"] != "ET_DYN" or not elf["has_dynamic"]:
+            raise ValueError("Expected ARM32 HAL: " + name)
     for name in BINS:
-        add(checked("bin/" + name), "bin/" + name)
+        path = checked("bin/" + name)
+        add(path, "bin/" + name)
+        if not path.stat().st_mode & 0o111:
+            raise ValueError("Non-executable payload binary: " + name)
     for name in DIRS:
         add(checked(name), name, recursive=True)
     for name in SINGLE:
@@ -121,8 +133,8 @@ def build(src, release, output):
                 info = tar.gettarinfo(str(path), "r800dev/" + name)
                 if info.islnk():
                     raise ValueError("Hardlinked payload input: " + name)
-                info.uid = info.gid = 0
-                info.uname = info.gname = "root"
+                # Preserve numeric ownership: chroot libraries and daemons may require it.
+                info.uname = info.gname = ""
                 info.mtime = 0
                 if name in SCRIPTS or name == "tzchroot.sh":
                     info.mode = 0o755
@@ -147,7 +159,8 @@ def build(src, release, output):
     return {"status": "NON_RELEASE_PAYLOAD_STRUCTURE_ONLY", "source_bytes": total,
             "sha256": h.hexdigest(), "archive_bytes": output.stat().st_size,
             "archive_inventory": validated, "embedded_image_contents_verified": False,
-            "device_state_absence_verified": False, "safe_to_flash": False}
+            "device_state_absence_verified": False, "xattrs_preserved_verified": False,
+            "safe_to_flash": False}
 
 
 def main():
