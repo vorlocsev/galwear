@@ -464,3 +464,42 @@ and build a separate generic virt kernel profile with a read-only
 virtual block transport and EXT4. The existing property-profile
 kernel and no-block QEMU acceptance contract remain unchanged.
 No real e2fsdroid execution or kernel mount has been verified.
+
+
+## Additional context partitions and original runtime APEX payload
+
+    python3 build/r800_android_context_partitions.py \
+      --product-out /absolute/stock-product-out \
+      --checkfc /absolute/aosp-host/bin/checkfc \
+      --e2fsdroid /absolute/aosp-host/bin/e2fsdroid \
+      --out /absolute/new-context-partitions \
+      --report /absolute/context-partitions.json
+
+Each available system_ext, product, vendor or odm context partition is
+a 32 MiB diagnostic ext4 image containing only the selected property
+and file contexts. Missing optional partitions are reported, not
+invented. The original policy is audited, each available context file
+is checked with checkfc, and e2fsdroid receives the original context
+files. Independent matchpathcon and debugfs checks cover selected
+inodes and payloads. Conflicting or absent labels fail the build.
+These are not complete Android partitions or hardware vendor blobs.
+
+    python3 build/r800_android_apex_payload.py \
+      --apex /absolute/com.android.runtime.apex --apex-sha256 EXACT_SHA256 \
+      --staged /absolute/staged-rootfs --product-out /absolute/stock-product-out \
+      --checkfc /absolute/aosp-host/bin/checkfc \
+      --out /absolute/new-runtime-payload --report /absolute/runtime-payload.json
+
+The APEX payload is preserved byte-for-byte, including any trailing
+data. Selected original security.selinux attributes are read directly
+from the filesystem; selected staged runtime binaries must match
+their source payload. checkfc verifies that observed types exist in
+the same policy. This does not verify AVB, APEX signature, every
+inode, or Android APEX activation. Do not treat it as a replacement
+for apexd. No host mounting or relabeling occurs.
+
+Next: bind all image reports and exact hashes into a read-only
+virtual disk manifest and introduce a separate virt kernel profile
+with EXT4 and VirtIO block, leaving the existing no-block property
+profile unchanged. Actual image-tool runs and guest mounting are
+still unverified.
