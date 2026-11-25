@@ -12,6 +12,7 @@ on:
       - "build/r800_tinyalsa_sync_test.py"
       - "build/r800_stage_hals.py"
       - "build/r800_stage_components.py"
+      - "build/r800_donor_preflight.py"
       - "build/r800_vendor_inputs.py"
       - "src/vendor/**"
       - "src/vendor/audio/tinyalsa-2.0.0-sync-ptr.patch"
@@ -81,6 +82,23 @@ jobs:
             --output "$RUNNER_TEMP/r800-components" --source-sha "$GITHUB_SHA"
           test ! -e "$RUNNER_TEMP/r800-components/payload/gpsbridge"
           test ! -e "$RUNNER_TEMP/r800-components/payload/android/system.img"
+      - name: Verify component manifest and missing donor gate
+        run: |
+          mkdir "$RUNNER_TEMP/r800-no-donors"
+          rc=0
+          python3 build/r800_donor_preflight.py --donors "$RUNNER_TEMP/r800-no-donors" \
+            --components "$RUNNER_TEMP/r800-components" --source-sha "$GITHUB_SHA" \
+            > "$RUNNER_TEMP/r800-donor-evidence.json" || rc=$?
+          test "$rc" = 2
+          python3 - "$RUNNER_TEMP/r800-donor-evidence.json" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          assert report["status"] == "DONOR_INPUTS_INCOMPLETE"
+          assert report["inputs"]["compiled-components"]["status"] == "STRUCTURE_PASS_ONLY"
+          assert report["inputs"]["samsung/combination.tar.md5"]["status"] == "MISSING"
+          assert report["safe_to_flash"] is False
+          print("PASS: actual compiled tree verified; absent donors block full build")
+          PY
       - name: Upload compiler and ELF evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -96,5 +114,6 @@ jobs:
             ${{ runner.temp }}/r800-tools/evidence/*.txt
             ${{ runner.temp }}/r800-keepwifi/*-evidence.txt
             ${{ runner.temp }}/r800-components/component-evidence.json
+            ${{ runner.temp }}/r800-donor-evidence.json
           if-no-files-found: warn
           retention-days: 7
