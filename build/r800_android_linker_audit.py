@@ -12,6 +12,7 @@ import r800_linker_namespaces
 import r800_apex_inventory
 import r800_init_inventory
 import r800_art_inventory
+import r800_art_precompiled
 
 NAME = re.compile(r"[A-Za-z0-9_.+~-]{1,255}")
 TARGETS = ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager",
@@ -801,6 +802,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
     apex_metadata = r800_apex_inventory.audit(root)
     init_inventory = r800_init_inventory.audit(root)
     art_inventory = r800_art_inventory.audit(root, init_inventory)
+    art_precompiled = r800_art_precompiled.audit(root)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -822,6 +824,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
             "apex": apex, "apex_metadata": apex_metadata,
             "init_inventory": init_inventory,
             "art_inventory": art_inventory,
+            "art_precompiled": art_precompiled,
             "namespace_inventory": namespace_inventory,
             "namespace_scope": namespace_scope,
             "android_namespace_resolution_verified": False,
