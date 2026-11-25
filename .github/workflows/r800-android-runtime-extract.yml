@@ -15,6 +15,9 @@ on:
       - build/r800_android_init_dependencies.py
       - build/r800_android_init_rootfs.py
       - build/r800_android_rootfs_preflight.py
+      - build/r800_android_sepolicy_audit.py
+      - build/r800_aosp_sepolicy_build.sh
+      - tests/test_android_sepolicy_audit.py
       - build/r800_qemu_rootfs_preflight.py
       - tests/test_qemu_rootfs_preflight.py
       - src/initramfs/android-rootfs-preflight.c
@@ -52,6 +55,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           bash -n build/r800_aosp_property_info.sh
           bash -n build/r800_aosp_init_service_build.sh
+          bash -n build/r800_aosp_sepolicy_build.sh
+          python3 -m unittest discover -s tests -p 'test_android_sepolicy_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_android_init_inventory.py' -v
           python3 -m unittest discover -s tests -p 'test_android_init_dependencies.py' -v
           python3 -m unittest discover -s tests -p 'test_android_init_rootfs.py' -v
