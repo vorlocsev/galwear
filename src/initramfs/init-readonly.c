@@ -4,8 +4,8 @@
  *
  * No filesystem mounts, block device access, framebuffer writes, persistent
  * logging, power management changes or handover to the historical /data
- * startup. Only writes a fixed message to the kernel-provided stdout and
- * sleeps indefinitely. NOT a functional Wear OS or hardware boot guarantee.
+ * startup. Only writes a startup marker and numbered heartbeat messages to
+ * the kernel-provided stdout, sleeping between heartbeats. NOT a functional Wear OS or hardware boot guarantee.
  */
 typedef unsigned long u64;
 typedef long s64;
@@ -49,9 +49,19 @@ void _start(void)
         "r800-readonly-init: NON-RELEASE smoke image; "
         "no eMMC mount, no Wear OS handover\n";
     const struct tiny_timespec interval = {5, 0};
+    static const char hex[] = "0123456789abcdef";
+    char heartbeat[] = "r800-readonly-init: heartbeat 00000000\n";
+    unsigned int sequence = 0;
 
     (void)console_write(message, sizeof(message) - 1);
     for (;;) {
-        (void)idle_sleep(&interval);
+        if (idle_sleep(&interval) != 0)
+            continue;
+        if (sequence == 0xffffffffU)
+            continue;
+        ++sequence;
+        for (unsigned int i = 0; i < 8; ++i)
+            heartbeat[sizeof(heartbeat) - 10 + i] = hex[(sequence >> (28 - 4 * i)) & 15U];
+        (void)console_write(heartbeat, sizeof(heartbeat) - 1);
     }
 }
