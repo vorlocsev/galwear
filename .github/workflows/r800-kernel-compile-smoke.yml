@@ -10,6 +10,8 @@ on:
       - ".github/workflows/r800-initramfs-smoke.yml"
       - "docs/R800_INTEGRATED_KERNEL_BUILD.md"
       - "build/r800_kernel_compile_smoke.sh"
+      - "build/r800_storage_isolation.py"
+      - "tests/test_storage_isolation.py"
       - "build/r800_aosp_source_probe.sh"
       - "tests/test_kernel_compile_recipe.py"
       - "build/r800_nzit_layout_audit.py"
@@ -35,6 +37,10 @@ on:
         description: "Embed the minimal read-only /init (non-release)"
         type: boolean
         default: true
+      storage_isolation:
+        description: "Disable selected storage drivers (requires embedded /init; experimental)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,6 +51,7 @@ jobs:
     timeout-minutes: 50
     env:
       EMBED_INIT: ${{ (github.event_name == 'workflow_dispatch' && inputs.embed_readonly_initramfs || github.event_name == 'push' && github.ref_name == 'development/r800-display-error-propagation-20261125') && 'true' || 'false' }}
+      STORAGE_ISOLATION: ${{ github.event_name == 'workflow_dispatch' && inputs.storage_isolation && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +62,11 @@ jobs:
         id: recipe
         run: |
           sh -n build/r800_kernel_compile_smoke.sh
+          python3 -m unittest discover -s tests -p 'test_storage_isolation.py' -v
+          if [ "$STORAGE_ISOLATION" = true ] && [ "$EMBED_INIT" != true ]; then
+            echo 'Storage isolation requires embedded /init' >&2
+            exit 2
+          fi
           python3 -m unittest discover -s tests -p 'test_kernel_compile_recipe.py' -v
           python3 -m unittest discover -s tests -p 'test_nzit_layout_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_minimal_boot_contract.py' -v
@@ -83,6 +95,7 @@ jobs:
         run: |
           docker run --rm --pull=always \
             -e EMBED_INIT="$EMBED_INIT" \
+            -e R800_STORAGE_ISOLATION="$STORAGE_ISOLATION" \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             -v "$RUNNER_TEMP/combined-exynos-src:/source" \
             -v "$RUNNER_TEMP:/scratch" \
@@ -246,6 +259,7 @@ jobs:
             echo "safe_to_flash=false"
             echo "build_kind=smoke_non_release"
             echo "embedded_initramfs_requested=$EMBED_INIT"
+            echo "storage_isolation_requested=$STORAGE_ISOLATION"
             echo "embedded_link_outcome=$EMBEDDED_OUTCOME"
             echo "nzit_layout_outcome=$NZIT_OUTCOME"
             echo "device_contacted=false"
@@ -268,6 +282,7 @@ jobs:
             ${{ runner.temp }}/r800-smoke-evidence.txt
             ${{ runner.temp }}/r800-integrated-init/initramfs-evidence.json
             ${{ runner.temp }}/compiled-kernel/embedded-initramfs-gate.json
+            ${{ runner.temp }}/compiled-kernel/storage-isolation-evidence.json
             ${{ runner.temp }}/compiled-kernel/embedded-cpio-audit.json
             ${{ runner.temp }}/compiled-kernel/embedded-link-evidence.json
             ${{ runner.temp }}/r800-nzit-layout.json
