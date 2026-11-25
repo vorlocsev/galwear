@@ -1041,3 +1041,38 @@ exclusion. API stubs can have plausible dynamic symbol tables.
 The latter requires independently bound implementation build
 provenance and/or runtime behavioral evidence, not a heuristic
 that declares an ELF non-stub because it has relocations.
+
+
+## AOSP installed artifact origin
+
+Android 11-derived Soong cc/cc.go IsInstallableToApex explicitly
+excludes stub variants and versioned SDK libraries. cc/library.go
+distinguishes the generated stub compilation path from implementation
+builds and installs Bionic implementation variants in bootstrap
+locations. This source evidence explains why installed product paths
+and the built runtime APEX are preferable to arbitrary Soong
+intermediates, SDK exports or a symbol-count heuristic. It does not
+independently establish which variant a particular local build used.
+
+The runtime and service build recipes now include the exact resolved
+manifest digest in their hash-bound extraction and dependency reports.
+The origin stage checks those reports through verify_build, requires
+matching manifest XML with explicit project revisions, validates the
+runtime APEX identity inside the dedicated build tree, and compares
+every selected staged ELF's digest and size with the recorded build
+graph and original installed/extracted file. Runtime choices must
+also match the original APEX extraction metadata. Only supported
+installed product paths and selected Runtime APEX paths are accepted;
+intermediate SDK paths and substituted source aliases are rejected.
+No new AOSP checkout, module-info format or Ninja rule is assumed.
+
+The EXT4 pipeline records AOSP_SELECTED_ARTIFACT_ORIGIN_ONLY before
+building images. The direct service experiment additionally requires
+--origin-report and checks the staged ELF inventory plus APEX and
+payload hashes against it. Rebuild older AOSP evidence to include
+the resolved manifest digests. The provenance is local, unsigned,
+and assumes the isolated build environment is trustworthy. It is
+not an independent Soong variant attestation or proof of non-stub
+behavior. stub_exclusion_proven remains false. Seven synthetic
+regressions are added; execution of these tests, actual AOSP build
+and QEMU service acceptance are not confirmed.
