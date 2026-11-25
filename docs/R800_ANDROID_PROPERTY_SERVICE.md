@@ -775,3 +775,26 @@ PR-triggered workflow runs for the original block smoke commit.
 That is not evidence that the push-triggered run is absent or failed.
 Direct Actions retrieval and direct Git cloning were unavailable;
 actual ARM64/EXT4/QEMU CI acceptance remains unverified.
+
+
+## Python evidence boundary audit (2026-11-25)
+
+The shared regular-file lookup now rejects absolute paths, traversal,
+noncanonical path spelling, symlinked parents and symlink loops.
+Baseline and bounded guest evidence reject duplicate JSON keys at
+every nesting level rather than silently accepting the last value.
+The system image builder verifies that the prepared property-context
+hashes match the policy audit, rejects noncanonical guest paths,
+and uses the same prepared rootfs snapshot for the experimental
+linker configuration instead of reading the staged tree a second time.
+
+Five isolated native Python unittest cases using copies of the revised
+regular and unique_evidence_object function bodies passed (relative
+paths, symlink parents/loops, nested duplicate JSON, top-level duplicate
+JSON, ordinary JSON). This is not a full checkout test or an exact-head
+CI result. The new repository test additionally runs ten actual CLI
+--help subprocesses to exercise imports and argparse; compileall and
+the new suite are wired into lightweight CI. The repository-wide suite
+has not been executed in the current environment. GitHub cloning
+failed DNS resolution and the public Actions API was inaccessible.
+No kernel, QEMU, AOSP or hardware acceptance is inferred.
