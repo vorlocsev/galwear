@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Build a static AOSP libselinux diagnostic, not the original init.
 set -euo pipefail
-[[ $# == 2 ]] || { echo "usage: $0 <synced-aosp-root> <new-output-dir>" >&2; exit 2; }
+[[ $# == 2 || $# == 3 ]] || { echo "usage: $0 <synced-aosp-root> <new-output-dir> [transition|relabel]" >&2; exit 2; }
+MODE=${3:-transition}
+case "$MODE" in
+    transition) SOURCE=selinux-transition-probe.c; STATUS=SELINUX_TRANSITION_COMPILE_ONLY ;;
+    relabel) SOURCE=rootfs-relabel-probe.c; STATUS=SELINUX_ROOTFS_RELABEL_COMPILE_ONLY ;;
+    *) exit 2 ;;
+esac
 TOOLS=$(cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(realpath "$1")
 OUT=$(realpath -m "$2")
@@ -15,7 +21,7 @@ repo forall -e -c 'test "$(git rev-parse HEAD)" = "$(git rev-parse "$REPO_LREV")
 OVERLAY="$ROOT/galwear_selinux_transition"
 mkdir "$OVERLAY"
 trap 'rm -f -- "$OVERLAY/Android.bp" "$OVERLAY/selinux-transition-probe.c"; rmdir -- "$OVERLAY"' EXIT
-cp "$TOOLS/../src/android/selinux-transition-probe.c" "$OVERLAY/"
+cp "$TOOLS/../src/android/$SOURCE" "$OVERLAY/selinux-transition-probe.c"
 cat > "$OVERLAY/Android.bp" <<'BP'
 cc_binary {
     name: "galwear_selinux_transition",
@@ -39,4 +45,4 @@ set -u
 cp "$PRODUCT_OUT/system/bin/galwear_selinux_transition" "$OUT/init"
 python3 "$TOOLS/r800_initramfs_spec.py" --init "$OUT/init" --list "$OUT/initramfs.list" --report "$OUT/initramfs-evidence.json"
 sha256sum "$OUT/init" "$OUT/manifest-resolved.xml" "$OVERLAY/selinux-transition-probe.c" "$OVERLAY/Android.bp" > "$OUT/input-digests.sha256"
-printf 'status=SELINUX_TRANSITION_COMPILE_ONLY\nsafe_to_flash=false\n' > "$OUT/status.txt"
+printf 'status=%s\nsafe_to_flash=false\n' "$STATUS" > "$OUT/status.txt"
