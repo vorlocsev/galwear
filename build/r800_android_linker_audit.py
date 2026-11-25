@@ -102,6 +102,77 @@ def version_inventory(tags, data, loads, dynamic_name):
     return needs, definitions, DT_VERSYM in tags
 
 
+DT_HASH = 4
+DT_SYMTAB = 6
+DT_SYMENT = 11
+DT_GNU_HASH = 0x6ffffef5
+MAX_DYNAMIC_SYMBOLS = 262144
+
+
+def symbol_inventory(tags, data, loads, cls, strings, result):
+    def single(tag):
+        values = tags.get(tag, [])
+        if len(values) != 1:
+            raise ValueError("Missing or duplicate symbol tag: " + hex(tag))
+        return values[0]
+
+    def offset(addr, size):
+        matches = {fo + addr - va for va, fo, fs in loads
+                   if va <= addr and 0 < size <= fs - (addr - va)}
+        if len(matches) != 1:
+            raise ValueError("Symbol table not uniquely file-backed")
+        return matches.pop()
+
+    present = any(t in tags for t in (DT_HASH, DT_SYMTAB, DT_SYMENT, DT_GNU_HASH))
+    if not present:
+        return
+    fmt = "<IBBHQQ" if cls == 2 else "<IIIBBH"
+    entry_size = struct.calcsize(fmt)
+    symaddr = single(DT_SYMTAB)
+    if single(DT_SYMENT) != entry_size:
+        raise ValueError("Invalid DT_SYMENT")
+    offset(symaddr, entry_size)
+    if DT_HASH not in tags:
+        result["symbol_table_status"] = "COUNT_NOT_AVAILABLE"
+        return
+    addr = single(DT_HASH)
+    buckets, count = struct.unpack_from("<II", data, offset(addr, 8))
+    if not 1 <= buckets <= MAX_DYNAMIC_SYMBOLS or not 1 <= count <= MAX_DYNAMIC_SYMBOLS:
+        raise ValueError("Invalid SYSV hash dimensions")
+    pos = offset(addr, 8 + 4 * (buckets + count))
+    indices = struct.unpack_from("<" + str(buckets + count) + "I", data, pos + 8)
+    if any(i >= count for i in indices):
+        raise ValueError("SYSV hash index out of bounds")
+    if indices[buckets] != 0:
+        raise ValueError("Nonzero SYSV chain zero entry")
+    # Each chain node is traversed at most once globally.
+    complete = {0}
+    for start in indices[:buckets]:
+        visiting = set()
+        i = start
+        while i not in complete:
+            if i in visiting:
+                raise ValueError("Cyclic SYSV hash chain")
+            visiting.add(i)
+            i = indices[buckets + i]
+        complete.update(visiting)
+    pos = offset(symaddr, count * entry_size)
+    vers = None
+    if DT_VERSYM in tags:
+        vers = struct.unpack_from("<" + str(count) + "H", data,
+                                  offset(single(DT_VERSYM), count * 2))
+    valid = {0, 1} | {v["index"] for v in result["version_needs"] + result["version_definitions"]}
+    if vers is not None and any((v & 0x7fff) not in valid for v in vers):
+        raise ValueError("DT_VERSYM references unknown version index")
+    for i in range(count):
+        name = struct.unpack_from("<I", data, pos + i * entry_size)[0]
+        if name >= len(strings) or strings.find(b"\0", name, min(len(strings), name + 4096)) < 0:
+            raise ValueError("Invalid dynamic symbol name")
+    result["dynamic_symbol_count"] = count
+    result["symbol_table_status"] = "SYSV_STRUCTURE_CHECKED"
+    result["versym_indices_checked"] = vers is not None
+
+
 def inspect(data: bytes) -> dict:
     if len(data) < 52 or data[:4] != b"\x7fELF" or data[5:7] != b"\x01\x01":
         raise ValueError("Invalid little-endian ELF")
@@ -141,7 +212,9 @@ def inspect(data: bytes) -> dict:
     result = {"abi": "arm64" if cls == 2 else "arm", "needed": [],
               "has_dynamic": dynamic is not None, "custom_search_path": False,
               "elf_type": "ET_DYN" if etype == 3 else "ET_EXEC", "soname": None,
-              "version_needs": [], "version_definitions": [], "versym_present": False}
+              "version_needs": [], "version_definitions": [], "versym_present": False,
+              "dynamic_symbol_count": None, "symbol_table_status": "NOT_PRESENT",
+              "versym_indices_checked": False}
     if dynamic is None:
         return result
     off, size = dynamic
@@ -161,7 +234,7 @@ def inspect(data: bytes) -> dict:
     result["custom_search_path"] = 15 in tags or 29 in tags
     if len(tags.get(14, [])) > 1:
         raise ValueError("Duplicate DT_SONAME")
-    if not any(tag in tags for tag in (1, 14, DT_VERNEED, DT_VERNEEDNUM, DT_VERDEF, DT_VERDEFNUM, DT_VERSYM)):
+    if not any(tag in tags for tag in (1, 14, DT_VERNEED, DT_VERNEEDNUM, DT_VERDEF, DT_VERDEFNUM, DT_VERSYM, DT_HASH, DT_SYMTAB, DT_SYMENT, DT_GNU_HASH)):
         return result
     if len(tags.get(5, [])) != 1 or len(tags.get(10, [])) != 1:
         raise ValueError("Missing or duplicate dynamic string table")
@@ -189,6 +262,7 @@ def inspect(data: bytes) -> dict:
     if 14 in tags:
         result["soname"] = dynamic_name(tags[14][0], "DT_SONAME")
     result["version_needs"], result["version_definitions"], result["versym_present"] = version_inventory(tags, data, loads, dynamic_name)
+    symbol_inventory(tags, data, loads, cls, strings, result)
     return result
 
 
