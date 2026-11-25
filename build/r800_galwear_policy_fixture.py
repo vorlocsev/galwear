@@ -65,14 +65,14 @@ def audit_fixture(product, checkfc, analyze):
                        check=True, capture_output=True, timeout=30)
         out = subprocess.run([str(analyze.resolve(strict=True)), str(p), "permissive"],
                              check=True, capture_output=True, text=True, timeout=30)
-        if DOMAIN in out.stdout.split():
-            raise ValueError("Diagnostic client domain is permissive")
+        if {DOMAIN, "init", "kernel"} & set(out.stdout.split()):
+            raise ValueError("Required diagnostic domain is permissive")
     if sha(snapshot(analyze, MAX_POLICY)) != tool_sha:
         raise ValueError("Policy analyzer changed")
     return {**result, "status": "GALWEAR_CLIENT_POLICY_STATIC_ONLY",
             "production_policy": False, "stock_policy": False,
             "client_domain": "u:r:"+DOMAIN+":s0",
-            "client_not_listed_permissive": True, "analyze_sha256": tool_sha,
+            "client_not_listed_permissive": True, "init_kernel_not_listed_permissive": True, "analyze_sha256": tool_sha,
             "file_contexts_sha256": sha(fc), "fixture_property_contexts": PROPERTIES,
             "client_transition_tested": False, "client_mac_denial_tested": False,
             "safe_to_flash": False}
