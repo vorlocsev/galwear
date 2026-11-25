@@ -15,7 +15,7 @@ HARNESS = r"""
 #define SNDRV_PCM_SYNC_PTR_AVAIL_MIN 4
 #define SNDRV_PCM_IOCTL_HWSYNC 100
 #define SNDRV_PCM_IOCTL_SYNC_PTR 101
-#define ioctl(...) (0)
+static int ioctl(int fd, int request) { (void)fd; (void)request; return 0; }
 struct fake_sync { int flags, appl, avail; };
 struct fake_kernel { int appl, avail, fail; };
 struct ops { int (*ioctl)(void *, int, struct fake_sync *); };
