@@ -85,7 +85,11 @@ int main(void)
         security_getenforce() != 1 || !domain_is_kernel())
         return 6;
     free(policy);
+#ifdef GALWEAR_SERVICE_BOOT
+    puts("r800-relabel: fixture-policy=PASS enforce=1");
+#else
     puts("r800-relabel: stock-policy=PASS enforce=1");
+#endif
     struct selabel_handle *handle = selinux_android_file_context_handle();
     if (!handle) return 7;
     char *save = NULL;
@@ -101,6 +105,15 @@ int main(void)
     selabel_close(handle);
     free(list);
     if (!count || security_getenforce() != 1 || !domain_is_kernel()) return 9;
+#ifdef GALWEAR_SERVICE_BOOT
+    printf("r800-relabel: PASS count=%u service=handover\n", count);
+    char path[] = "/system/bin/galwear_property_service";
+    char stage[] = "--virt-property-service";
+    char *const args[] = {path, stage, NULL};
+    char *const env[] = {NULL};
+    execve(path, args, env);
+    return 10;
+#else
     printf("r800-relabel: PASS count=%u service=not-started\n", count);
     const struct timespec delay = {5, 0};
     unsigned int sequence = 0;
@@ -108,4 +121,5 @@ int main(void)
         if (!nanosleep(&delay, NULL) && sequence != 0xffffffffU)
             printf("r800-readonly-init: heartbeat %08x\n", ++sequence);
     }
+#endif
 }
