@@ -25,9 +25,16 @@ LINKER_LOCATIONS = ("system/bin/bootstrap/linker64", "system/bin/linker64",
 
 
 def regular(root: Path, relative: str):
-    p = root / relative
-    # Never follow absolute Android symlinks onto the host filesystem.
-    if p.resolve() != p.absolute() or p.is_symlink() or not p.is_file():
+    rel = Path(relative)
+    if rel.is_absolute() or not rel.parts or ".." in rel.parts or str(rel) != relative:
+        return None
+    root = root.absolute()
+    p = root / rel
+    # Reject absolute paths, traversal and symlinks at every component.
+    try:
+        if p.resolve() != p or p.is_symlink() or not p.is_file():
+            return None
+    except (OSError, RuntimeError):
         return None
     return p
 
