@@ -126,6 +126,9 @@ def execute(p,a):
          ["--product-out",fixture,"--checkfc",ft/"checkfc","--profile","fixture"],
          o/"fixture-nosuid.json","EXT4_NOSUID_POLICY_PREREQUISITES_ONLY")
     fixture_args = images("08-fixture",fixture,ft,["--service-fixture"],"ANDROID_SYSTEM_EXT4_SERVICE_STATIC_ONLY")
+    p.py("08-linker-resolution","r800_ext4_linker_resolution.py",
+         ["--system-report",o/"08-fixture-system.json","--runtime-report",o/"08-fixture-runtime.json"],
+         o/"linker-resolution.json","EXT4_LINKER_RESOLUTION_STATIC_ONLY")
     p.py("09-property-service","r800_qemu_ext4_property_service.py",
          [*common,*fixture_args,*probes["service"],"--stock-system-report",o/"03-stock-system.json",
           "--product-out",fixture,"--checkfc",ft/"checkfc","--analyze",ft/"sepolicy-analyze",
