@@ -717,6 +717,7 @@ def symbol_candidates(seen, edges):
 
 
 def audit(root: Path, targets=TARGETS) -> dict:
+    targets = tuple(targets)
     queue = list(targets)
     seen, errors, unresolved, ambiguous = {}, [], [], []
     unsupported_search_paths, soname_mismatches = [], []
@@ -793,6 +794,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
     if resolution["limit_exceeded"]:
         errors.append("Symbol candidate comparison exceeds inspection limit")
     namespace_inventory = r800_linker_namespaces.audit(root)
+    namespace_scope = r800_linker_namespaces.scope_candidates(root, namespace_inventory, seen, edges, targets)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -812,6 +814,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
             "dependency_edges": edges, "symbol_candidates": resolution,
             "symbol_resolution_verified": False,
             "apex": apex, "namespace_inventory": namespace_inventory,
+            "namespace_scope": namespace_scope,
             "android_namespace_resolution_verified": False,
             "symbol_versions_verified": False, "apex_activation_verified": False,
             "android_boot_tested": False, "safe_to_flash": False}
