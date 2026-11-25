@@ -12,6 +12,10 @@ on:
       - build/r800_qemu_virt_compile.sh
       - build/r800_qemu_virt_contract.py
       - tests/test_qemu_virt_contract.py
+      - src/initramfs/property-kernel-probe.c
+      - build/r800_qemu_property_kernel.py
+      - tests/test_qemu_property_kernel.py
+      - build/r800_qemu_system_init.py
       - src/kernel/r800-wearos.patch
       - build/r800_aosp_source_probe.sh
 
@@ -29,6 +33,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh -n build/r800_qemu_virt_compile.sh
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_property_kernel.py' -v
       - name: Fetch pinned disposable kernel source
         run: |
           sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/property-source" "$RUNNER_TEMP/property-source-evidence.json"
@@ -58,6 +63,22 @@ jobs:
             --embedded-archive "$RUNNER_TEMP/property-kernel/usr/initramfs_data.cpio" \
             --out-dir "$RUNNER_TEMP/property-boot" \
             --report "$RUNNER_TEMP/property-boot-evidence.json"
+      - name: Compile separate static pre-policy diagnostic PID1
+        run: |
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          mkdir "$RUNNER_TEMP/property-probe"
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static src/initramfs/property-kernel-probe.c -o "$RUNNER_TEMP/property-probe/init"
+          python3 build/r800_initramfs_spec.py --init "$RUNNER_TEMP/property-probe/init" --list "$RUNNER_TEMP/property-probe/initramfs.list" --report "$RUNNER_TEMP/property-probe/initramfs-evidence.json"
+      - name: Run AF_UNIX and SELinux pre-policy diagnostics
+        run: |
+          python3 build/r800_qemu_property_kernel.py \
+            --init "$RUNNER_TEMP/property-probe/init" \
+            --compile-evidence "$RUNNER_TEMP/property-probe/initramfs-evidence.json" \
+            --kernel "$RUNNER_TEMP/property-kernel/arch/arm64/boot/Image" \
+            --baseline "$RUNNER_TEMP/property-boot-evidence.json" \
+            --config-evidence "$RUNNER_TEMP/property-kernel/virt-config-evidence.json" \
+            --out-dir "$RUNNER_TEMP/property-probe-boot" \
+            --report "$RUNNER_TEMP/property-probe-evidence.json"
       - name: Upload evidence only
         if: always()
         uses: actions/upload-artifact@v4
@@ -69,5 +90,8 @@ jobs:
             ${{ runner.temp }}/property-kernel/virt-cpio-evidence.json
             ${{ runner.temp }}/property-boot-evidence.json
             ${{ runner.temp }}/property-boot/generic-console.log
+            ${{ runner.temp }}/property-probe/initramfs-evidence.json
+            ${{ runner.temp }}/property-probe-evidence.json
+            ${{ runner.temp }}/property-probe-boot/generic-console.log
           if-no-files-found: warn
           retention-days: 7
