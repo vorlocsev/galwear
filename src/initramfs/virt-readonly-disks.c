@@ -3,6 +3,8 @@
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <stdlib.h>
+#include <sys/xattr.h>
 #include <linux/fs.h>
 #include <stdio.h>
 #include <string.h>
@@ -61,16 +63,107 @@ static int mount_disk(const char *name)
         return 5;
     }
     if (close(fd)) return 5;
+#ifdef GALWEAR_LABEL_PROBE
+    if (!strcmp(name, "runtime")) {
+        if (mkdir("/apex", 0755)) return 6;
+        snprintf(target, sizeof(target), "/apex/com.android.runtime");
+    } else {
+        snprintf(target, sizeof(target), "/%s", name);
+    }
+#else
     snprintf(target, sizeof(target), "/mnt/%s", name);
+#endif
     if (mkdir(target, 0755) || mount(node, target, "ext4",
         MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "noload")) return 6;
     struct statfs fs;
     struct statvfs vfs;
     if (statfs(target, &fs) || (unsigned long)fs.f_type != 0xef53UL ||
-        statvfs(target, &vfs) || !(vfs.f_flag & ST_RDONLY)) return 7;
+        statvfs(target, &vfs) ||
+        (vfs.f_flag & (ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC)) !=
+        (ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC)) return 7;
     printf("r800-virt-disk: %s serial=PASS block-ro=1 ext4-ro=1\n", name);
     return 0;
 }
+
+#ifdef GALWEAR_LABEL_PROBE
+static unsigned char *read_blob(const char *path, size_t limit, size_t *size)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+        st.st_size <= 0 || (unsigned long)st.st_size > limit)
+        return NULL;
+    *size = (size_t)st.st_size;
+    unsigned char *buf = calloc(*size + 1, 1);
+    if (!buf) return NULL;
+    size_t offset = 0;
+    while (offset < *size) {
+        ssize_t n = read(fd, buf + offset, *size - offset);
+        if (n <= 0) return NULL;
+        offset += (size_t)n;
+    }
+    if (close(fd)) return NULL;
+    return buf;
+}
+
+static int exact_text(const char *path, const char *expected)
+{
+    char buf[256];
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof(buf)-1);
+    if (close(fd) || n <= 0 || n >= (ssize_t)sizeof(buf)-1) return 0;
+    if (buf[n-1] == '\0' || buf[n-1] == '\n') --n;
+    buf[n] = '\0';
+    return !strcmp(buf, expected);
+}
+
+static int policy_and_labels(void)
+{
+    size_t policy_size, list_size;
+    unsigned char *policy = read_blob("/galwear-policy", 16U*1024U*1024U, &policy_size);
+    unsigned char *list = read_blob("/galwear-labels.list", 256U*1024U, &list_size);
+    struct statfs fs;
+    if (!policy || !list || memchr(list, '\0', list_size) || list[list_size-1] != '\n' ||
+        mount("selinuxfs", "/sys/fs/selinux", "selinuxfs",
+              MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
+        statfs("/sys/fs/selinux", &fs) || (unsigned long)fs.f_type != 0xf97cff8cUL ||
+        !exact_text("/sys/fs/selinux/enforce", "1")) return 1;
+    int fd = open("/sys/fs/selinux/load", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return 2;
+    ssize_t n = write(fd, policy, policy_size);
+    if (close(fd) || n != (ssize_t)policy_size) return 2;
+    free(policy);
+    if (!exact_text("/sys/fs/selinux/enforce", "1") ||
+        !exact_text("/proc/self/attr/current", "u:r:kernel:s0")) return 3;
+    puts("r800-disk-label: policy=PASS domain=u:r:kernel:s0 enforce=1");
+    char *save = NULL;
+    unsigned count = 0;
+    for (char *line = strtok_r((char *)list, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char path[512], expected[256], actual[256], extra;
+        if (sscanf(line, "%511s %255s %c", path, expected, &extra) != 2 ||
+            path[0] != '/' || strstr(path, "..") || ++count > 1024)
+            return 4;
+        /* lgetxattr reads the effective kernel label without following a symlink.
+         * Do not use setxattr, restorecon or change the enforcing state. */
+        n = lgetxattr(path, "security.selinux", actual, sizeof(actual));
+        if (n <= 0 || n >= (ssize_t)sizeof(actual)) return 5;
+        if (actual[n-1] == '\0') --n;
+        actual[n] = '\0';
+        if (strcmp(actual, expected)) {
+            fprintf(stderr, "r800-disk-label: FAIL path=%s actual=%s\n", path, actual);
+            return 6;
+        }
+        printf("r800-disk-label: path=%s context=%s\n", path, actual);
+    }
+    free(list);
+    if (!count || !exact_text("/sys/fs/selinux/enforce", "1") ||
+        !exact_text("/proc/self/attr/current", "u:r:kernel:s0")) return 7;
+    printf("r800-disk-label: PASS count=%u android=not-started\n", count);
+    return 0;
+}
+#endif
 
 int main(void)
 {
@@ -96,6 +189,9 @@ int main(void)
     if (ferror(list) || fclose(list) || !count) return 5;
     /* No unlisted device is mounted; images stay mounted read-only. */
     printf("r800-virt-disk: PASS count=%u policy=not-loaded android=not-started\n", count);
+#ifdef GALWEAR_LABEL_PROBE
+    if (policy_and_labels()) return 6;
+#endif
     const struct timespec delay = {5, 0};
     unsigned sequence = 0;
     for (;;) {
