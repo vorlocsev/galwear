@@ -19,6 +19,7 @@ import r800_vintf_inventory
 import r800_graphics_inventory
 import r800_display_inventory
 import r800_input_inventory
+import r800_audio_inventory
 
 NAME = re.compile(r"[A-Za-z0-9_.+~-]{1,255}")
 TARGETS = ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager",
@@ -815,6 +816,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
     graphics_inventory = r800_graphics_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config)
     display_inventory = r800_display_inventory.audit(root, kernel_config, dtb)
     input_inventory = r800_input_inventory.audit(root, kernel_config, dtb)
+    audio_inventory = r800_audio_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -843,6 +845,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
             "graphics_inventory": graphics_inventory,
             "display_inventory": display_inventory,
             "input_inventory": input_inventory,
+            "audio_inventory": audio_inventory,
             "namespace_inventory": namespace_inventory,
             "namespace_scope": namespace_scope,
             "android_namespace_resolution_verified": False,
