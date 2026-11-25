@@ -1,0 +1,17 @@
+diff --git a/src/pcm.c b/src/pcm.c
+--- a/src/pcm.c
++++ b/src/pcm.c
+@@ -605,6 +605,13 @@ static int pcm_sync_ptr(struct pcm *pcm, int flags)
+             }
+         }
+     } else {
++        /* For read/write PCMs the kernel owns appl_ptr and avail_min.
++         * ARM compat SYNC_PTR writes the userspace copy back unless
++         * these flags are set. Do not rewind a running PCM on a query.
++         * Leave explicit mmap commits unchanged. */
++        if (!(pcm->flags & PCM_MMAP))
++            flags |= SNDRV_PCM_SYNC_PTR_APPL | SNDRV_PCM_SYNC_PTR_AVAIL_MIN;
++
+         pcm->sync_ptr->flags = flags;
+         if (pcm->ops->ioctl(pcm->data, SNDRV_PCM_IOCTL_SYNC_PTR,
+                             pcm->sync_ptr) < 0) {
