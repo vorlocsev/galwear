@@ -1,0 +1,95 @@
+name: SM-R800 generic ARM64 PID1 QEMU smoke (non-release)
+
+on:
+  push:
+    branches:
+      - "development/r800-display-error-propagation-20261125"
+    paths:
+      - ".github/workflows/r800-qemu-system-init.yml"
+      - "build/r800_qemu_system_init.py"
+      - "tests/test_qemu_system_init.py"
+      - "build/r800_qemu_user_init.py"
+      - "build/r800_initramfs_compile_smoke.sh"
+      - "build/r800_initramfs_spec.py"
+      - "build/r800_cpio_audit.py"
+      - "tests/test_initramfs_recipe.py"
+      - "src/initramfs/init-readonly.c"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generic-arm64-pid1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify exact triggering commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Validate synthetic console and CPIO checks
+        run: python3 -m unittest discover -s tests -p 'test_qemu_system_init.py' -v
+      - name: Compile same project init with LLVM 19.1.4
+        run: |
+          docker run --rm --pull=always \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache clang19=19.1.4-r0 lld=19.1.4-r0 \
+                python3 llvm19=19.1.4-r1
+              sh /repo/build/r800_initramfs_compile_smoke.sh \
+                /repo /scratch/r800-system-init
+            '
+      - name: Obtain generic Debian ARM64 kernel from authenticated apt indexes
+        run: |
+          mkdir "$RUNNER_TEMP/r800-generic-kernel"
+          docker run --rm --pull=always \
+            -v "$RUNNER_TEMP/r800-generic-kernel:/out" \
+            debian:bookworm-slim sh -eu -c '
+              dpkg --add-architecture arm64
+              apt-get update
+              mkdir /tmp/download
+              cd /tmp/download
+              apt-get download linux-image-arm64:arm64
+              set -- linux-image-arm64_*.deb
+              test "$#" -eq 1
+              dependency=$(dpkg-deb -f "$1" Depends)
+              pair=$(printf "%s\n" "$dependency" | sed -nE "s/^(linux-image-[0-9][a-zA-Z0-9.+~-]*-arm64) \(= ([^)]*)\).*$/\1 \2/p")
+              test -n "$pair"
+              set -- $pair
+              test "$#" -eq 2
+              apt-get download "$1:arm64=$2"
+              set -- linux-image-[0-9]*-arm64_*.deb
+              test "$#" -eq 1
+              dpkg-deb -f "$1" Package Version Architecture > /out/package-evidence.txt
+              sha256sum "$1" >> /out/package-evidence.txt
+              test "$(dpkg-deb -f "$1" Architecture)" = arm64
+              dpkg-deb -x "$1" /tmp/extracted
+              set -- /tmp/extracted/boot/vmlinuz-*
+              test "$#" -eq 1
+              test -s "$1"
+              cp "$1" /out/generic-kernel
+              sha256sum /out/generic-kernel >> /out/package-evidence.txt
+            '
+      - name: Boot generic virt machine without disk or network
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm
+          python3 build/r800_qemu_system_init.py \
+            --init "$RUNNER_TEMP/r800-system-init/init" \
+            --compile-evidence "$RUNNER_TEMP/r800-system-init/initramfs-evidence.json" \
+            --generic-kernel "$RUNNER_TEMP/r800-generic-kernel/generic-kernel" \
+            --out-dir "$RUNNER_TEMP/r800-system-run" \
+            --report "$RUNNER_TEMP/r800-system-evidence.json"
+      - name: Upload reports and virtual console only (no binary artifacts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-generic-arm64-system-evidence-only
+          path: |
+            ${{ runner.temp }}/r800-system-init/initramfs-evidence.json
+            ${{ runner.temp }}/r800-generic-kernel/package-evidence.txt
+            ${{ runner.temp }}/r800-system-evidence.json
+            ${{ runner.temp }}/r800-system-run/generic-console.log
+          if-no-files-found: warn
+          retention-days: 7
