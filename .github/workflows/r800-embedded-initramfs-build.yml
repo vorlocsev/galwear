@@ -122,6 +122,22 @@ jobs:
                 --container-image-id "$R800_CONTAINER_IMAGE_ID"
             '
 
+      - name: Verify actual compiled Image and DTB minimum NZIT budget
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends device-tree-compiler
+          dtc -I dts -O dtb -S 133120 -o "$RUNNER_TEMP/r800.dtb" src/dt/r800.dts
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import json, pathlib, sys
+          sys.path.insert(0, "build")
+          from r800_boot_candidate import component_evidence
+          root = pathlib.Path(sys.argv[1])
+          report = component_evidence((root / "r800.dtb").read_bytes(),
+              (root / "r800-embedded-kernel/arch/arm64/boot/Image").read_bytes())
+          (root / "r800-compiled-components.json").write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, sort_keys=True))
+          PY
+
       - name: Produce evidence only; no Image or init executable uploads
         if: always()
         run: |
@@ -168,5 +184,6 @@ jobs:
             ${{ runner.temp }}/r800-embedded-kernel/embedded-initramfs-gate.json
             ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
             ${{ runner.temp }}/r800-image-repeatability.json
+            ${{ runner.temp }}/r800-compiled-components.json
           if-no-files-found: warn
           retention-days: 7
