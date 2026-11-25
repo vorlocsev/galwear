@@ -72,8 +72,11 @@ int main(int argc, char **argv)
     if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
         mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
         mount("selinuxfs", "/sys/fs/selinux", "selinuxfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
-        statfs("/sys/fs/selinux", &fs) || (unsigned long)fs.f_type != 0xf97cff8cUL ||
-        security_getenforce() != 1 || load_stock_policy() ||
+        statfs("/sys/fs/selinux", &fs) || (unsigned long)fs.f_type != 0xf97cff8cUL)
+        return 4;
+    /* Static libselinux constructors may have run before selinuxfs existed. */
+    set_selinuxmnt("/sys/fs/selinux");
+    if (security_getenforce() != 1 || load_stock_policy() ||
         security_getenforce() != 1 || !context_is("u:r:kernel:s0"))
         return 4;
     puts("r800-transition: stock-policy=PASS domain=u:r:kernel:s0");
