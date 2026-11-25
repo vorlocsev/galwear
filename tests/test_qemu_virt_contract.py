@@ -47,6 +47,20 @@ class VirtTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Expected SELinux"):
             a.inspect(PROPERTY_CONFIG.replace('CONFIG_DEFAULT_SECURITY="selinux"', 'CONFIG_DEFAULT_SECURITY=""'), LIST, "property")
 
+    def test_block_profile(self):
+        cfg = PROPERTY_CONFIG + "\n".join("CONFIG_" + key + "=y" for key in a.BLOCK_REQUIRED) + "\n"
+        self.assertTrue(a.inspect(cfg, LIST, "block")["virtio_block_profile"])
+        with self.assertRaisesRegex(ValueError, "CONFIG_VIRTIO_BLK|CONFIG_VIRTIO_MMIO"):
+            a.inspect(cfg, LIST, "property")
+        for key in a.BLOCK_REQUIRED:
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "Missing virt built-in"):
+                    a.inspect(cfg.replace("CONFIG_" + key + "=y\n", ""), LIST, "block")
+        for key in a.BLOCK_FORBIDDEN:
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "Unexpected enabled"):
+                    a.inspect(cfg + "CONFIG_" + key + "=y\n", LIST, "block")
+
     def test_invalid_profile(self):
         with self.assertRaisesRegex(ValueError, "Unknown virt profile"):
             a.inspect(CONFIG, LIST, "hardware")
