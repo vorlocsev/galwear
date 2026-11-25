@@ -665,3 +665,45 @@ physical watch or flash acceptance is implied. AOSP linkage, volatile
 directory labeling, inherited console access, and service runtime
 remain real-guest blockers until verified. Do not grant broad
 permissions or relax enforcing mode to force the test to pass.
+
+
+## Automated EXT4 property-service pipeline
+
+The existing AOSP build phase now also builds host e2fsdroid in both
+policy output trees. Use a clean GalWear checkout at the same commit
+for build and boot. The EXT4 pipeline does not depend on successful
+kernel-domain relabel of a RAM-only rootfs; it uses the separate
+block-profile kernel and pre-labeled disk images.
+
+    python3 build/r800_property_pipeline.py build \
+      --aosp-root /absolute/disposable-aosp-r48 \
+      --out /absolute/new-property-build --jobs 4
+
+Prepare explicit library choices from service/init-dependencies.json,
+compile the block-profile kernel and establish its no-disk embedded
+PID1 baseline. Then:
+
+    python3 build/r800_ext4_property_pipeline.py \
+      --build-root /absolute/new-property-build --choices /absolute/choices.json \
+      --kernel /absolute/block-kernel/arch/arm64/boot/Image \
+      --baseline /absolute/block-baseline.json \
+      --config-evidence /absolute/block-config.json \
+      --out /absolute/new-ext4-run
+
+The pipeline verifies the build report and exact commit, runtime APEX
+path and digest, and exact block kernel evidence. It stages one rootfs,
+compiles five separate static probes, builds stock image sets, checks
+read-only mounts and guest labels, builds the separate static init
+transition image, verifies its transition, then builds the diagnostic
+policy image set and attempts the original libinit property service.
+Each stage has an independent log and report hash. First failure stops
+all later stages. Only the last successful gate produces
+VIRT_EXT4_PROPERTY_PIPELINE_ONLY. The script requires substantial
+local storage and host e2fsprogs, matchpathcon, ARM64 compiler and
+QEMU. It does not sync AOSP, compile the kernel, or publish anything.
+
+The AOSP build phase still includes the earlier RAM-only probe
+builds; these are not used by the EXT4 boot phase. Actual complete
+AOSP compilation, image creation, QEMU boots and CI are not yet
+established. The new synthetic orchestration tests do not substitute
+for a real run.
