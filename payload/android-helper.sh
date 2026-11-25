@@ -622,7 +622,7 @@ fi
     # manages Wi-Fi and the phone link itself.
     if [ -f /oem/r800dev/android/DEV ]; then
     W=/dev/r800wpa; $B mkdir -p $W
-    L=/oem/r800dev/root      # musl wpa_supplicant lives here
+    WPA=/oem/r800dev/bin/wpa_supplicant
     inet() { $B ip -4 addr show wlan0 2>/dev/null | $B grep -q inet; }
     # Android owns Wi-Fi: it gets a real network (apps have internet) and nothing
     # fights over wlan0. Join the Tizen network with the passphrase in wifi.pass.
@@ -657,7 +657,7 @@ esac
 exit 0
 H
         $B chmod 755 $W/dhcp.sh
-        $L/lib/ld-musl-aarch64.so.1 --library-path $L/lib:$L/usr/lib $L/sbin/wpa_supplicant             -B -i wlan0 -D nl80211 -c $W/wpa.conf > /dev/null 2>&1
+        "$WPA"             -B -i wlan0 -D nl80211 -c $W/wpa.conf > /dev/null 2>&1
         $B udhcpc -i wlan0 -s $W/dhcp.sh -b -t 20 -T 3 -x hostname:galaxywatch > /dev/null 2>&1
         for i in $($B seq 1 30); do inet && break; $B sleep 1; done
     fi
@@ -713,7 +713,7 @@ H
             fi
             /system/bin/ip rule add from all lookup wlan0 pref 9998 2>/dev/null
         else
-            $B ps w 2>/dev/null | $B grep -q '[r]800wpa' ||                 $L/lib/ld-musl-aarch64.so.1 --library-path $L/lib:$L/usr/lib $L/sbin/wpa_supplicant                     -B -i wlan0 -D nl80211 -c $W/wpa.conf > /dev/null 2>&1
+            $B ps w 2>/dev/null | $B grep -q '[r]800wpa' ||                 "$WPA"                     -B -i wlan0 -D nl80211 -c $W/wpa.conf > /dev/null 2>&1
             inet || $B udhcpc -i wlan0 -s $W/dhcp.sh -b -t 10 -T 3 -x hostname:galaxywatch > /dev/null 2>&1
         fi
         $B sleep 30
