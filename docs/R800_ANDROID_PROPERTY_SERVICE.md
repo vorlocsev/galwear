@@ -54,3 +54,29 @@ recipe with the optional final argument property. CI workflow
 r800-qemu-property.yml compiles the resulting profile and attempts the
 embedded minimal PID1 boot. Configuration and boot evidence do not establish
 SELinux policy loading, property labels or AF_UNIX service behavior.
+
+
+## Original libinit service build (not booted)
+
+    bash build/r800_aosp_init_service_build.sh /absolute/aosp-r48 /absolute/new-init-evidence
+
+This recipe builds the original init_second_stage target alongside a
+temporary test module linked to the unmodified libinit. The harness invokes
+PropertyInit and StartPropertyService directly, then execs a separate Bionic
+client that uses __system_property_set, reads properties and tests the
+read-only version property. It does not replace the server protocol.
+The build inventory records the direct ELF dependencies and interpreter
+for all three executables; the complete runtime dependency closure is not
+yet resolved. The temporary Soong overlay is removed after the build.
+
+Do not run the harness on a real Android device or host. For a future virt
+run it requires a fresh RAM-backed /dev, /dev/socket, procfs, sysfs,
+matching Android property contexts and an appropriate enforcing SELinux
+policy, plus a verified linker namespace and library closure. The current
+synthetic base_t fixture is not that policy. The harness requires PID 1
+and the explicit --virt-property-service argument. It does not implement
+the normal init event loop, persistent-property handling or ctl.* services.
+Read-only rejection is not evidence of SELinux authorization denial.
+
+No original init or original property service execution is established by
+the build recipe or inventory alone.
