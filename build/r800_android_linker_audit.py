@@ -8,6 +8,7 @@ import re
 import struct
 
 from r800_android_userspace_preflight import guest_path, read_regular, MAX_ELF
+import r800_linker_namespaces
 
 NAME = re.compile(r"[A-Za-z0-9_.+~-]{1,255}")
 TARGETS = ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager",
@@ -791,6 +792,7 @@ def audit(root: Path, targets=TARGETS) -> dict:
     resolution = symbol_candidates(seen, edges)
     if resolution["limit_exceeded"]:
         errors.append("Symbol candidate comparison exceeds inspection limit")
+    namespace_inventory = r800_linker_namespaces.audit(root)
     apex = {}
     for name in ("com.android.runtime", "com.android.art"):
         try:
@@ -809,7 +811,8 @@ def audit(root: Path, targets=TARGETS) -> dict:
             "relocations_applied": False,
             "dependency_edges": edges, "symbol_candidates": resolution,
             "symbol_resolution_verified": False,
-            "apex": apex, "android_namespace_resolution_verified": False,
+            "apex": apex, "namespace_inventory": namespace_inventory,
+            "android_namespace_resolution_verified": False,
             "symbol_versions_verified": False, "apex_activation_verified": False,
             "android_boot_tested": False, "safe_to_flash": False}
 
