@@ -842,3 +842,49 @@ nosuid_transition permissions and any applicable type bounds for
 kernel->init and init->galwear_property_client. Source declarations
 alone do not prove these permissions. Do not relax flags or policy
 to manufacture a successful transition.
+
+
+## Compiled nosuid transition prerequisite audit
+
+The pinned kernel security/selinux/hooks.c check_nnp_nosuid()
+permits domain-changing exec on a nosuid mount if the compiled
+policy has nnp_nosuid_transition and allows process2
+nosuid_transition, or if security_bounded_transition() in
+security/selinux/ss/services.c finds the old type in the new
+type's bounds ancestry. The latter walks the entire ancestor chain.
+A denied default transition can fall back to the old SID.
+
+The standalone read-only audit is:
+
+    python3 build/r800_ext4_nosuid_policy_gate.py \
+      --product-out /absolute/stock-product-out \
+      --checkfc /absolute/host/bin/checkfc \
+      --profile stock --report /absolute/stock-nosuid.json
+
+Repeat with --profile fixture and the fixture product output.
+The stock profile checks kernel -> init via init_exec. The fixture
+also checks init -> galwear_property_client via its dedicated
+entrypoint type. The audit uses SETools seinfo --flat --polcap and
+--typebounds, and sesearch for unconditional type_transition,
+file execute, process transition, file entrypoint and process2
+nosuid_transition. It checks direct and inherited typebounds.
+Conditional allow rules are deliberately not accepted by this
+conservative gate. Absence of a required unconditional rule does
+not prove a runtime denial under every possible Boolean state.
+
+Exit 0 / EXT4_NOSUID_POLICY_PREREQUISITES_ONLY means static
+prerequisites were found, not a successful kernel AVC decision.
+Exit 3 / EXT4_NOSUID_POLICY_PREREQUISITES_NOT_MET means the
+conservative prerequisites were not met; exit 2 / REJECT is
+an invalid input or tool failure. MLS, constraints, file access,
+inherited descriptors, NNP and actual exec remain runtime checks.
+The pipeline records stock and fixture reports separately before
+building each executable experiment. Both direct QEMU runners
+also repeat the audit on the exact policy bytes destined for
+the guest archive; a prior JSON report cannot bypass the check.
+
+Mount flags and policy rules are unchanged. No generated permissions
+or typebounds are added to force a pass. SETools CLI syntax was
+checked against the 4.5.1 source; actual compiled AOSP policy and
+SETools binaries are absent from the current environment. Eight
+mocked regression cases are committed, not executed here.
