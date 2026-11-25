@@ -8,14 +8,16 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import time
 
-from r800_cpio_audit import inspect_cpio
+from r800_cpio_audit import inspect_cpio, MAX_ARCHIVE_BYTES
 from r800_initramfs_spec import validate_init
 from r800_qemu_user_init import EXPECTED
 
 SCHEMA = "galwear-r800-generic-arm64-system-v1"
 MAX_KERNEL = 128 * 1024 * 1024
 TIMEOUT = 90
+MAX_LOG = 8 * 1024 * 1024
 
 
 def create_archive(binary: Path) -> bytes:
@@ -75,7 +77,10 @@ def kernel_bytes(path: Path) -> bytes:
 
 def verify_embedded(raw: bytes, archive: Path, binary: Path) -> dict:
     evidence = inspect_cpio(archive, binary)
-    data = archive.read_bytes()
+    with archive.open("rb") as stream:
+        data = stream.read(MAX_ARCHIVE_BYTES + 1)
+    if not 0 < len(data) <= MAX_ARCHIVE_BYTES or hashlib.sha256(data).hexdigest() != evidence["archive_sha256"]:
+        raise ValueError("Embedded CPIO changed after audit")
     offset = raw.find(data)
     if offset < 0 or raw.find(data, offset + 1) >= 0:
         raise ValueError("Audited CPIO missing or ambiguous in virt Image")
@@ -85,8 +90,14 @@ def verify_embedded(raw: bytes, archive: Path, binary: Path) -> dict:
 def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
         embedded_archive: Path | None = None) -> dict:
     elf = validate_init(binary)
-    spec = json.loads(compile_evidence.read_text())
-    if spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != elf:
+    if compile_evidence.is_symlink() or not compile_evidence.is_file():
+        raise ValueError("Invalid compile evidence")
+    with compile_evidence.open("rb") as stream:
+        spec_raw = stream.read(65537)
+    if len(spec_raw) > 65536:
+        raise ValueError("Compile evidence too large")
+    spec = json.loads(spec_raw)
+    if not isinstance(spec, dict) or spec.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY" or spec.get("init") != elf:
         raise ValueError("Init does not match compile evidence")
     raw = kernel_bytes(kernel)
     out.mkdir(exist_ok=False)
@@ -119,16 +130,27 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
         proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stream,
                                 stderr=subprocess.STDOUT)
         try:
-            proc.wait(timeout=TIMEOUT)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            deadline = time.monotonic() + TIMEOUT
+            while proc.poll() is None:
+                if log_path.stat().st_size > MAX_LOG:
+                    raise ValueError("Virtual console exceeded log limit")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    proc.wait(timeout=min(0.25, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=5)
-    if log_path.stat().st_size > 8 * 1024 * 1024:
+    if log_path.stat().st_size > MAX_LOG:
         raise ValueError("Unexpectedly large virtual console log")
     observed = inspect_console(log_path.read_bytes(), timed_out)
+    if validate_init(binary) != elf:
+        raise ValueError("Init changed during virtual boot")
     return {"schema": SCHEMA, "status": "VIRT_EMBEDDED_PID1_BOOT_ONLY" if embedded_archive else "GENERIC_ARM64_PID1_BOOT_ONLY",
             "initramfs_mode": "embedded" if embedded_archive else "external",
             "archive_image_offset": cpio.get("image_offset"),
