@@ -1,5 +1,5 @@
 """Synthetic single-namespace init rootfs planning and staging."""
-import copy
+import json
 import hashlib
 from pathlib import Path
 import sys
@@ -90,6 +90,10 @@ class RootfsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Source changed"):
             a.stage(plan, self.product, self.runtime, out)
         self.assertFalse(out.exists())
+
+    def test_duplicate_json_choice(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate selection key"):
+            json.loads('{"libraries": {}, "libraries": {}}', object_pairs_hook=a.unique_object)
 
     def test_non_candidate_choice(self):
         self.choices["libraries"]["libbase.so"] = self.libc
