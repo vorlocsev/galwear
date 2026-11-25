@@ -24,7 +24,10 @@ SHMEM_EXPECTED = [b"r800-shmem: ashmem size=65536 roundtrip=PASS",
                   b"r800-shmem: PASS"]
 
 
-def inspect_abi(log: bytes) -> dict:
+BIONIC_MARKER = b"r800-libc: bionic api=30 static"
+
+
+def inspect_abi(log: bytes, bionic: bool = False) -> dict:
     lines = log.replace(b"\r\n", b"\n").splitlines()
     if lines.count(START) != 1 or lines.count(END) != 1:
         raise ValueError("Missing or duplicate ABI PID1 markers")
@@ -32,7 +35,12 @@ def inspect_abi(log: bytes) -> dict:
     init = lines.index(EXPECTED.rstrip(b"\n"))
     if not init < start < end:
         raise ValueError("Unexpected ABI PID1 marker order")
+    libc_lines = [line for line in lines if line.startswith(b"r800-libc:")]
+    if libc_lines != ([BIONIC_MARKER] if bionic else []):
+        raise ValueError("Unexpected libc identity")
     abi_lines = [line for line in lines if line.startswith(b"r800-abi:")]
+    if bionic and (not abi_lines or not start < lines.index(BIONIC_MARKER) < lines.index(abi_lines[0])):
+        raise ValueError("Libc identity outside ABI startup window")
     if abi_lines != ABI_EXPECTED.splitlines():
         raise ValueError("Unexpected ABI stage sequence")
     if any(line.startswith(b"r800-abi:") for line in lines[:start] + lines[end:]):
@@ -55,7 +63,7 @@ def inspect_abi(log: bytes) -> dict:
             "binder_version_reported": 8, "binder_devices_checked": ["binder", "hwbinder", "vndbinder"],
             "binder_buffer_mapping_reported": True, "binder_transactions_tested": True,
             "binder_roundtrip_context": "binder", "binder_distinct_processes_reported": True,
-            "bionic_tested": False, "guest_pid1_reported": True, "abi_completed_before_heartbeat": True,
+            "bionic_tested": bionic, "guest_pid1_reported": True, "abi_completed_before_heartbeat": True,
             **inspect_result(b"\n".join(abi_lines) + b"\n", b"", 0)}
 
 
@@ -79,6 +87,42 @@ def verify_baseline(path: Path, kernel: Path) -> str:
     return digest
 
 
+def read_bounded_json(path: Path) -> dict:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Missing libc evidence")
+    with path.open("rb") as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("Oversized libc evidence")
+    result = json.loads(raw)
+    if not isinstance(result, dict):
+        raise ValueError("Invalid libc evidence")
+    return result
+
+
+def verify_bionic(compile_report: Path, glibc_report: Path, binary: Path, kernel_sha: str) -> dict:
+    from r800_initramfs_spec import validate_init
+    compiled = read_bounded_json(compile_report)
+    glibc = read_bounded_json(glibc_report)
+    sha = validate_init(binary)["sha256"]
+    if (compiled.get("status") != "BIONIC_STATIC_COMPILE_ONLY"
+            or compiled.get("ndk_revision") != "27.3.13750724"
+            or compiled.get("android_api") != 30
+            or compiled.get("init_sha256") != sha
+            or compiled.get("safe_to_flash") is not False):
+        raise ValueError("Bionic compile evidence mismatch")
+    if (glibc.get("status") != "VIRT_GUEST_KERNEL_ABI_ONLY"
+            or glibc.get("generic_kernel_sha256") != kernel_sha
+            or glibc.get("guest_kernel_syscalls_tested") is not True
+            or glibc.get("bionic_tested") is not False
+            or glibc.get("init_sha256") == sha
+            or glibc.get("safe_to_flash") is not False):
+        raise ValueError("Matching successful glibc baseline required")
+    return {"ndk_revision": compiled["ndk_revision"], "android_api": 30,
+            "glibc_baseline_init_sha256": glibc.get("init_sha256"),
+            "dynamic_android_linker_tested": False}
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--init", required=True, type=Path)
@@ -87,15 +131,21 @@ def main() -> int:
     p.add_argument("--baseline", required=True, type=Path)
     p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--report", required=True, type=Path)
+    p.add_argument("--bionic-compile-evidence", type=Path)
+    p.add_argument("--glibc-baseline", type=Path)
     a = p.parse_args()
     try:
         digest = verify_baseline(a.baseline, a.kernel)
+        bionic = a.bionic_compile_evidence is not None
+        if bionic != (a.glibc_baseline is not None):
+            raise ValueError("Both Bionic and glibc evidence are required together")
+        libc = verify_bionic(a.bionic_compile_evidence, a.glibc_baseline, a.init, digest) if bionic else {}
         evidence = boot(a.init, a.compile_evidence, a.kernel, a.out_dir)
         if evidence["generic_kernel_sha256"] != digest:
             raise ValueError("Virtual kernel changed after baseline verification")
-        report = {**evidence, **inspect_abi((a.out_dir / "generic-console.log").read_bytes()),
+        report = {**evidence, **inspect_abi((a.out_dir / "generic-console.log").read_bytes(), bionic), **libc,
                   "schema": "galwear-r800-virt-guest-abi-v1",
-                  "status": "VIRT_GUEST_KERNEL_ABI_ONLY",
+                  "status": "VIRT_GUEST_BIONIC_ABI_ONLY" if bionic else "VIRT_GUEST_KERNEL_ABI_ONLY",
                   "guest_kernel_syscalls_tested": True,
                   "external_diagnostic_initrd": True,
                   "parallel_cpu_execution_proven": False,
