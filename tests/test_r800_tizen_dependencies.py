@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"build"))
 from r800_tizen_dependencies import audit, resolve_guest, interpreter
 from r800_stage_tizen import stage
-from test_android_linker_audit import fixture, version_fixture
+from test_android_linker_audit import fixture, version_fixture, classified_symbol_fixture
 
 class TizenDependencyTests(unittest.TestCase):
     def setUp(self):
@@ -146,6 +146,43 @@ class TizenDependencyTests(unittest.TestCase):
         self.put("/usr/lib/libx.so",data)
         self.put("/usr/lib/ld-linux.so.3",fixture("arm"))
         self.assertEqual(audit(self.root,[self.target])["problems"],[])
+
+    def test_symbol_version_match(self):
+        self.put(self.target,classified_symbol_fixture("arm",version_kind="need"))
+        self.put("/usr/lib/libx.so",classified_symbol_fixture("arm",section=1,version_kind="define"))
+        r=audit(self.root,[self.target])
+        scope=r["symbol_candidates"]["targets"][self.target]
+        self.assertEqual(scope["matched"],1)
+        self.assertFalse(scope["missing_strong"])
+        self.assertFalse(r["symbol_resolution_verified"])
+
+    def test_unrelated_target_cannot_satisfy_import(self):
+        self.put(self.target,classified_symbol_fixture("arm"))
+        other="/usr/bin/gpsd"
+        self.put(other,classified_symbol_fixture("arm",section=1))
+        scope=audit(self.root,[self.target,other])["symbol_candidates"]["targets"][self.target]
+        self.assertEqual(scope["matched"],0)
+        self.assertEqual(len(scope["missing_strong"]),1)
+
+    def test_weak_import_separate(self):
+        self.put(self.target,classified_symbol_fixture("arm",binding=2))
+        scope=audit(self.root,[self.target])["symbol_candidates"]["targets"][self.target]
+        self.assertEqual(len(scope["missing_weak"]),1)
+        self.assertFalse(scope["missing_strong"])
+
+    def test_missing_library_makes_symbol_scope_incomplete(self):
+        self.put(self.target,classified_symbol_fixture("arm",version_kind="need"))
+        scope=audit(self.root,[self.target])["symbol_candidates"]["targets"][self.target]
+        self.assertTrue(scope["inventory_incomplete"])
+        self.assertEqual(len(scope["incomplete"]),1)
+        self.assertFalse(scope["missing_strong"])
+
+    def test_tls_and_relocation_inventory_present(self):
+        self.put(self.target,fixture("arm"))
+        item=audit(self.root,[self.target])["files"][self.target]
+        self.assertIn("tls_segment",item)
+        self.assertIn("tls_symbol_count",item)
+        self.assertIn("relocations",item)
 
 if __name__=="__main__":
     unittest.main()
