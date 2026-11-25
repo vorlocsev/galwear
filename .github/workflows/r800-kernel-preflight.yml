@@ -21,6 +21,19 @@ jobs:
           sh -n build/mk_kernel_patch.sh
           sh -n build/mkboot.sh
           sh -n src/initramfs/build.sh
+      - name: Cross-build freestanding AArch64 init (non-release)
+        run: |
+          sh src/initramfs/build.sh "$RUNNER_TEMP/r800-initramfs"
+          python3 - "$RUNNER_TEMP/r800-initramfs" <<'PY'
+          import pathlib, struct, sys
+          root = pathlib.Path(sys.argv[1])
+          data = (root / "init").read_bytes()
+          assert data[:7] == b"\x7fELF\x02\x01\x01"
+          assert struct.unpack_from("<HH", data, 16) == (2, 183)
+          assert struct.unpack_from("<Q", data, 24)[0] != 0
+          assert (root / "list.txt").read_text() == f"file /init {root}/init 0755 0 0\n"
+          assert (root / "init").stat().st_mode & 0o111
+          PY
       - name: Verify unified diff parses (not applying it)
         run: git apply --numstat src/kernel/r800-wearos.patch > /dev/null
       - name: Compile preflight and synthetic tests
