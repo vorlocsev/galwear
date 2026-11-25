@@ -27180,7 +27180,67 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  		break;
  	case FB_BLANK_NORMAL:
  	case FB_BLANK_VSYNC_SUSPEND:
-@@ -1290,6 +1375,8 @@
+@@ -1234,30 +1319,33 @@
+ 
+ /* ---------- FB_IOCTL INTERFACE ----------- */
+-static void decon_activate_vsync(struct decon_device *decon)
+-{
+-	int prev_refcount;
+-
+-	mutex_lock(&decon->vsync.lock);
+-
+-	prev_refcount = decon->vsync.irq_refcount++;
+-	if (!prev_refcount)
+-		DPU_EVENT_LOG(DPU_EVT_ACT_VSYNC, &decon->sd, ktime_set(0, 0));
+-
+-	mutex_unlock(&decon->vsync.lock);
+-}
+-
+-static void decon_deactivate_vsync(struct decon_device *decon)
+-{
+-	int new_refcount;
+-
+-	mutex_lock(&decon->vsync.lock);
+-
+-	new_refcount = --decon->vsync.irq_refcount;
+-	WARN_ON(new_refcount < 0);
+-	if (!new_refcount)
+-		DPU_EVENT_LOG(DPU_EVT_DEACT_VSYNC, &decon->sd, ktime_set(0, 0));
+-
+-	mutex_unlock(&decon->vsync.lock);
+-}
++/* Callers of the locked helpers hold vsync.lock. */
++static void decon_activate_vsync_locked(struct decon_device *decon)
++{
++	if (!decon->vsync.irq_refcount++)
++		DPU_EVENT_LOG(DPU_EVT_ACT_VSYNC, &decon->sd, ktime_set(0, 0));
++}
++
++static int decon_deactivate_vsync_locked(struct decon_device *decon)
++{
++	if (WARN_ON_ONCE(decon->vsync.irq_refcount <= 0))
++		return -EIO;
++	if (!--decon->vsync.irq_refcount)
++		DPU_EVENT_LOG(DPU_EVT_DEACT_VSYNC, &decon->sd, ktime_set(0, 0));
++	return 0;
++}
++
++static void decon_activate_vsync(struct decon_device *decon)
++{
++	mutex_lock(&decon->vsync.lock);
++	decon_activate_vsync_locked(decon);
++	mutex_unlock(&decon->vsync.lock);
++}
++
++static void decon_deactivate_vsync(struct decon_device *decon)
++{
++	mutex_lock(&decon->vsync.lock);
++	decon_deactivate_vsync_locked(decon);
++	mutex_unlock(&decon->vsync.lock);
++}
+ 
+ int decon_wait_for_vsync(struct decon_device *decon, u32 timeout)
+@@ -1290,6 +1378,8 @@
  
  	decon_deactivate_vsync(decon);
  
@@ -27189,7 +27249,46 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  	if (timeout && ret == 0) {
  		if (decon->d.eint_pend) {
  			decon_err("decon%d wait for vsync timeout(p:0x%x)\n",
-@@ -1949,6 +2036,10 @@
+@@ -1443,20 +1533,22 @@
+ }
+ 
+-int decon_set_vsync_int(struct fb_info *info, bool active)
+-{
+-	struct decon_win *win = info->par;
+-	struct decon_device *decon = win->decon;
+-	bool prev_active = decon->vsync.active;
+-
+-	decon->vsync.active = active;
+-	smp_wmb();
+-
+-	if (active && !prev_active)
+-		decon_activate_vsync(decon);
+-	else if (!active && prev_active)
+-		decon_deactivate_vsync(decon);
+-
+-	return 0;
+-}
++int decon_set_vsync_int(struct fb_info *info, bool active)
++{
++	struct decon_win *win = info->par;
++	struct decon_device *decon = win->decon;
++	int ret = 0;
++
++	mutex_lock(&decon->vsync.lock);
++	if (active != decon->vsync.active) {
++		if (active)
++			decon_activate_vsync_locked(decon);
++		else
++			ret = decon_deactivate_vsync_locked(decon);
++		if (!ret)
++			WRITE_ONCE(decon->vsync.active, active);
++	}
++	mutex_unlock(&decon->vsync.lock);
++	return ret;
++}
+ 
+ static unsigned int decon_map_ion_handle(struct decon_device *decon,
+@@ -1949,6 +2041,10 @@
  			has_cursor_win = true;
  		}
  		/* set decon registers for each window */
@@ -27200,7 +27299,7 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  		decon_reg_set_window_control(decon->id, i, &regs->win_regs[i],
  						regs->win_regs[i].winmap_state);
  
-@@ -3397,8 +3488,10 @@
+@@ -3397,8 +3493,10 @@
  	if (decon->dt.out_type == DECON_OUT_DSI) {
  		decon_hiber_block_exit(decon);
  		/* Unused DECON state is DECON_STATE_INIT */
@@ -27212,7 +27311,7 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  		decon_hiber_unblock(decon);
  	}
  
-@@ -3853,6 +3946,22 @@
+@@ -3853,6 +3951,22 @@
  		win->videomode.vsync_len = lcd_info->vsa;
  		win->videomode.xres = lcd_info->xres;
  		win->videomode.yres = lcd_info->yres;
