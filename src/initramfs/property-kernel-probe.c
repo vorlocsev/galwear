@@ -98,7 +98,7 @@ static int xattr_probe(void)
     char observed[256];
     int fd = open("/data/xattr-test", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0 || fsetxattr(fd, "trusted.galwear", value, sizeof(value), XATTR_CREATE) ||
-        fgetxattr(fd, "trusted.galwear", observed, sizeof(observed)) != sizeof(value) ||
+        fgetxattr(fd, "trusted.galwear", observed, sizeof(observed)) != (ssize_t)sizeof(value) ||
         memcmp(observed, value, sizeof(value)) ||
         fremovexattr(fd, "trusted.galwear") ||
         fsetxattr(fd, "security.selinux", label, sizeof(label), 0) ||
