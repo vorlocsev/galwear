@@ -33,6 +33,10 @@ class PayloadCandidateTests(unittest.TestCase):
         self.put(self.rel, "src/vendor/libbt/bt_vendor.conf", b"synthetic radio input")
         for name in payload.SINGLE:
             self.put(self.src, name, b"fixture")
+        for name, size in payload.ASSET_SIZES.items():
+            self.put(self.src, name, bytes(size))
+        for name in payload.CHARGER_TOOLS:
+            self.put(self.src, name, b"fixture").chmod(0o755)
         for name in payload.SCRIPTS:
             self.put(self.rel, "payload/" + name, b"#!/bin/sh\n")
         self.put(self.rel, "src/tools/sensors/tzchroot.sh", b"#!/bin/sh\n")
@@ -74,6 +78,21 @@ class PayloadCandidateTests(unittest.TestCase):
     def test_changed_bluetooth_configuration(self):
         self.put(self.src, "fw/bt/bt_vendor.conf", b"changed")
         with self.assertRaisesRegex(ValueError, "repository profile"):
+            self.build()
+
+    def test_bad_charger_asset_size(self):
+        self.put(self.src, "charger/d0.rgb", b"bad")
+        with self.assertRaisesRegex(ValueError, "Invalid display asset size"):
+            self.build()
+
+    def test_missing_charger_asset(self):
+        (self.src / "charger/bolt.rgb").unlink()
+        with self.assertRaisesRegex(ValueError, "Missing display asset"):
+            self.build()
+
+    def test_mismatched_wpcd(self):
+        self.put(self.src, "charger/wpcd", b"different").chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "WPCD bytes differ"):
             self.build()
 
     def test_missing_hal(self):
