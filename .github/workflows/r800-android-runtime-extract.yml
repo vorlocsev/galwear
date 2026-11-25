@@ -39,6 +39,8 @@ on:
       - build/r800_ext4_exec_access_audit.py
       - build/r800_ext4_linker_resolution.py
       - build/r800_ext4_elf_abi.py
+      - build/r800_elf_relocations.py
+      - tests/test_elf_relocations.py
       - tests/test_ext4_elf_abi.py
       - tests/test_ext4_linker_resolution.py
       - build/r800_ext4_console_contract.py
@@ -134,6 +136,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_ext4_linker_resolution.py' -v
           command -v clang && command -v ld.lld && command -v readelf
           python3 -m unittest discover -s tests -p 'test_ext4_elf_abi.py' -v
+          python3 -m unittest discover -s tests -p 'test_elf_relocations.py' -v
           python3 -m unittest discover -s tests -p 'test_ext4_evidence_boundaries.py' -v
           python3 -m compileall -q build tests
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
