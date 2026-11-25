@@ -11,7 +11,7 @@ import stat
 import subprocess
 import tempfile
 
-from r800_vendor_inputs import image_info
+from r800_vendor_inputs import image_info, MAX_IMAGE
 from r800_peripheral_firmware import REQUIRED, check_bytes
 
 MAX_FILE = 64 * 1024**2
@@ -71,6 +71,39 @@ def locate(tool, image, guest):
     return int(match[1]), length
 
 
+def snapshot_image(image, snapshot, expected_sha):
+    """Copy bounded bytes once; debugfs never reopens the mutable donor path."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    initial = image.lstat()
+    if not stat.S_ISREG(initial.st_mode) or not 0 < initial.st_size <= MAX_IMAGE:
+        raise ValueError("Expected bounded regular donor image")
+
+    def identity(s):
+        return (s.st_dev, s.st_ino, s.st_mode, s.st_size,
+                s.st_mtime_ns, s.st_ctime_ns)
+
+    digest = hashlib.sha256()
+    count = 0
+    with os.fdopen(os.open(image, flags), "rb") as src:
+        if identity(os.fstat(src.fileno())) != identity(initial):
+            raise ValueError("Donor changed before snapshot")
+        with snapshot.open("xb") as dst:
+            for block in iter(lambda: src.read(1024 * 1024), b""):
+                count += len(block)
+                if count > initial.st_size:
+                    raise ValueError("Donor size changed")
+                digest.update(block)
+                dst.write(block)
+        if identity(os.fstat(src.fileno())) != identity(initial):
+            raise ValueError("Donor changed during snapshot")
+    if count != initial.st_size or identity(image.lstat()) != identity(initial):
+        raise ValueError("Donor changed during snapshot")
+    if digest.hexdigest() != expected_sha:
+        raise ValueError("Input image SHA-256 mismatch")
+    snapshot.chmod(0o400)
+    return identity(initial)
+
+
 def extract(image, output, profile, expected_sha):
     image, output = Path(image).absolute(), Path(output).absolute()
     if profile not in PROFILES or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
@@ -80,18 +113,20 @@ def extract(image, output, profile, expected_sha):
     tool = shutil.which("debugfs")
     if not tool:
         raise ValueError("Install e2fsprogs (debugfs)")
-    before = image_info(image)
-    if before["sha256"] != expected_sha:
-        raise ValueError("Input image SHA-256 mismatch")
     with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
         scratch = Path(tmp)
+        snapshot = scratch/"donor.img"
+        source_identity = snapshot_image(image, snapshot, expected_sha)
+        before = image_info(snapshot)
+        if before["sha256"] != expected_sha:
+            raise ValueError("Snapshot SHA-256 mismatch")
         tree = scratch/"files"
         tree.mkdir()
         files = {}
         for dest, candidates in PROFILES[profile].items():
             matches = []
             for guest in candidates:
-                found = locate(tool, image, guest)
+                found = locate(tool, snapshot, guest)
                 if found is not None:
                     matches.append((guest, found))
             if not matches:
@@ -102,7 +137,7 @@ def extract(image, output, profile, expected_sha):
                 continue
             guest, (inode, length) = matches[0]
             target = scratch/"member"
-            command(tool, image, "dump <%d> member" % inode, cwd=scratch)
+            command(tool, snapshot, "dump <%d> member" % inode, cwd=scratch)
             st = target.lstat()
             if not stat.S_ISREG(st.st_mode) or st.st_size != length:
                 raise ValueError("Extracted donor size mismatch: " + guest)
@@ -115,10 +150,14 @@ def extract(image, output, profile, expected_sha):
             destpath.chmod(0o644)
             files[dest] = {"status":"EXTRACTED", "source":guest,
                            "bytes":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
-        if image_info(image) != before:
+        current = image.lstat()
+        if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
+                current.st_mtime_ns, current.st_ctime_ns) != source_identity:
             raise ValueError("Donor image changed")
+        if image_info(snapshot) != before:
+            raise ValueError("Donor snapshot changed")
         report = {"status":"EXT4_DONOR_EXTRACTION_ONLY","profile":profile,
-                  "image_sha256":expected_sha,"files":files,
+                  "image_sha256":expected_sha,"snapshot_verified":True,"files":files,
                   "missing_or_ambiguous":[n for n,v in files.items() if v["status"]!="EXTRACTED"],
                   "donor_compatibility_verified":False,"xattrs_preserved":False,
                   "safe_to_flash":False}
