@@ -48,11 +48,11 @@ git -C "$TINY" apply "$PATCH"
     git -C "$TINY" diff --stat
 } > "$OUT/tinyalsa-evidence.txt"
 # Compile PIC objects, archive them, and link only this patched copy.
-for unit in pcm pcm_hw mixer mixer_hw; do
+for unit in pcm pcm_hw mixer mixer_hw snd_card_plugin; do
     "$CC" -std=gnu11 -D_GNU_SOURCE -O2 -g0 -fPIC -fvisibility=hidden \
         -I "$TINY/include" -c "$TINY/src/$unit.c" -o "$OUT/$unit.o"
 done
-"$TC/llvm-ar" rcs "$OUT/libtinyalsa-r800.a" "$OUT/pcm.o" "$OUT/pcm_hw.o" "$OUT/mixer.o" "$OUT/mixer_hw.o"
+"$TC/llvm-ar" rcs "$OUT/libtinyalsa-r800.a" "$OUT/pcm.o" "$OUT/pcm_hw.o" "$OUT/mixer.o" "$OUT/mixer_hw.o" "$OUT/snd_card_plugin.o"
 build audio_r800.c audio.primary.r800.so -I "$TINY/include" \
     "$OUT/libtinyalsa-r800.a" -Wl,--exclude-libs,ALL
 echo "NON-RELEASE ARM32 HAL compilation only; PCM runtime untested."
