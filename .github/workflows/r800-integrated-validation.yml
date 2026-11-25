@@ -28,6 +28,11 @@ jobs:
             sudo apt-get install -y lz4
           fi
           lz4 --version
+      - name: Verify e2fsprogs tools for read-only ext4 fixtures
+        run: |
+          command -v debugfs
+          command -v mkfs.ext4
+          debugfs -V
       - name: Complete synthetic test suite (no device, no external firmware)
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Ensure root has not been touched
