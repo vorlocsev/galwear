@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
-from r800_prepare_payload_inputs import prepare, COMPILED, RADIO, ASSET_SIZES
+from r800_prepare_payload_inputs import prepare, COMPILED, RADIO, PERIPHERAL, ASSET_SIZES
 from test_r800_stage_components import arm_fixture, dex_fixture
 from test_android_linker_audit import fixture
 
@@ -36,9 +36,9 @@ class PrepareInputsTests(unittest.TestCase):
             cm[key]=self.put(self.components,key,raw)
         for name,size in ASSET_SIZES.items():
             am[name]=self.put(self.assets,name,bytes(size))
-        for name in RADIO:
+        for name in RADIO | PERIPHERAL:
             key="payload/"+name
-            rm[key]={**self.put(self.radio,key,b"synthetic radio"),"status":"EXTRACTED"}
+            rm[key]={**self.put(self.radio,key,b"synthetic radio\0" if name.endswith(".txt") and name in PERIPHERAL else b"synthetic radio"),"status":"EXTRACTED"}
         self.write(self.components/"component-evidence.json",{
             "status":"PARTIAL_COMPILED_COMPONENTS_ONLY","source_sha":SHA,
             "safe_to_flash":False,"files":cm})
@@ -61,7 +61,7 @@ class PrepareInputsTests(unittest.TestCase):
 
     def test_partial_tree(self):
         r=self.stage()
-        self.assertEqual(set(r["files"]),COMPILED|RADIO|set(ASSET_SIZES))
+        self.assertEqual(set(r["files"]),COMPILED|RADIO|PERIPHERAL|set(ASSET_SIZES))
         self.assertFalse(r["safe_to_flash"])
         self.assertFalse((self.output/"android").exists())
         self.assertFalse((self.output/"gpsbridge").exists())
