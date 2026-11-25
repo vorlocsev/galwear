@@ -18,6 +18,8 @@ class GuestAbiTests(unittest.TestCase):
         report = a.inspect_abi(LOG)
         self.assertTrue(report["guest_pid1_reported"])
         self.assertTrue(report["shared_memory_roundtrip"])
+        self.assertTrue(report["binder_transactions_tested"])
+        self.assertEqual(report["binder_roundtrip_context"], "binder")
 
     def test_missing_pid1_marker(self):
         with self.assertRaisesRegex(ValueError, "markers"):
@@ -46,6 +48,18 @@ class GuestAbiTests(unittest.TestCase):
     def test_binder_after_completion(self):
         with self.assertRaisesRegex(ValueError, "outside ABI completion"):
             a.inspect_abi(LOG.replace(a.END + b"\n", b"").replace(a.BINDER_EXPECTED[0], a.END + b"\n" + a.BINDER_EXPECTED[0]))
+
+    def test_missing_binder_roundtrip(self):
+        with self.assertRaisesRegex(ValueError, "Binder diagnostic sequence"):
+            a.inspect_abi(LOG.replace(a.BINDER_EXPECTED[-2], b""))
+
+    def test_roundtrip_requires_distinct_processes(self):
+        with self.assertRaisesRegex(ValueError, "Binder diagnostic sequence"):
+            a.inspect_abi(LOG.replace(b"distinct-processes=1", b"distinct-processes=0"))
+
+    def test_binder_failure_after_roundtrip(self):
+        with self.assertRaisesRegex(ValueError, "Binder diagnostic sequence"):
+            a.inspect_abi(LOG.replace(a.BINDER_EXPECTED[-1], b"r800-binder: FAIL transaction roundtrip"))
 
     def test_baseline_kernel_hash_and_status(self):
         with tempfile.TemporaryDirectory() as tmp:
