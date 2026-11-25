@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 
 from r800_android_linker_audit import inspect
+from r800_stage_components import static_arm, WIFI_TOOLS
 from r800_android_userspace_preflight import read_regular
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "installer"))
@@ -21,7 +22,7 @@ MAX_BYTES = 1800 * 1024**2
 MAX_FILES = 30000
 SCRIPTS = ("start.sh", "android-helper.sh", "dockrot.sh", "udhcpc.sh", "repair.sh")
 HALS = ("audio.primary.r800.so", "gps.r800.so", "hwcomposer.r800.so", "sensors.r800.so")
-BINS = ("busybox", "fsfreeze", "loopdio", "r800boost", "r800keys", "ukey", "wpcd")
+BINS = ("busybox", "fsfreeze", "loopdio", "r800boost", "r800keys", "ukey", "wpcd") + WIFI_TOOLS
 DIRS = ("fw", "charger", "tzlite", "root", "lib")
 SINGLE = ("keepwifi.dex", "gpsbridge", "splash.raw")
 ASSET_SIZES = {"splash.raw": 360*360*4, "charger/pct.rgb": 36*110*3,
@@ -109,6 +110,8 @@ def inventory(src, release):
         add(path, "bin/" + name)
         if not path.stat().st_mode & 0o111:
             raise ValueError("Non-executable payload binary: " + name)
+        if name in WIFI_TOOLS:
+            static_arm(read_regular(path, 64 * 1024**2))
     for name in DIRS:
         add(checked(name), name, recursive=True)
     # Require the specific firmware paths used by the configured bcmdhd driver
