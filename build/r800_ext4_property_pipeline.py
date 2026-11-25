@@ -106,6 +106,9 @@ def execute(p,a):
          [*common,*stock_args,*probes["labels"],"--product-out",stock,"--checkfc",st/"checkfc",
           "--mount-report",o/"mount.json","--out-dir",o/"labels-boot"],
          o/"labels.json","VIRT_ANDROID_PRELABELED_MOUNTS_ONLY")
+    p.py("06-stock-nosuid-policy","r800_ext4_nosuid_policy_gate.py",
+         ["--product-out",stock,"--checkfc",st/"checkfc","--profile","stock"],
+         o/"stock-nosuid.json","EXT4_NOSUID_POLICY_PREREQUISITES_ONLY")
     second = probes["second-stage"]
     p.py("06-transition-image","r800_android_system_ext4.py",
          [*rootfs,"--product-out",stock,"--checkfc",st/"checkfc","--e2fsdroid",st/"e2fsdroid",
@@ -119,6 +122,9 @@ def execute(p,a):
           "--diagnostic-compile-evidence",second[3],"--product-out",stock,"--checkfc",st/"checkfc",
           "--label-report",o/"labels.json","--out-dir",o/"transition-boot"],
          o/"transition.json","VIRT_ANDROID_EXT4_DIAGNOSTIC_INIT_DOMAIN_ONLY")
+    p.py("08-fixture-nosuid-policy","r800_ext4_nosuid_policy_gate.py",
+         ["--product-out",fixture,"--checkfc",ft/"checkfc","--profile","fixture"],
+         o/"fixture-nosuid.json","EXT4_NOSUID_POLICY_PREREQUISITES_ONLY")
     fixture_args = images("08-fixture",fixture,ft,["--service-fixture"],"ANDROID_SYSTEM_EXT4_SERVICE_STATIC_ONLY")
     p.py("09-property-service","r800_qemu_ext4_property_service.py",
          [*common,*fixture_args,*probes["service"],"--stock-system-report",o/"03-stock-system.json",
