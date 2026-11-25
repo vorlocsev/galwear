@@ -124,3 +124,28 @@ Android linkerconfig policy and does not reproduce all bootstrap/APEX
 namespace rules. No Android executable is launched. Actual namespace
 behavior, other APEX dependencies, property contexts, sepolicy and guest
 mount preparation remain unverified.
+
+
+## Rootfs archive preflight
+
+    aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static \
+      src/initramfs/android-rootfs-preflight.c -o /absolute/preflight-init
+
+    python3 build/r800_android_rootfs_preflight.py \
+      --staged /absolute/staged-rootfs --product-out /absolute/product-out \
+      --init /absolute/preflight-init --archive /absolute/preflight.cpio \
+      --report /absolute/preflight.json
+
+Repeat the same command with --verify to compare an existing archive against
+the canonical reconstruction. The archive is limited to 64 MiB. The
+original six-entry CPIO audit is unchanged. AOSP platform property contexts
+are mandatory; optional partition contexts are included only if available
+as regular files at the exact partition paths. No context text is synthesized.
+The files are not validated against Android SELinux policy yet.
+
+The static diagnostic PID1 mounts procfs, sysfs, devtmpfs and a small tmpfs
+on /data and creates /dev/socket in the guest. It checks the staged client
+and service file permissions without executing either. No Android property
+area, policy or service is started. A future QEMU runner must bind the archive
+to the exact property-profile Image and require ordered preflight markers.
+Keep all binary inputs and archives private and disposable; do not flash.
