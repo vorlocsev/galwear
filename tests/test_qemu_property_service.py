@@ -9,11 +9,13 @@ from r800_qemu_user_init import EXPECTED
 
 PATHS = ["/system/bin/init", a.FILE, a.SERVICE, "/dev/socket"]
 LABELS = ["u:object_r:init_exec:s0", a.LABEL, a.SERVICE_LABEL, "u:object_r:socket_device:s0"]
+import r800_bionic_behavior_contract as bionic
+PROVIDER = bionic.PROVIDERS[2]
 LOG = (EXPECTED + a.PREFIX+b"fixture-policy=PASS enforce=1\n" +
        b"".join(a.PREFIX+b"path="+p.encode()+b" context="+l.encode()+b"\n"
                 for p,l in zip(PATHS,LABELS)) +
        a.PREFIX+b"PASS count=4 service=handover\n" +
-       b"\n".join(a.MARKERS)+b"\n"+a.HEARTBEAT_PREFIX+b"00000001\n")
+       b"\n".join(a.MARKERS[:3]+bionic.markers(PROVIDER)+a.MARKERS[3:])+b"\n"+a.HEARTBEAT_PREFIX+b"00000001\n")
 
 class ServiceTests(unittest.TestCase):
     def test_complete_is_fixture_only(self):
