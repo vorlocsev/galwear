@@ -177,8 +177,16 @@ P2
 cp $S/etc/init/init.r800.rc $OUT/etc/init/; cp $S/etc/fstab.r800 $OUT/etc/; cp $S/ueventd.rc $OUT/
 cp $S/etc/vintf/manifest.xml $OUT/etc/vintf/manifest.xml
 # our HWC 1.1 module (client composition -> fb0 copy + pan), built with the NDK
-cp $S/hwcomposer.r800.so $OUT/lib/hw/hwcomposer.r800.so
-setfattr -n security.selinux -v u:object_r:vendor_file:s0 $OUT/lib/hw/hwcomposer.r800.so
+for module in hwcomposer.r800.so audio.primary.r800.so gps.r800.so sensors.r800.so; do
+    cp "$S/$module" "$OUT/lib/hw/$module"
+    chmod 644 "$OUT/lib/hw/$module"
+    setfattr -n security.selinux -v u:object_r:vendor_file:s0 "$OUT/lib/hw/$module"
+done
+cp "$S/audio/audio_policy_configuration.xml" "$OUT/etc/audio_policy_configuration.xml"
+chmod 644 "$OUT/etc/audio_policy_configuration.xml"
+setfattr -n security.selinux -v u:object_r:vendor_configs_file:s0 "$OUT/etc/audio_policy_configuration.xml"
+# Remove donor duplicates before setting the legacy primary module.
+sed -i '/^ro.hardware.audio.primary=/d' "$OUT/build.prop" "$OUT/default.prop"
 printf 'ro.hardware.hwcomposer=r800
 ' >> $OUT/build.prop
 # lights: Samsung light service + HIDL impl from J4, our legacy module for exynos_panel
@@ -200,7 +208,9 @@ ro.board.platform=exynos9110
 persist.sys.dalvik.vm.lib.2=libart.so
 # no GPU driver yet: do not preload EGL in zygote (it aborts when none is found)
 ro.zygote.disable_gl_preload=true
-ro.hardware.audio.primary=universal7570
+ro.hardware.audio.primary=r800
+ro.hardware.gps=r800
+ro.hardware.sensors=r800
 P
 # identity: this is a Galaxy Watch, not the TicWatch the images came from
 sed -i -e 's/^ro.product.vendor.model=.*/ro.product.vendor.model=Galaxy Watch/'        -e 's/^ro.product.vendor.brand=.*/ro.product.vendor.brand=samsung/'        -e 's/^ro.product.vendor.manufacturer=.*/ro.product.vendor.manufacturer=Samsung/' $OUT/build.prop
