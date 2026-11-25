@@ -49,7 +49,7 @@ def verify_selected(payload, staged, scratch, debugfs, readelf):
         if source is not None and sha(snapshot(source,MAX_ELF)) != info["sha256"]:
             raise ValueError("Staged APEX ELF differs from original payload: "+name)
         selected[path] = {"context":label,"sha256":info["sha256"],
-                          "matches_staged":source is not None}
+                          "matches_staged":source is not None,"elf":info}
     for path in ("/","/bin","/lib64","/lib64/bionic"):
         selected[path] = {"context":read_label(payload,path,scratch,debugfs)}
     if not any(v.get("matches_staged") for v in selected.values()):
