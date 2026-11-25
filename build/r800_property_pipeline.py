@@ -50,9 +50,10 @@ def resolved_output(build, name):
 
 
 class Pipeline:
-    def __init__(self, out, phase):
+    def __init__(self, out, phase, source_commit=None):
         self.out = out
         self.phase = phase
+        self.source_commit = source_commit
         self.steps = []
         self.status = "RUNNING"
         out.mkdir(parents=False, exist_ok=False)
@@ -60,6 +61,7 @@ class Pipeline:
 
     def save(self):
         report = {"status": self.status, "phase": self.phase, "steps": self.steps,
+                  "source_commit": self.source_commit,
                   "safe_to_flash": False, "device_contacted": False,
                   "android_init_started": False,
                   "property_service_started": self.status == "VIRT_PROPERTY_SERVICE_PIPELINE_ONLY"}
@@ -139,9 +141,30 @@ def build_phase(p, a):
     p.status = "AOSP_PROPERTY_PIPELINE_BUILD_ONLY"
 
 
+def verify_build(root, source_commit):
+    report = require_report(root/"pipeline.json", "AOSP_PROPERTY_PIPELINE_BUILD_ONLY")
+    if report.get("source_commit") != source_commit:
+        raise ValueError("Build pipeline source commit differs from current checkout")
+    steps = report.get("steps", [])
+    expected = ["01-runtime", "02-init-service", "03-stock-policy", "04-fixture-policy",
+                "05-probe-transition", "06-probe-relabel", "07-probe-service",
+                "08-compile-preflight", "08-spec-preflight", "09-compile-stock-load", "09-spec-stock-load"]
+    if [s.get("name") for s in steps] != expected or any(s.get("status") != "PASS" for s in steps):
+        raise ValueError("Incomplete source build pipeline")
+    for step in steps:
+        if step["name"] in ("08-compile-preflight", "09-compile-stock-load"):
+            continue
+        path = Path(step["evidence"])
+        if not path.is_absolute() or not path.resolve(strict=True).is_relative_to(root):
+            raise ValueError("Build stage evidence escapes build directory")
+        if hashlib.sha256(snapshot(path, MAX_REPORT)).hexdigest() != step["evidence_sha256"]:
+            raise ValueError("Build stage evidence changed: " + step["name"])
+        require_report(path, step["evidence_status"], safe=step["evidence_status"] != "NON_RELEASE_INITRAMFS_SPEC_ONLY")
+
+
 def boot_phase(p, a):
     b, o = a.build_root, p.out
-    require_report(b/"pipeline.json", "AOSP_PROPERTY_PIPELINE_BUILD_ONLY")
+    verify_build(b, p.source_commit)
     digest = verify_baseline(a.baseline, a.kernel)
     verify_config(a.config_evidence, digest)
     verify_prepolicy(a.prepolicy, digest)
@@ -224,7 +247,10 @@ def main():
             raise ValueError("Output must be outside disposable AOSP checkout")
         if a.out.is_relative_to(REPO):
             raise ValueError("Output must be outside repository")
-        p = Pipeline(a.out, a.phase)
+        source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
+        if subprocess.check_output(["git", "status", "--porcelain"], cwd=REPO, text=True).strip():
+            raise ValueError("Clean GalWear checkout required")
+        p = Pipeline(a.out, a.phase, source_commit)
         (build_phase if a.phase == "build" else boot_phase)(p, a)
         p.save()
         return 0
