@@ -32,7 +32,9 @@ def version_range(text, kind):
 
 def parse(data, source):
     text = data.decode("utf-8")
-    if "<!" in text or "\0" in text:
+    # Permit ordinary XML comments while still rejecting DTD/entity declarations.
+    declarations = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    if "<!" in declarations or "\0" in text:
         raise ValueError("Unsupported VINTF XML declaration")
     try:
         root = ET.fromstring(text)
