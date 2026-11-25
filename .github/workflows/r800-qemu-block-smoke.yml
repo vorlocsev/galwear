@@ -23,6 +23,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_qemu_virt_contract.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_readonly_disks.py' -v
           python3 -m unittest discover -s tests -p 'test_qemu_block_smoke.py' -v
+          python3 -m unittest discover -s tests -p 'test_qemu_thread_event.py' -v
       - name: Fetch pinned disposable kernel source
         run: |
           sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/block-source" "$RUNNER_TEMP/block-source-evidence.json"
@@ -54,6 +55,19 @@ jobs:
             --embedded-archive "$RUNNER_TEMP/block-kernel/usr/initramfs_data.cpio" \
             --out-dir "$RUNNER_TEMP/block-baseline" \
             --report "$RUNNER_TEMP/block-baseline.json"
+      - name: Boot pre-policy thread and event syscall diagnostic
+        run: |
+          mkdir "$RUNNER_TEMP/thread-event-init"
+          aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -pthread src/initramfs/virt-thread-event-probe.c -o "$RUNNER_TEMP/thread-event-init/init"
+          python3 build/r800_initramfs_spec.py --init "$RUNNER_TEMP/thread-event-init/init" --list "$RUNNER_TEMP/thread-event-init/initramfs.list" --report "$RUNNER_TEMP/thread-event-init/compile.json"
+          python3 build/r800_qemu_thread_event.py \
+            --init "$RUNNER_TEMP/thread-event-init/init" \
+            --compile-evidence "$RUNNER_TEMP/thread-event-init/compile.json" \
+            --kernel "$RUNNER_TEMP/block-kernel/arch/arm64/boot/Image" \
+            --baseline "$RUNNER_TEMP/block-baseline.json" \
+            --config-evidence "$RUNNER_TEMP/block-kernel/virt-config-evidence.json" \
+            --out-dir "$RUNNER_TEMP/thread-event-boot" \
+            --report "$RUNNER_TEMP/thread-event.json"
       - name: Compile static disk probe
         run: |
           mkdir "$RUNNER_TEMP/block-probe"
@@ -82,6 +96,9 @@ jobs:
             ${{ runner.temp }}/block-baseline.json
             ${{ runner.temp }}/block-baseline/generic-console.log
             ${{ runner.temp }}/block-probe/compile.json
+            ${{ runner.temp }}/thread-event-init/compile.json
+            ${{ runner.temp }}/thread-event.json
+            ${{ runner.temp }}/thread-event-boot/generic-console.log
             ${{ runner.temp }}/block-smoke.json
             ${{ runner.temp }}/block-smoke/generic-console.log
           if-no-files-found: warn
