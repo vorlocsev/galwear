@@ -86,8 +86,8 @@ if [ -f /oem/r800dev/android/SLEEP ]; then
     echo 3 > /sys/module/exynos_pd/parameters/r800_sleep_pd_off 2>/dev/null
     echo Y > /sys/module/exynos_pd/parameters/r800_dispaud_sleep_off 2>/dev/null
 fi
-# bcmdhd prefixes /vendor to its firmware paths; vendor.img has an empty mount point
-$B mount --bind /oem/r800dev/fw /vendor/data/r800dev/fw
+# Radio firmware is already bound by start.sh before Android init starts.
+# Do not stack another mount over it here.
 # Kernel firmware search path (no user-mode helper): /mnt/r800fw resolves both
 # here (requests from kernel workers: ABOX calliope_*.bin, VTS vts.bin) and in
 # the sensor chroot (BBD patch, requested in lhd's context; tzchroot.sh mounts
@@ -100,7 +100,7 @@ echo -n /mnt/r800fw > /sys/module/firmware_class/parameters/path
 BT=/oem/r800dev/fw/bt
 if [ -f $BT/libbt-vendor.so ]; then
     $B chmod 755 $BT; $B chmod 644 $BT/*
-    $B mount --bind $BT/libbt-vendor.so /vendor/lib/libbt-vendor.so
+    # libbt-vendor.so was bound before switch_root; avoid a late replacement.
 fi
 for r in /sys/class/rfkill/rfkill*; do
     [ "$($B cat $r/type 2>/dev/null)" = bluetooth ] || continue
