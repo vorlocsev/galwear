@@ -1,0 +1,44 @@
+# Android 11 property service preparation (generic virt only)
+
+The dynamic NDK probe now uses the real public Bionic APIs
+__system_property_find and __system_property_read_callback. The default
+mode expects an absent debug.galwear.probe property. It does NOT prove
+that a property area or a property service exists. The separate
+--expect-property mode requires debug.galwear.probe=ready and exactly
+one matching callback; the current supervisor does not select this mode.
+
+Source references (pinned android-11.0.0_r48):
+- https://android.googlesource.com/platform/system/core/+/refs/tags/android-11.0.0_r48/init/property_service.cpp
+- https://android.googlesource.com/platform/system/core/+/refs/tags/android-11.0.0_r48/property_service/libpropertyinfoserializer/
+- https://android.googlesource.com/platform/bionic/+/refs/tags/android-11.0.0_r48/libc/bionic/system_property_api.cpp
+
+## Metadata fixture
+
+Use the dedicated synced AOSP checkout from R800_AOSP_RUNTIME_BUILD.md:
+
+    bash build/r800_aosp_property_info.sh /absolute/aosp-r48 /absolute/new-property-evidence
+
+The script creates a temporary host-tool Soong module, builds it against
+the AOSP serializer/parser and removes the source overlay. The fixture
+serializes a single exact property name and the default string context,
+then reads the result back using the AOSP parser. The output is
+property_info and a digest record, not a property area or service.
+
+## Remaining real property service prerequisites
+
+- The current QEMU virt kernel forbids CONFIG_NET; AF_UNIX is needed by
+  the Android property service socket. A separately reviewed profile
+  should enable only necessary local IPC, not network devices.
+- PropertyInit creates /dev/__properties__/property_info and calls
+  __system_property_area_init. The latter reports failure on failed
+  SELinux label writes. The guest needs a compatible SELinux setup
+  and a writable RAM-backed property directory.
+- Build actual Android init and its dependency closure from AOSP.
+  A property context fixture is not a production SELinux policy.
+- Start the real service; test an authorized write, a read in a separate
+  process, update notification and rejection of an unauthorized write.
+  Do not replace the real service with a mock and report Android success.
+
+No real property area, property service, Android init or watch boot has
+been confirmed. No change to the six-entry base initramfs or hardware
+configuration. safe_to_flash=false.
