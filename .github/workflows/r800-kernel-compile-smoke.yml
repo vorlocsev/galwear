@@ -12,6 +12,9 @@ on:
       - "build/r800_kernel_compile_smoke.sh"
       - "build/r800_aosp_source_probe.sh"
       - "tests/test_kernel_compile_recipe.py"
+      - "build/r800_nzit_layout_audit.py"
+      - "tests/test_nzit_layout_audit.py"
+      - "src/dt/r800.dts"
       - "build/r800_initramfs_compile_smoke.sh"
       - "build/r800_initramfs_spec.py"
       - "build/r800_embedded_initramfs_config.py"
@@ -48,6 +51,7 @@ jobs:
         run: |
           sh -n build/r800_kernel_compile_smoke.sh
           python3 -m unittest discover -s tests -p 'test_kernel_compile_recipe.py' -v
+          python3 -m unittest discover -s tests -p 'test_nzit_layout_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
           python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
           sh -n build/r800_initramfs_compile_smoke.sh
@@ -179,6 +183,17 @@ jobs:
           (out / "embedded-link-evidence.json").write_text(json.dumps(report, indent=2) + "\n")
           PY
 
+      - name: Audit historical NZIT capacity without packaging
+        id: nzit
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends device-tree-compiler
+          dtc -I dts -O dtb -S 133120 -o "$RUNNER_TEMP/r800-layout.dtb" src/dt/r800.dts 2>"$RUNNER_TEMP/r800-layout-dtc.txt"
+          python3 build/r800_nzit_layout_audit.py \
+            --image "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image" \
+            --dtb "$RUNNER_TEMP/r800-layout.dtb" \
+            --report "$RUNNER_TEMP/r800-nzit-layout.json"
+
       - name: Record evidence only, never upload compiled Image
         if: always()
         env:
@@ -189,13 +204,14 @@ jobs:
           AUDIO_OUTCOME: ${{ steps.audio.outcome }}
           ARM64_OUTCOME: ${{ steps.arm64.outcome }}
           EMBEDDED_OUTCOME: ${{ steps.embedded.outcome }}
+          NZIT_OUTCOME: ${{ steps.nzit.outcome }}
         run: |
           {
             printf 'recipe=%s\nsource=%s\nexpand=%s\ncompile=%s\naudio=%s\narm64=%s\n' \
               "$RECIPE_OUTCOME" "$SOURCE_OUTCOME" "$EXPAND_OUTCOME" \
               "$COMPILE_OUTCOME" "$AUDIO_OUTCOME" "$ARM64_OUTCOME"
             if [ "$RECIPE_OUTCOME/$SOURCE_OUTCOME/$EXPAND_OUTCOME/$COMPILE_OUTCOME/$AUDIO_OUTCOME/$ARM64_OUTCOME" = success/success/success/success/success/success ]; then
-              if [ "$EMBED_INIT" = false ] || [ "$EMBEDDED_OUTCOME" = success ]; then
+              if [ "$NZIT_OUTCOME" = success ] && { [ "$EMBED_INIT" = false ] || [ "$EMBEDDED_OUTCOME" = success ]; }; then
                 echo "integrated_kernel_smoke=pass"
               else
                 echo "integrated_kernel_smoke=not_passed"
@@ -217,6 +233,7 @@ jobs:
             echo "build_kind=smoke_non_release"
             echo "embedded_initramfs_requested=$EMBED_INIT"
             echo "embedded_link_outcome=$EMBEDDED_OUTCOME"
+            echo "nzit_layout_outcome=$NZIT_OUTCOME"
             echo "device_contacted=false"
             echo "image_published=false"
             if [ -s "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image" ]; then
@@ -239,5 +256,7 @@ jobs:
             ${{ runner.temp }}/compiled-kernel/embedded-initramfs-gate.json
             ${{ runner.temp }}/compiled-kernel/embedded-cpio-audit.json
             ${{ runner.temp }}/compiled-kernel/embedded-link-evidence.json
+            ${{ runner.temp }}/r800-nzit-layout.json
+            ${{ runner.temp }}/r800-layout-dtc.txt
           if-no-files-found: warn
           retention-days: 7
