@@ -63,6 +63,10 @@ def inspect_console(log, paths):
         if not line.startswith(prefix) or not CONTEXT.fullmatch(line[len(prefix):]):
             raise ValueError("Unexpected path or context in relabel diagnostics")
         labels[path] = line[len(prefix):].decode("ascii")
+    for path, expected in (("/system/bin/init", "u:object_r:init_exec:s0"),
+                           ("/dev/socket", "u:object_r:socket_device:s0")):
+        if path in paths and labels[path] != expected:
+            raise ValueError("Unexpected critical label: " + path)
     if any(line.startswith((b"r800-property-service:", b"r800-property-client:")) for line in lines):
         raise ValueError("Unexpected service diagnostics")
     return {"file_labels_reported": labels, "relabel_count": len(labels),
