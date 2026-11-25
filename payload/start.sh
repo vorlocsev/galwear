@@ -5,7 +5,19 @@ $B mkdir -p /bin && $B --install -s /bin
 export PATH=/bin:/sbin:/data/r800dev/bin
 log() { echo "<0>r800-sh: $*" > /dev/kmsg; }
 logfile() { while read -r l; do log "$1$l"; done; }
-log "start.sh running as pid $$"
+log "start.sh running as pid $"
+
+# Do not fall through to the legacy network/debug path after Android fails.
+# PID 1 must remain alive; leave the existing watchdog policy unchanged.
+android_abort() {
+	log "android: HANDOVER_BLOCKED: $*"
+	while :; do "$B" sleep 30; done
+}
+android_require() {
+	stage=$1; shift
+	"$@" || android_abort "$stage"
+	log "android: $stage OK"
+}
 
 # ---- off-mode charging: S-Boot starts the kernel with Tizen's
 # "systemd.unit=charging-mode.target" when the watch is off and put on the charger.
@@ -111,22 +123,28 @@ if [ -f /data/r800dev/android/BOOT_ANDROID ]; then
 
 	# p17 arrives read-only from the initramfs; Android's helper needs to stage
 	# tombstones/logs where Tizen can read them after the run.
-	mount -o remount,rw /data 2>/dev/null; log "android: p17 remount rw rc=$?"
-	mkdir -p /newroot
+	android_require "p17 remount" mount -o remount,rw /data
+	android_require "newroot directory" mkdir -p /newroot
 	# system.sqfs (squashfs, zstd; kernel run190+) is the same tree at ~45% of the
 	# ext4 image's size, which p17 needs; the ext4 system.img is the fallback.
 	SI=/data/r800dev/android/system.img
 	[ -f /data/r800dev/android/system.sqfs ] && SI=/data/r800dev/android/system.sqfs
-	mount -o loop,ro $SI /newroot; log "android: system mount $SI rc=$?"
+	[ -f "$SI" ] || android_abort "system image missing"
+	android_require "system mount" mount -o loop,ro "$SI" /newroot
+	[ -d /newroot/vendor ] && [ -d /newroot/oem ] || android_abort "required system mountpoints missing"
 	# vendor.img lives on Tizen's CSC partition (p15: plain ext4, 1.5 MB of Tizen
 	# config, ~180 MB free; Tizen mounts it read-only) when present, because p17 is
 	# full and its space goes to userdata.img. Not p18: Tizen's rootfs is under
 	# dm-verity, so any write there stops Tizen from booting. Fallback: p17 copy.
 	VI=/data/r800dev/android/vendor.img
 	$B mkdir -p /tzcsc
-	$B mount -t ext4 -o ro /dev/mmcblk0p15 /tzcsc; log "android: p15 ro mount rc=$?"
-	[ -f /tzcsc/r800-android/vendor.img ] && VI=/tzcsc/r800-android/vendor.img
-	mount -o loop,ro $VI /newroot/vendor; log "android: vendor mount $VI rc=$?"
+	if "$B" mount -t ext4 -o ro,noload /dev/mmcblk0p15 /tzcsc; then
+		[ ! -f /tzcsc/r800-android/vendor.img ] || VI=/tzcsc/r800-android/vendor.img
+	else
+		log "android: p15 unavailable; checking local vendor fallback"
+	fi
+	[ -f "$VI" ] || android_abort "vendor image missing"
+	android_require "vendor mount" mount -o loop,ro "$VI" /newroot/vendor
 	# vendor.img's build.prop still has debug.sf.nobootanimation=1 from the
 	# bring-up (no GPU driver then): the Wear OS boot animation exited after 0.5 s
 	# and the splash stayed until SysUI's "Starting...". Bind a copy without it.
@@ -137,7 +155,7 @@ if [ -f /data/r800dev/android/BOOT_ANDROID ]; then
 		$B grep -v -E '^(debug.sf.nobootanimation|ro.zygote.disable_gl_preload)=' /newroot/vendor/build.prop > $VP &&
 			mount --bind $VP /newroot/vendor/build.prop && log "android: boot animation on, GL preload on"
 	fi
-	mount --bind /data /newroot/oem; log "android: p17 bind -> /oem rc=$?"
+	android_require "p17 bind to oem" mount --bind /data /newroot/oem
 	# Our composer (zero-copy DECON present), kept on p17 so it can change without
 	# rebuilding vendor.img.
 	HW=/data/r800dev/hwc/hwcomposer.r800.so
@@ -293,7 +311,15 @@ if [ -f /data/r800dev/android/BOOT_ANDROID ]; then
 	for L in $($B losetup -a 2>/dev/null | $B grep -E 'system.img|system.sqfs|vendor.img' | $B cut -d: -f1); do
 		log "android: $(/data/r800dev/bin/loopdio $L 1 2>&1)"
 	done
-	[ -x /newroot/init ] && log "android: /init present, $(ls /newroot | tr '\n' ' ')"
+	# Absolute guest symlinks must be interpreted inside the guest root.
+	if [ -L /newroot/init ]; then
+		case "$("$B" readlink /newroot/init)" in
+			/system/bin/init|system/bin/init) [ -x /newroot/system/bin/init ] || android_abort "guest init target missing";;
+			*) android_abort "unsupported guest init symlink";;
+		esac
+	else
+		[ -x /newroot/init ] || android_abort "guest init missing"
+	fi
 	echo pet > /proc/r800_deadman
 	# /data = blank ext4 on zram (fstab.r800 mounts /dev/block/zram0). tmpfs lacks user.*
 	# xattrs, so UserManager wiped /data/system_de/0 and system_server crash-looped.
@@ -305,21 +331,23 @@ if [ -f /data/r800dev/android/BOOT_ANDROID ]; then
 	# rootfs: ext4 labelled r800data (migrated from userdata.img by block copy).
 	P18=/dev/mmcblk0p18
 	if [ "$($B dd if=$P18 bs=1 skip=1144 count=8 2>/dev/null)" = r800data ]; then
-		$B losetup /dev/loop2 $P18; log "android: /data = p18 -> loop2 rc=$?"
+		android_require "data p18 loop attach" "$B" losetup /dev/loop2 "$P18"
 		log "android: $(/data/r800dev/bin/loopdio /dev/loop2 1 2>&1)"
 	elif [ -f $AD/userdata.img ]; then
 		if [ -f $AD/RESET_DATA ]; then
 			$B zcat $AD/userdata-blank.img.gz > $AD/userdata.img; log "android: userdata reset rc=$?"
 			rm -f $AD/RESET_DATA; sync
 		fi
-		$B losetup /dev/loop2 $AD/userdata.img; log "android: userdata.img -> loop2 rc=$?"
+		android_require "userdata loop attach" "$B" losetup /dev/loop2 "$AD/userdata.img"
 		log "android: $(/data/r800dev/bin/loopdio /dev/loop2 1 2>&1)"
 	else
 		echo 209715200 > /sys/block/zram0/disksize; log "android: zram disksize rc=$?"
 		$B zcat $AD/data.img.gz > /dev/zram0; log "android: zram fill rc=$?"
-		$B losetup /dev/loop2 /dev/zram0; log "android: zram0 -> loop2 rc=$?"
+		android_require "zram loop attach" "$B" losetup /dev/loop2 /dev/zram0
 	fi
-	log "android: /data magic $($B head -c 1082 /dev/loop2 | $B tail -c 2 | $B od -An -tx1)"
+	DATA_MAGIC=$("$B" dd if=/dev/loop2 bs=1 skip=1080 count=2 2>/dev/null | "$B" od -An -tx1 | "$B" tr -d " \n")
+	[ "$DATA_MAGIC" = 53ef ] || android_abort "data loop lacks ext4 magic"
+	log "android: data ext4 magic verified"
 	umount /dev/pts 2>/dev/null; umount /sys; umount /proc
 	log "android: init=$($B ls -l /newroot/init 2>&1)"
 	# Android 11's first-stage init mounts /proc (hidepid=2,gid=readproc) and /sys
@@ -327,16 +355,16 @@ if [ -f /data/r800dev/android/BOOT_ANDROID ]; then
 	# stage, aborting"), so on SDK 30+ leave those two mounts to init. Android 9
 	# tolerates the pre-mount, so keep the old behaviour there.
 	SDK=$($B grep -m1 '^ro.build.version.sdk=' /newroot/system/build.prop 2>/dev/null | $B cut -d= -f2)
-	case "$SDK" in ''|*[!0-9]*) SDK=0;; esac
+	case "$SDK" in ''|*[!0-9]*) android_abort "unknown Android SDK";; esac
 	if [ "$SDK" -ge 30 ]; then
 		log "android: sdk=$SDK, leaving proc/sys to init"
 	else
 		log "android: sdk=$SDK, pre-mounting proc/sys"
-		$B mount -t proc proc /newroot/proc; log "android: proc rc=$?"
-		$B mount -t sysfs sysfs /newroot/sys; log "android: sys rc=$?"
+		android_require "guest proc mount" "$B" mount -t proc proc /newroot/proc
+		android_require "guest sys mount" "$B" mount -t sysfs sysfs /newroot/sys
 		log "android: misc=$($B cat /newroot/proc/misc 2>&1 | $B tr '\n' ' ')"
 	fi
-	$B mount -t devtmpfs devtmpfs /newroot/dev; log "android: dev rc=$?"
+	android_require "guest dev mount" "$B" mount -t devtmpfs devtmpfs /newroot/dev
 	# The stock ro.frp.pst names the TicWatch's config partition; also expose the
 	# stand-in under that path in case the property override is ignored.
 	$B mkdir -p /newroot/dev/block/bootdevice/by-name
@@ -355,8 +383,7 @@ if [ -f /data/r800dev/android/BOOT_ANDROID ]; then
 	log "android: exec switch_root -> /init"
 	exec 2>/dev/kmsg
 	exec $B switch_root /newroot /init
-	log "android: switch_root FAILED rc=$?"
-	mount -t proc proc /proc
+	android_abort "switch_root returned"
 fi
 
 # Feed the dead-man watchdog for 150 s unconditionally, then only while wlan0 has an
