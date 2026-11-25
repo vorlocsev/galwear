@@ -175,3 +175,31 @@ configuration presence. Neither actual linker execution nor Android policy
 compatibility is established by this test. CI checks the synthetic runner
 contracts and compiles the static preflight PID1; a real AOSP-backed boot
 remains a separate experiment.
+
+
+## Original AOSP sepolicy static preflight
+
+    bash build/r800_aosp_sepolicy_build.sh /absolute/aosp-r48 /absolute/new-policy-build
+
+The recipe requests stock selinux_policy and host checkfc from the pinned
+manifest. It does not modify or install SELinux policy on the host.
+If the selected product does not install a precompiled split policy or
+its partition hash files, the audit rejects it. No fallback to the
+synthetic policy or automatic policy downgrade is permitted.
+
+For the exact product tree used to stage the rootfs, run:
+
+    python3 build/r800_android_sepolicy_audit.py \
+      --product-out /absolute/product-out --checkfc /absolute/aosp-host/bin/checkfc \
+      --rootfs-report /absolute/rootfs-preflight-boot.json \
+      --report /absolute/sepolicy-audit.json
+
+The explicit checkfc executable must be trusted and source-built; its
+digest is recorded, not independently authenticated. The audit checks
+the binary MLS header (kernel versions 19 through 31), ODM/vendor
+precompiled selection, system/system_ext/product policy ID agreement,
+and validates each available property_contexts file with checkfc -p.
+The optional rootfs report must contain the exact same context hashes.
+Matching partition IDs are not recomputation of the original CIL hashes.
+This is a static check, not evidence of actual kernel policy load,
+file labeling, service permissions, enforcing access or full Android boot.
