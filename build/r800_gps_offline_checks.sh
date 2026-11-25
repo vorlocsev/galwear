@@ -17,12 +17,12 @@ cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
     -fsanitize=undefined -fno-sanitize-recover=all \
     tests/test_r800_gps_hal_peer.c -o "$TMP/test-hal-peer"
 timeout 45s "$TMP/test-hal-peer"
-python3 -m unittest discover -s tests -p "test_r800_gps_bridge_integration.py" -v
-python3 -m unittest discover -s tests -p 'test_r800_gnss_registration.py' -v
-python3 -m unittest discover -s tests -p 'test_r800_gnss_ipc_layout.py' -v
-python3 -m unittest discover -s tests -p 'test_r800_gps_link_gate.py' -v
-python3 -m unittest discover -s tests -p 'test_r800_extract_ext4.py' -v
-python3 -m unittest discover -s tests -p 'test_android_linker_audit.py' -v
+python3 build/r800_run_required_suite.py "test_r800_gps_bridge_integration.py"
+python3 build/r800_run_required_suite.py 'test_r800_gnss_registration.py'
+python3 build/r800_run_required_suite.py 'test_r800_gnss_ipc_layout.py'
+python3 build/r800_run_required_suite.py 'test_r800_gps_link_gate.py'
+python3 build/r800_run_required_suite.py 'test_r800_extract_ext4.py'
+python3 build/r800_run_required_suite.py 'test_android_linker_audit.py'
 for script in src/tools/gps/build.sh build/r800_gps_glibc_qemu.sh payload/android-helper.sh; do
     sh -n "$script"
 done
