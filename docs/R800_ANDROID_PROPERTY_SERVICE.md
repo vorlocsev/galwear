@@ -1111,3 +1111,47 @@ in QEMU. Old property-only logs cannot pass the new contract.
 Rebuild the service and image artifacts at the current source commit.
 Full CI, actual Bionic execution, and real SM-R800 boot remain
 unconfirmed; safe_to_flash remains false.
+
+
+## Kernel thread/event prerequisite (pre-policy block profile)
+
+The Android 11 r48 system/core/init/property_service.cpp starts
+a pthread-backed PropertyServiceThread using Epoll::Open,
+epoll_create1, epoll_ctl and epoll_wait. The pinned Linux 4.19
+source (50db73fc799f20a7120a8b5f653b16cc123d856f) exposes EPOLL and
+EVENTFD as configurable symbols in init/Kconfig. The previous
+allnoconfig overlay did not explicitly request EPOLL. This is a
+configuration risk, not an observed ENOSYS failure. The property
+and block profiles now explicitly enable EPOLL and EVENTFD; the
+effective-config contract requires them and the MMU. The generic
+minimal and hardware profiles are not changed to add event support.
+
+Bionic r48 pthread_create.cpp uses mmap/mprotect, CLONE_SETTLS,
+CLONE_PARENT_SETTID and CLONE_CHILD_CLEARTID; pthread_join.cpp
+waits on the TID futex. The pinned arm64 process.c implements
+CLONE_SETTLS and TLS context switching. The new static glibc
+diagnostic PID1 tests an anonymous 4 KiB mapping, protection
+change and unmapping; raw FUTEX_WAIT_PRIVATE mismatch (EAGAIN)
+and timeout (ETIMEDOUT); actual FUTEX_WAKE_PRIVATE of a waiting
+pthread with independent C thread-local state; eventfd readiness,
+epoll delivery and drained readiness. No Android policy or
+property service is initialized in this diagnostic.
+
+Actual native host evidence: GCC 14.2.0 x86-64 with
+-std=c11 -Wall -Wextra -Werror -O2 -pthread and GALWEAR_HOST_TEST
+compiled and ran the source, then a further ten repeated runs
+passed (10/10). The ordinary guest-mode source also compiled
+with -static on x86-64 and was not executed on the host.
+The verified source Git blob is
+3d8cf864567f65ab318f622be2a8c3fbdaa87915.
+This is not ARM64 or the pinned Linux kernel test.
+
+r800_qemu_thread_event.py binds its guest evidence to the exact
+compiled block profile and embedded PID1 baseline. The Block
+Smoke workflow and full EXT4 pipeline now run it before disk
+experiments and retain VIRT_BLOCK_THREAD_EVENT_ONLY separately.
+Five synthetic console/config test cases and a native host smoke
+are wired into CI. The new ARM64 compile, QEMU boot, full CI and
+actual Bionic execution remain unverified. Recompile the block
+kernel using the revised effective config. No SELinux, hardware
+kernel or firmware changes, no flashing.
