@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/r800-dtb-memory-audit.yml
       - build/r800_dtb_memory_audit.py
+      - build/r800_embedded_dtb.py
+      - tests/test_embedded_dtb.py
       - tests/test_dtb_memory_audit.py
       - src/dt/r800.dts
   workflow_dispatch:
@@ -31,6 +33,7 @@ jobs:
         run: |
           command -v fdtget
           python3 -m unittest discover -s tests -p 'test_dtb_memory_audit.py' -v
+          python3 -m unittest discover -s tests -p 'test_embedded_dtb.py' -v
       - name: Compile standalone DTB and inspect without packaging
         run: |
           dtc -I dts -O dtb -S 133120 -o "$RUNNER_TEMP/r800-audit.dtb" src/dt/r800.dts 2>"$RUNNER_TEMP/r800-dtc-diagnostics.txt" || {
@@ -39,6 +42,10 @@ jobs:
           }
           python3 build/r800_dtb_memory_audit.py --dtb "$RUNNER_TEMP/r800-audit.dtb" --report "$RUNNER_TEMP/r800-dtb-audit.json"
           cat "$RUNNER_TEMP/r800-dtb-audit.json"
+      - name: Derive and compare experimental embedded-only DTB
+        run: |
+          python3 build/r800_embedded_dtb.py --source src/dt/r800.dts --out-dir "$RUNNER_TEMP/r800-embedded-dtb"
+          cat "$RUNNER_TEMP/r800-embedded-dtb/embedded-dtb-evidence.json"
       - name: Upload diagnostic reports only
         if: always()
         uses: actions/upload-artifact@v4
@@ -47,5 +54,6 @@ jobs:
           path: |
             ${{ runner.temp }}/r800-dtb-audit.json
             ${{ runner.temp }}/r800-dtc-diagnostics.txt
+            ${{ runner.temp }}/r800-embedded-dtb/embedded-dtb-evidence.json
           if-no-files-found: warn
           retention-days: 7
