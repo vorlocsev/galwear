@@ -40,6 +40,67 @@ def rsa_signature_matches(key, signature, digest, hash_name):
     return hmac.compare_digest(encoded, expected)
 
 
+MAX_HASHED_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def verify_hashtree(read, image, tree, tree_size, db, hb, algorithm, salt, root):
+    """Compare AVB v1 tree bottom-up, using verified stored blocks for upper levels."""
+    out = {"status": "REVIEW_REQUIRED", "levels": 0, "data_blocks_checked": 0,
+           "tree_blocks_checked": 0, "root_matches": False}
+    if (algorithm not in ("sha256", "sha512") or
+            len(root) != hashlib.new(algorithm).digest_size or db != hb or
+            not 512 <= db <= 65536 or db & (db - 1) or
+            image <= 0 or image % db or tree < image or tree % hb or
+            tree_size < 0 or image + tree_size > MAX_HASHED_BYTES):
+        out["status"] = "UNSUPPORTED_GEOMETRY"
+        return out
+    digest_size = len(root)
+    fanout = hb // digest_size
+    sizes = []
+    blocks = image // db
+    while blocks > 1:
+        blocks = (blocks + fanout - 1) // fanout
+        sizes.append(blocks * hb)
+    out["levels"] = len(sizes)
+    out["expected_tree_bytes"] = sum(sizes)
+    if sum(sizes) != tree_size:
+        out["status"] = "TREE_SIZE_MISMATCH"
+        return out
+
+    def salted(block):
+        h = hashlib.new(algorithm, salt)
+        h.update(block)
+        return h.digest()
+
+    src, count = 0, image // db
+    for level, length in enumerate(sizes):
+        dest = tree + sum(sizes[level + 1:])
+        for group in range(length // hb):
+            # Bound memory to one hash block plus one input block.
+            expected = bytearray(hb)
+            start = group * fanout
+            stop = min(start + fanout, count)
+            for index in range(start, stop):
+                digest = salted(read(src + index * db, db))
+                slot = (index - start) * digest_size
+                expected[slot:slot + digest_size] = digest
+                if level == 0:
+                    out["data_blocks_checked"] += 1
+            actual = read(dest + group * hb, hb)
+            if not hmac.compare_digest(expected, actual):
+                out["status"] = "TREE_BLOCK_MISMATCH"
+                out["mismatch_level"] = level
+                out["mismatch_block"] = group
+                return out
+            out["tree_blocks_checked"] += 1
+        src, count = dest, length // hb
+    if not sizes:
+        out["data_blocks_checked"] = 1
+    out["root_matches"] = hmac.compare_digest(salted(read(src, db)), root)
+    out["status"] = "HASHTREE_MATCHES_DESCRIPTOR" if out["root_matches"] else "ROOT_DIGEST_MISMATCH"
+    return out
+
+
 def inspect(stream, base, size, package_key, trusted_key_sha256=None):
     def read(off, length):
         if off < 0 or length < 0 or off + length > size or length > MAX_VBMETA:
@@ -59,6 +120,8 @@ def inspect(stream, base, size, package_key, trusted_key_sha256=None):
             raise ValueError("Invalid independently supplied trusted key fingerprint")
         trusted_key_sha256 = trusted_key_sha256.lower()
     result["signature_status"] = "NOT_CHECKED"
+    result["hashtree_status"] = "NOT_CHECKED"
+    result["fec_verified"] = False
     result["key_fingerprint_matches"] = None
     if size < 64:
         raise ValueError("AVB payload too small")
@@ -164,6 +227,13 @@ def inspect(stream, base, size, package_key, trusted_key_sha256=None):
             if hash_alg not in ("sha256", "sha512") or digest_len != {"sha256": 32, "sha512": 64}.get(hash_alg):
                 issues.append("Unsupported or persistent hashtree digest")
             partition = body[164:164+pn].decode("utf-8")
+            salt_bytes = body[164+pn:164+pn+salt]
+            root_digest = body[164+pn+salt:end]
+            if any(i["tag"] == 1 for i in items):
+                raise ValueError("Duplicate APEX hashtree descriptor")
+            tree_check = verify_hashtree(read, image, tree, tree_size, db, hb,
+                                         hash_alg, salt_bytes, root_digest)
+            item["hashtree_check"] = tree_check
             item.update({"partition": partition, "image_bytes": image,
                          "tree_offset": tree, "tree_bytes": tree_size,
                          "data_block": db, "hash_block": hb, "hash_algorithm": hash_alg,
@@ -171,8 +241,15 @@ def inspect(stream, base, size, package_key, trusted_key_sha256=None):
         else:
             issues.append("Descriptor tag not semantically inspected: " + str(tag))
         items.append(item)
-    if sum(i["tag"] == 1 for i in items) != 1:
+    trees = [i["hashtree_check"] for i in items if i["tag"] == 1]
+    if len(trees) != 1:
         issues.append("Expected one APEX hashtree descriptor")
+    else:
+        result["hashtree_status"] = trees[0]["status"]
+        result["hashtree_verified"] = trees[0]["status"] == "HASHTREE_MATCHES_DESCRIPTOR"
+    # Keep structural status separate from cryptographic and payload evidence.
+    result["payload_authenticated"] = bool(result["hashtree_verified"] and
+                                            result["trusted_key_verified"] and not issues)
     result.update({"status": "AVB_STRUCTURE_ONLY" if not issues else "REVIEW_REQUIRED",
                    "footer_present": True, "original_bytes": original,
                    "vbmeta_offset": offset, "vbmeta_bytes": length,
