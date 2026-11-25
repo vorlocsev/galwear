@@ -146,6 +146,32 @@ The files are not validated against Android SELinux policy yet.
 The static diagnostic PID1 mounts procfs, sysfs, devtmpfs and a small tmpfs
 on /data and creates /dev/socket in the guest. It checks the staged client
 and service file permissions without executing either. No Android property
-area, policy or service is started. A future QEMU runner must bind the archive
-to the exact property-profile Image and require ordered preflight markers.
+area, policy or service is started. The QEMU runner binds the archive to the exact property-profile Image and requires ordered preflight markers.
 Keep all binary inputs and archives private and disposable; do not flash.
+
+
+## QEMU rootfs preflight acceptance
+
+After successful embedded property-profile boot and pre-policy diagnostics
+on the same Image, run the canonical archive in an isolated guest:
+
+    python3 build/r800_qemu_rootfs_preflight.py \
+      --staged /absolute/staged-rootfs --product-out /absolute/product-out \
+      --init /absolute/preflight-init --archive /absolute/preflight.cpio \
+      --kernel /absolute/property-kernel/arch/arm64/boot/Image \
+      --baseline /absolute/property-boot-evidence.json \
+      --config-evidence /absolute/virt-config-evidence.json \
+      --prepolicy /absolute/property-probe-evidence.json \
+      --out-dir /absolute/new-rootfs-preflight-boot \
+      --report /absolute/rootfs-preflight-boot.json
+
+The runner reconstructs the archive rather than trusting saved JSON and
+compares it byte-for-byte. The kernel digest must match all prerequisite
+reports. QEMU has no NIC, block devices or host directory mounts. Success
+requires exact ordered preflight markers and the existing platform/heartbeat
+contract. Unexpected property-service or policy diagnostics are rejected.
+Guest checks include regular-file types, modes, root ownership and linker
+configuration presence. Neither actual linker execution nor Android policy
+compatibility is established by this test. CI checks the synthetic runner
+contracts and compiles the static preflight PID1; a real AOSP-backed boot
+remains a separate experiment.
