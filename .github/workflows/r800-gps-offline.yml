@@ -3,10 +3,11 @@ name: SM-R800 GPS offline compile gate (NON-RELEASE)
 on:
   push:
     branches:
-      - development/r800-gps-ci-20261125
+      - 'development/r800-gps-*'
     paths:
       - '.github/workflows/r800-gps-offline.yml'
       - 'src/tools/gps/**'
+      - 'src/hal/gps*'
       - 'build/r800_*.py'
       - 'build/r800_gps_*.sh'
       - 'tests/*gps*'

@@ -25,11 +25,14 @@ int main(void) {
     assert(!gps_wire_parse_fix("1 0 0 0 0 0 0 999999999999999999999",&f));
     assert(gps_wire_parse_status("4",&status) && status==4);
     assert(!gps_wire_parse_status("5",&status));
+    assert(!gps_wire_parse_status("9",&status));
+    assert(!gps_wire_parse_status("04x",&status));
+    assert(gps_wire_parse_status("0",&status) && status==0);
     assert(!gps_wire_parse_status("1 garbage",&status));
     assert(gps_wire_parse_nmea("123 $GPRMC,1",&utc,&nmea) && utc==123 && !strcmp(nmea,"$GPRMC,1"));
     assert(!gps_wire_parse_nmea("abc $GPRMC",&utc,&nmea));
     assert(!gps_wire_parse_nmea("123 $A\nSTATUS 4",&utc,&nmea));
     assert(!gps_wire_parse_nmea("123 junk",&utc,&nmea));
-    puts("GPS_WIRE_ASSERTIONS=21 PASS");
+    puts("GPS_WIRE_ASSERTIONS=24 PASS");
     return 0;
 }

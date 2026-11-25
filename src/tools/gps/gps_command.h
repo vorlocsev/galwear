@@ -16,7 +16,7 @@ static int gps_uint(const char **p, long long max, long long *out)
     if (*s < '0' || *s > '9') return 0;
     do {
         int d = *s++ - '0';
-        if (n > (max - d) / 10) return 0;
+        if (d > max || n > (max - d) / 10) return 0;
         n = n * 10 + d;
     } while (*s >= '0' && *s <= '9');
     if (*s && *s != ' ' && *s != '\t') return 0;
