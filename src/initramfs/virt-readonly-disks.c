@@ -200,6 +200,7 @@ static int policy_and_labels(void)
 int main(void)
 {
     if (getpid() != 1 || setvbuf(stdout, NULL, _IONBF, 0)) return 1;
+    puts("r800-readonly-init: NON-RELEASE smoke image; no eMMC mount, no Wear OS handover");
     struct stat console_stat;
     if (fstat(STDOUT_FILENO, &console_stat) == 0 && S_ISCHR(console_stat.st_mode)) {
         printf("r800-console: stage=kernel device=%u:%u inode=%llu filesystem=%u:%u\n",
@@ -211,7 +212,6 @@ int main(void)
         fputs("r800-console: stage=kernel descriptor-unavailable\n", stderr);
         fflush(stderr);
     }
-    puts("r800-readonly-init: NON-RELEASE smoke image; no eMMC mount, no Wear OS handover");
     if (mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
         mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) ||
         mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID | MS_NOEXEC, NULL) ||
