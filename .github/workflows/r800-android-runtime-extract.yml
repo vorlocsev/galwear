@@ -1,0 +1,34 @@
+name: SM-R800 Android runtime extraction contract (non-release)
+
+on:
+  push:
+    branches:
+      - development/r800-display-error-propagation-20261125
+    paths:
+      - .github/workflows/r800-android-runtime-extract.yml
+      - build/r800_android_runtime_extract.py
+      - build/r800_android_dynamic_audit.py
+      - tests/test_android_runtime_extract.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-runtime-extraction:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install filesystem inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends e2fsprogs android-sdk-libsparse-utils
+      - name: Verify exact commit and execute synthetic tests
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          command -v debugfs
+          command -v mke2fs
+          command -v simg2img
+          python3 -m py_compile build/r800_android_runtime_extract.py
+          python3 -m unittest discover -s tests -p 'test_android_runtime_extract.py' -v
