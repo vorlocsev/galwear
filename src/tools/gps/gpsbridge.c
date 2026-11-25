@@ -97,60 +97,7 @@ static void out(const char *line, int len)
 }
 static int daemon_mode;
 
-/* ---- hardware/gps.h (AOSP), 32-bit ARM layout ---- */
-typedef int64_t GpsUtcTime;
-typedef struct {
-	size_t size;
-	uint16_t flags;
-	double latitude;
-	double longitude;
-	double altitude;
-	float speed;
-	float bearing;
-	float accuracy;
-	GpsUtcTime timestamp;
-} GpsLocation;
-typedef struct {
-	size_t size;
-	uint16_t status;
-} GpsStatus;
-typedef struct {
-	size_t size;
-	void (*location_cb)(GpsLocation *);
-	void (*status_cb)(GpsStatus *);
-	void (*sv_status_cb)(void *);
-	void (*nmea_cb)(GpsUtcTime, const char *, int);
-	void (*set_capabilities_cb)(uint32_t);
-	void (*acquire_wakelock_cb)(void);
-	void (*release_wakelock_cb)(void);
-	pthread_t (*create_thread_cb)(const char *, void (*)(void *), void *);
-	void (*request_utc_time_cb)(void);
-} GpsCallbacks;
-typedef struct {
-	size_t size;
-	int (*init)(GpsCallbacks *);
-	int (*start)(void);
-	int (*stop)(void);
-	void (*cleanup)(void);
-	int (*inject_time)(GpsUtcTime, int64_t, int);
-	int (*inject_location)(double, double, float);
-	void (*delete_aiding_data)(uint16_t);
-	int (*set_position_mode)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
-	const void *(*get_extension)(const char *);
-} GpsInterface;
-
-/* "gps-xtra": Broadcom LTO (long-term orbits), the file Tizen's lbs plugin
- * downloads from gllto1.glpals.com into /opt/gnss/data/lto2.dat */
-typedef struct {
-	size_t size;
-	void (*download_request_cb)(void);
-	pthread_t (*create_thread_cb)(const char *, void (*)(void *), void *);
-} GpsXtraCallbacks;
-typedef struct {
-	size_t size;
-	int (*init)(GpsXtraCallbacks *);
-	int (*inject_xtra_data)(char *, int);
-} GpsXtraInterface;
+#include "gps_abi.h"
 
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
@@ -323,7 +270,13 @@ static int inject_utc(int64_t utc, int64_t boot_ref, int unc)
 #define inject_now() inject_utc(clk_ms(0), 0, 500)
 
 static void xtra_download_cb(void) {}
-static GpsXtraCallbacks xcbs = { sizeof(GpsXtraCallbacks), xtra_download_cb, 0 };
+static GpsXtraCallbacks xcbs = {
+#if R800_XTRA_ABI == 2
+	sizeof(GpsXtraCallbacks),
+#endif
+	.download_request_cb = xtra_download_cb,
+	.create_thread_cb = 0,
+};
 static char lto_buf[256 * 1024];
 static long lto_read(void *ctx, char *buf, unsigned int size)
 {
@@ -335,6 +288,9 @@ static const GpsXtraInterface *xtra;
 static void inject_lto(void)
 {
 	int fd, n = 0, r;
+	/* Never infer the proprietary callback layout from the extension size. */
+	if (R800_XTRA_ABI == 0)
+		return;
 	if (!xtra) {
 		const GpsXtraInterface *candidate = gps->get_extension ? gps->get_extension("gps-xtra") : 0;
 		xcbs.create_thread_cb = cbs.create_thread_cb;
