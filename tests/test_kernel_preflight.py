@@ -61,6 +61,11 @@ class StructuralPatchTests(unittest.TestCase):
         self.assertFalse(gate._safe_patch_path("drivers//a.c"))
         self.assertFalse(gate._safe_patch_path("drivers/./a.c"))
 
+    def test_exact_arm64_exception_only(self):
+        self.assertTrue(gate._safe_patch_path("arch/arm64/kernel/smp.c"))
+        self.assertFalse(gate._safe_patch_path("arch/arm64/kernel/setup.c"))
+        self.assertFalse(gate._safe_patch_path("arch/arm64/kernel/../kernel/smp.c"))
+
     def test_patch_unapproved_root_rejected(self):
         self.assertFalse(gate._safe_patch_path(".github/workflows/evil.yml"))
         self.assertFalse(gate._safe_patch_path("payload/android-helper.sh"))

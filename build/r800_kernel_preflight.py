@@ -20,6 +20,8 @@ SCHEMA = "galwear-r800-kernel-preflight-v1"
 PINNED_BASE = "50db73fc799f20a7120a8b5f653b16cc123d856f"
 ALLOWED_ROOTS = frozenset(
     ("drivers", "include", "kernel", "mm", "scripts", "security", "sound"))
+# Explicit exception for the generic ARM64 debug-snapshot guard.
+ALLOWED_EXACT_PATHS = frozenset(("arch/arm64/kernel/smp.c",))
 REQUIRED_PATCH_FILES = frozenset((
     "drivers/cpuidle/cpuidle-exynos64.c",
     "drivers/soc/samsung/exynos-pd.c",
@@ -69,7 +71,7 @@ def _safe_patch_path(value: str) -> bool:
     return (
         value != "" and "\\" not in value and
         not value.startswith("/") and
-        len(parts) >= 2 and parts[0] in ALLOWED_ROOTS and
+        len(parts) >= 2 and (parts[0] in ALLOWED_ROOTS or value in ALLOWED_EXACT_PATHS) and
         ".." not in parts and "." not in parts and
         all(part not in ("", ".", "..") for part in value.split("/")))
 

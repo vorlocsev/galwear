@@ -46,7 +46,9 @@ class ReadonlyInitTests(unittest.TestCase):
 
     def test_sleep_forever_without_busy_poll(self):
         self.assertIn("for (;;)", self.src)
-        self.assertIn("(void)idle_sleep(&interval);", self.src)
+        self.assertIn("if (idle_sleep(&interval) != 0)", self.src)
+        self.assertLess(self.src.index("if (idle_sleep(&interval) != 0)"), self.src.index("++sequence;"))
+        self.assertIn("r800-readonly-init: heartbeat 00000000", self.src)
         self.assertIn("const struct tiny_timespec interval = {5, 0};", self.src)
 
     def test_no_rw_legacy_init_in_compile_recipe(self):
