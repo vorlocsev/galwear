@@ -6,6 +6,7 @@ on:
       - "development/r800-embedded-initramfs-20261125"
       - "development/r800-reproducibility-audit-20261125"
       - "development/r800-readonly-init-20261125"
+      - "development/r800-android-linker-audit-20261125"
     paths:
       - ".github/workflows/r800-embedded-initramfs-build.yml"
       - "build/r800_aosp_source_probe.sh"
@@ -20,6 +21,8 @@ on:
       - "tests/test_embedded_initramfs.py"
       - "tests/test_initramfs_recipe.py"
       - "src/initramfs/init.c"
+      - "src/initramfs/build.sh"
+      - "build/kbuild-native.sh"
       - "src/initramfs/init-readonly.c"
       - "tests/test_readonly_init.py"
       - "src/kernel/r800.config"
@@ -73,7 +76,7 @@ jobs:
       - name: Compile experimental /init and kernel Image in container
         run: |
           docker run --rm --pull=never \
-            -e GITHUB_SHA -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT \
+            -e GITHUB_SHA -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_REF_NAME \
             -e R800_CONTAINER_IMAGE_ID \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             -v "$RUNNER_TEMP/r800-embedded-source:/source" \
@@ -84,8 +87,23 @@ jobs:
                 git make bash bc bison flex perl python3 openssl-dev \
                 elfutils-dev build-base linux-headers coreutils findutils
               git config --global --add safe.directory /source
-              sh /repo/build/r800_initramfs_compile_smoke.sh \
-                /repo /scratch/r800-embedded-initramfs
+              if [ "$GITHUB_REF_NAME" = "development/r800-android-linker-audit-20261125" ]; then
+                # Compile the current handover init, but NEVER execute it.
+                export PATH=/usr/lib/llvm19/bin:$PATH
+                mkdir /scratch/r800-embedded-initramfs
+                clang-19 --target=aarch64-linux-gnu -ffreestanding -nostdlib -static \
+                  -fno-stack-protector -fno-builtin -O2 -fuse-ld=lld -fno-pie -no-pie \
+                  -Wl,-e,_start -Wl,--build-id=none \
+                  -o /scratch/r800-embedded-initramfs/init /repo/src/initramfs/init.c
+                python3 /repo/build/r800_initramfs_spec.py \
+                  --init /scratch/r800-embedded-initramfs/init \
+                  --list /scratch/r800-embedded-initramfs/initramfs.list \
+                  --report /scratch/r800-embedded-initramfs/initramfs-evidence.json
+                echo "HANDOVER_INIT_COMPILE_ONLY; not executed"
+              else
+                sh /repo/build/r800_initramfs_compile_smoke.sh \
+                  /repo /scratch/r800-embedded-initramfs
+              fi
               R800_SMOKE_INITRAMFS_LIST=/scratch/r800-embedded-initramfs/initramfs.list \
                 sh /repo/build/r800_kernel_compile_smoke.sh \
                 /source /repo /scratch/r800-embedded-kernel
