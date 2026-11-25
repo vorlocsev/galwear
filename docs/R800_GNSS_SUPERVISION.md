@@ -9,14 +9,12 @@ path still starts lhd when the bridge is absent.
 No network LTO download is performed. XTRA remains disabled by default.
 The existing recursive ownership repair is retained because donor state
 ownership is unresolved; it must be audited on a disposable donor image.
-No new SELinux rules or socket permissions are introduced. The original
-0666 socket mode remains a blocker until the actual GNSS UID/GID and label
-are verified. The tzchroot.sh payload itself is not available in this
+No new SELinux rules are introduced. The socket mode is now 0660;
+actual GNSS UID/GID and SELinux label still require evidence. The tzchroot.sh payload itself is not available in this
 repository snapshot.
 
 Limitations: process liveness and delays do not establish protocol readiness;
-foreground behavior of the donor daemons is assumed. TERM and wait may block
-if a child refuses to exit. Restarting lhd can interrupt sensor clients.
+foreground behavior of the donor daemons is assumed. TERM/KILL polling is bounded, but a child stuck in kernel I/O may remain alive. Restarting lhd can interrupt sensor clients.
 Actual mount identity, socket access, readiness and restart behavior have
 not been tested on a donor or watch. No release or flashing authorized.
 
@@ -24,11 +22,8 @@ safe_to_flash=false
 
 Socket hardening: the daemon requires explicit verified R800_GPS_PEER_UID and
 R800_GPS_PEER_GID at build time (default: daemon blocked). It creates a 0660
-socket and checks the connecting UID with SO_PEERCRED. Existing paths are
-never unlinked automatically. A stale socket after crash must be inspected
-and removed by an administrator only after verifying there is no live owner.
-This deliberately blocks automatic recovery from a stale socket until a safe
-ownership protocol exists. Parent directory trust and SELinux are unverified.
+socket and checks the connecting UID with SO_PEERCRED. Existing paths are never unlinked without the ownership and liveness checks
+below. Unmarked legacy sockets still require manual inspection. Parent directory trust and SELinux are unverified.
 Shutdown now attempts TERM then KILL with bounded checks; if a child remains
 alive, no new stack starts. Direct-child identity uses PPid, not pidfds.
 
@@ -46,3 +41,8 @@ two unlinks requires manual review. Parent ancestors must remain trusted;
 flock is cooperative and the pathname checks are not an atomic unlink CAS.
 No UID/GID defaults or SELinux changes. Target statx/filesystem behavior and
 full daemon integration are unverified.
+
+Native Linux ownership fixture: PASS, GCC 14.2.0 with UBSan; exact Git blobs
+for gps_ipc.h and test_r800_gps_ipc.c matched the locally tested sources.
+ARMv7 softfp standalone header probe: ELF32 ARM EABI5 object compiled with
+Clang; no target link or runtime test.
