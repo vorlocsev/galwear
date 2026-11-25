@@ -39,6 +39,8 @@ m -j4 galwear_property_info
 HOST_OUT=$(get_build_var HOST_OUT)
 set -u
 "$HOST_OUT/bin/galwear_property_info" "$OUT/property_info"
+"$HOST_OUT/bin/galwear_property_info" "$OUT/property_info.virt" --virt-fixture
+test -s "$OUT/property_info.virt"
 test -s "$OUT/property_info"
-sha256sum "$OUT/property_info" "$OUT/manifest-resolved.xml" "$OVERLAY/property-info-generator.cpp" > "$OUT/property-info.sha256"
+sha256sum "$OUT/property_info" "$OUT/property_info.virt" "$OUT/manifest-resolved.xml" "$OVERLAY/property-info-generator.cpp" > "$OUT/property-info.sha256"
 printf 'status=PROPERTY_INFO_FIXTURE_ONLY\nproperty_service_started=false\nsafe_to_flash=false\n' > "$OUT/status.txt"
