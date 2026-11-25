@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"build"))
 from r800_tizen_dependencies import audit, resolve_guest, interpreter
-from test_android_linker_audit import fixture
+from test_android_linker_audit import fixture, version_fixture
 
 class TizenDependencyTests(unittest.TestCase):
     def setUp(self):
@@ -32,6 +32,19 @@ class TizenDependencyTests(unittest.TestCase):
         self.assertEqual(r["status"],"TIZEN_STATIC_CLOSURE_ONLY")
         self.assertEqual(len(r["files"]),2)
         self.assertFalse(r["safe_to_flash"])
+
+    def test_required_version_present(self):
+        self.put(self.target,version_fixture("arm",need="VER_1"))
+        self.put("/usr/lib/libx.so",version_fixture("arm",define="VER_1"))
+        r=audit(self.root,[self.target])
+        self.assertEqual(r["status"],"TIZEN_STATIC_CLOSURE_ONLY")
+        self.assertEqual(r["version_records_checked"],1)
+
+    def test_required_version_absent(self):
+        self.put(self.target,version_fixture("arm",need="VER_2"))
+        self.put("/usr/lib/libx.so",version_fixture("arm",define="VER_1"))
+        r=audit(self.root,[self.target])
+        self.assertEqual(r["problems"][0]["reason"],"VERSION_NOT_PROVIDED")
 
     def test_missing_provider(self):
         self.put(self.target,fixture("arm",needed=["libx.so"]))
