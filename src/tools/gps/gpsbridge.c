@@ -20,6 +20,7 @@
  */
 #include "gps_frame.h"
 #include "gps_command.h"
+#include "gps_lto.h"
 
 typedef unsigned int size_t;
 typedef unsigned short uint16_t;
@@ -34,6 +35,8 @@ void *dlopen(const char *, int);
 void *dlsym(void *, const char *);
 char *dlerror(void);
 int pthread_create(pthread_t *, const void *, void *(*)(void *), void *);
+void *malloc(size_t);
+void free(void *);
 unsigned int sleep(unsigned int);
 int atoi(const char *);
 void exit(int);
@@ -58,6 +61,8 @@ double strtod(const char *, char **);
 int open(const char *, int, ...);
 int rename(const char *, const char *);
 #define O_RDONLY 0
+#define O_NONBLOCK 04000
+#define O_NOFOLLOW 0400000
 #define O_WRONLY_CREAT_TRUNC 01101
 int strcmp(const char *, const char *);
 int strncmp(const char *, const char *, size_t);
@@ -227,21 +232,30 @@ static void wl_release(void) {}
 static void utc_cb(void) {}
 
 struct thr { void (*fn)(void *); void *arg; };
-static struct thr thrs[16];
-static int nthr;
 static void *thr_tramp(void *p)
 {
 	struct thr *t = p;
-	t->fn(t->arg);
+	void (*fn)(void *) = t->fn;
+	void *arg = t->arg;
+	free(t);
+	fn(arg);
 	return 0;
 }
 static pthread_t create_thread_cb(const char *name, void (*fn)(void *), void *arg)
 {
 	pthread_t th = 0;
-	struct thr *t = &thrs[nthr++ & 15];
+	struct thr *t;
+	if (!fn)
+		return 0;
+	t = malloc(sizeof(*t));
+	if (!t)
+		return 0;
 	t->fn = fn;
 	t->arg = arg;
-	pthread_create(&th, 0, thr_tramp, t);
+	if (pthread_create(&th, 0, thr_tramp, t) != 0) {
+		free(t);
+		return 0;
+	}
 	printf("THREAD %s\n", name ? name : "?");
 	fflush(0);
 	return th;
@@ -294,6 +308,10 @@ static int inject_utc(int64_t utc, int64_t boot_ref, int unc)
 static void xtra_download_cb(void) {}
 static GpsXtraCallbacks xcbs = { sizeof(GpsXtraCallbacks), xtra_download_cb, 0 };
 static char lto_buf[256 * 1024];
+static long lto_read(void *ctx, char *buf, unsigned int size)
+{
+	return read(*(int *)ctx, buf, size);
+}
 static const GpsXtraInterface *xtra;
 
 /* load lto2.dat into the engine (what Tizen's plugin does after downloading it) */
@@ -312,20 +330,20 @@ static void inject_lto(void)
 		fflush(0);
 		return;
 	}
-	fd = open(LTO_PATH, O_RDONLY);
+	fd = open(LTO_PATH, O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
 	if (fd < 0) {
 		printf("lto: no %s\n", LTO_PATH);
 		fflush(0);
 		return;
 	}
-	for (;;) {
-		long k = read(fd, lto_buf + n, sizeof(lto_buf) - n);
-		if (k <= 0)
-			break;
-		n += k;
-	}
+	n = gps_read_lto(lto_read, &fd, lto_buf, sizeof(lto_buf));
 	close(fd);
-	r = n > 0 ? xtra->inject_xtra_data(lto_buf, n) : -1;
+	if (n <= 0) {
+		printf("lto: empty, oversized or unreadable\n");
+		fflush(0);
+		return;
+	}
+	r = xtra->inject_xtra_data(lto_buf, n);
 	printf("lto: injected %d bytes -> %d\n", n, r);
 	fflush(0);
 }
@@ -418,7 +436,7 @@ static int serve(void)
 	for (;;) {
 		char buf[256];
 		struct gps_frame frame = {{0}, 0};
-		int on = 0;
+		int on = 0, fatal = 0;
 		int c = accept(ls, 0, 0);
 		if (c < 0)
 			continue;
@@ -439,7 +457,11 @@ static int serve(void)
 				if (state == 0)
 					continue;
 				if (!strcmp(s, "START") && !on) {
-					on = session(1) == 0;
+					if (session(1) != 0) {
+						fatal = 1;
+						goto disconnected;
+					}
+					on = 1;
 				} else if (!strcmp(s, "STOP") && on) {
 					if (session(0) == 0)
 						on = 0;
@@ -469,7 +491,7 @@ disconnected:
 			client = -1;
 		pthread_mutex_unlock(mtx);
 		close(c);
-		if (on && session(0) != 0) {
+		if (fatal || (on && session(0) != 0)) {
 			/* Unknown engine state: fail closed rather than accept a new client. */
 			close(ls);
 			return 1;
