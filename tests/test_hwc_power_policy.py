@@ -27,7 +27,9 @@ class HwcPowerPolicyTests(unittest.TestCase):
         self.assertIn("if (!v[0])\n\t\treturn 0;\n\tms = strtol", self.hwc)
 
     def test_monotonic_condition_clock(self):
-        self.assertIn("pthread_condattr_setclock(&doze_attr, CLOCK_MONOTONIC);", self.hwc)
+        self.assertIn("if (!(r = pthread_condattr_setclock(&doze_attr, CLOCK_MONOTONIC)))", self.hwc)
+        self.assertIn("r = pthread_cond_init(&h->doze_cond, &doze_attr);", self.hwc)
+        self.assertIn("if (r)\n\t\tgoto fail_doze_lock;", self.hwc)
 
     def test_only_successful_frame_updates_idle_timer(self):
         self.assertIn("if (presented) {\n\t\th->last_present_ns = mono_ns();", self.hwc)

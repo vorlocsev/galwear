@@ -61,7 +61,8 @@ int main(void) {
         loop = source[source.index("static void *vsync_loop("):
                       source.index("static int r800_event_control(")]
         self.assertIn("p.revents & POLLPRI", loop)
-        self.assertIn("POLLHUP | POLLNVAL", loop)
+        self.assertIn("te_poll_lost(pr, p.revents, err)", loop)
+        self.assertIn("POLLHUP | POLLNVAL", source)
         self.assertIn("next_timer_vsync(now, last_hw, last_sent)", loop)
         self.assertNotIn("else\n\t\t\t\t\tcontinue;", loop)
         self.assertIn("while (rc == EINTR)", loop)
@@ -72,6 +73,55 @@ int main(void) {
         self.assertIn("h->vsync_epoch == epoch", source)
         self.assertIn("procs = h->procs;", source)
         self.assertIn("ts > last_sent", source)
+
+
+    def test_te_retry_and_poll_classification(self):
+        source = SOURCE.read_text()
+        helpers = source[source.index("#define R800_TE_RETRY_NS"):
+                         source.index("static void *vsync_loop(")]
+        harness = r"""
+#include <assert.h>
+#include <stdint.h>
+#include <errno.h>
+#include <poll.h>
+""" + helpers + r"""
+int main(void) {
+    assert(te_poll_lost(1, POLLHUP, 0));
+    assert(te_poll_lost(1, POLLNVAL | POLLPRI, 0));
+    assert(te_poll_lost(-1, 0, EIO));
+    assert(!te_poll_lost(-1, 0, EINTR));
+    assert(!te_poll_lost(0, 0, 0));
+    assert(!te_poll_lost(1, POLLPRI | POLLERR, 0));
+    assert(!te_poll_lost(1, POLLERR, 0));
+    assert(!te_retry_due(4, 999, 0));
+    assert(!te_retry_due(-1, 999, 1000));
+    assert(te_retry_due(-1, 1000, 1000));
+    assert(te_retry_due(-1, 1001, 1000));
+    assert(R800_TE_RETRY_NS == 2000000000LL);
+    assert(R800_TE_BAD_LIMIT == 8);
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "retry.c"
+            exe = Path(tmp) / "retry"
+            path.write_text(harness)
+            build = subprocess.run(["cc", "-std=c99", "-Wall", "-Wextra", "-Werror",
+                                    str(path), "-o", str(exe)],
+                                   capture_output=True, text=True, timeout=15)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            subprocess.run([str(exe)], check=True, timeout=5)
+
+    def test_retry_preserves_timer_and_idle_semantics(self):
+        source = SOURCE.read_text()
+        loop = source[source.index("static void *vsync_loop("):
+                      source.index("static int r800_event_control(")]
+        self.assertIn("te_retry_due(vfd, now, retry_at)", loop)
+        self.assertIn("retry_at = mono_ns() + R800_TE_RETRY_NS;", loop)
+        self.assertIn("bad_events >= R800_TE_BAD_LIMIT", loop)
+        self.assertIn("last_hw = read_hw_vsync(vfd); /* baseline, not a callback */", loop)
+        self.assertIn("else if (pr == 0)", loop)
+        self.assertIn("next_timer_vsync(now, last_hw, last_sent)", loop)
 
 
 if __name__ == "__main__":

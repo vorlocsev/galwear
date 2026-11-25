@@ -922,15 +922,28 @@ static int64_t next_timer_vsync(int64_t now, int64_t last_hw, int64_t last_sent)
 	return base + ((threshold - base) / VSYNC_PERIOD_NS + 1) * VSYNC_PERIOD_NS;
 }
 
+/* Re-open failed TE nodes at a bounded cadence, never on every frame. */
+#define R800_TE_RETRY_NS 2000000000LL
+#define R800_TE_BAD_LIMIT 8
+
+static int te_poll_lost(int pr, short revents, int err)
+{
+	return (pr > 0 && (revents & (POLLHUP | POLLNVAL))) ||
+	       (pr < 0 && err != EINTR);
+}
+
+static int te_retry_due(int fd, int64_t now, int64_t retry_at)
+{
+	return fd < 0 && now >= retry_at;
+}
+
 static void *vsync_loop(void *arg)
 {
 	struct r800_hwc *h = arg;
-	int vfd = open(R800_VSYNC_NODE, O_RDONLY | O_CLOEXEC);
-	int64_t last_hw = 0, last_sent = 0;
+	int vfd = -1;
+	int bad_events = 0;
+	int64_t retry_at = 0, last_hw = 0, last_sent = 0;
 	unsigned long hw_count = 0, sw_count = 0, seen_epoch = 0;
-
-	if (vfd < 0)
-		LOGE("vsync: %s: %s, timer vsync only", R800_VSYNC_NODE, strerror(errno));
 
 	for (;;) {
 		int64_t ts = 0, now;
@@ -950,25 +963,47 @@ static void *vsync_loop(void *arg)
 			/* Do not reuse a pre-disable timestamp or pending IRQ. */
 			last_hw = vfd >= 0 ? read_hw_vsync(vfd) : 0;
 			seen_epoch = epoch;
+			bad_events = 0;
 		}
 
+		now = mono_ns();
+		if (te_retry_due(vfd, now, retry_at)) {
+			retry_at = now + R800_TE_RETRY_NS;
+			vfd = open(R800_VSYNC_NODE, O_RDONLY | O_CLOEXEC);
+			if (vfd >= 0) {
+				last_hw = read_hw_vsync(vfd); /* baseline, not a callback */
+				bad_events = 0;
+				LOGI("vsync: TE node opened");
+			}
+		}
 		if (vfd >= 0) {
 			struct pollfd p = { .fd = vfd, .events = POLLPRI | POLLERR };
 			int pr = poll(&p, 1, 22);
-			if (pr > 0 && (p.revents & POLLPRI) &&
-			    !(p.revents & (POLLHUP | POLLNVAL))) {
+			int err = pr < 0 ? errno : 0;
+			int lost = te_poll_lost(pr, p.revents, err);
+			if (!lost && pr > 0 && (p.revents & POLLPRI)) {
 				int64_t hw = read_hw_vsync(vfd);
 				if (hw > last_hw) {
 					last_hw = hw;
+					bad_events = 0;
 					if (hw > last_sent + VSYNC_PERIOD_NS / 2)
 						ts = hw;
+				} else {
+					bad_events++;
 				}
-			} else if ((pr > 0 && (p.revents & (POLLHUP | POLLNVAL))) ||
-				   (pr < 0 && errno != EINTR)) {
+			} else if (!lost && pr > 0 && (p.revents & POLLERR)) {
+				bad_events++;
+			} else if (pr == 0) {
+				/* No TE while idle is normal, not a source failure. */
+				bad_events = 0;
+			}
+			if (lost || bad_events >= R800_TE_BAD_LIMIT) {
 				close(vfd);
 				vfd = -1;
 				last_hw = 0;
-				LOGW("vsync: TE source lost; timer fallback");
+				bad_events = 0;
+				retry_at = mono_ns() + R800_TE_RETRY_NS;
+				LOGW("vsync: TE source lost; timer fallback and retry");
 			}
 		}
 
