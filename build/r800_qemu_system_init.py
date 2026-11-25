@@ -59,7 +59,8 @@ def inspect_console(log: bytes, timed_out: bool) -> dict:
            or b"Failed to execute /init" in line for line in lines):
         raise ValueError("Kernel panic or init execution failure")
     return {"kernel_launched_init": True, "console_marker_exact": True,
-            "guest_alive_until_host_timeout": True}
+            "qemu_process_alive_until_host_timeout": True,
+            "guest_progress_after_marker_verified": False}
 
 
 def kernel_bytes(path: Path) -> bytes:
@@ -120,7 +121,7 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
         "-nodefaults", "-no-reboot", "-display", "none", "-monitor", "none",
         "-serial", "stdio", "-nic", "none",
         "-kernel", str(image.resolve()),
-        "-append", "console=ttyAMA0 rdinit=/init ro panic=-1",
+        "-append", "console=ttyAMA0 rdinit=/init ro loglevel=7 panic=-1",
     ]
     if embedded_archive is None:
         command += ["-initrd", str(archive.resolve())]
@@ -146,8 +147,9 @@ def run(binary: Path, compile_evidence: Path, kernel: Path, out: Path,
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=5)
-    if log_path.stat().st_size > MAX_LOG:
-        raise ValueError("Unexpectedly large virtual console log")
+            if log_path.stat().st_size > MAX_LOG:
+                stream.truncate(MAX_LOG)
+                raise ValueError("Virtual console exceeded log limit; artifact truncated")
     observed = inspect_console(log_path.read_bytes(), timed_out)
     if validate_init(binary) != elf:
         raise ValueError("Init changed during virtual boot")
