@@ -990,6 +990,64 @@ class LinkerTests(unittest.TestCase):
         self.assertTrue(out["errors"])
         self.assertNotIn("vndk_core", out["lists"])
 
+    def put_apex_metadata(self, name, ver=1, manifest_version=None):
+        manifest = '{"name":"' + name + '","version":' + str(
+            ver if manifest_version is None else manifest_version) + '}'
+        self.put("apex/" + name + "/apex_manifest.json", manifest.encode())
+        return ('<apex-info moduleName="' + name + '" versionCode="' + str(ver) +
+                '" isActive="true" isFactory="true" modulePath="/system/apex/' +
+                name + '.apex"/>')
+
+    def test_apex_active_metadata_inventory(self):
+        records = [self.put_apex_metadata(name) for name in
+                   ("com.android.runtime", "com.android.art", "com.android.vndk.v30")]
+        self.put("apex/apex-info-list.xml",
+                 ("<apex-info-list>" + "".join(records) + "</apex-info-list>").encode())
+        out = audit.r800_apex_inventory.audit(self.root)
+        self.assertEqual(out["status"], "METADATA_INVENTORY_ONLY")
+        self.assertTrue(out["modules"]["com.android.vndk.v30"]["version_consistent"])
+        self.assertFalse(out["apexd_activation_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
+    def test_apex_duplicate_active_record(self):
+        entry = self.put_apex_metadata("com.android.runtime")
+        with self.assertRaisesRegex(ValueError, "Duplicate active"):
+            audit.r800_apex_inventory.info_list(
+                ("<apex-info-list>" + entry * 2 + "</apex-info-list>").encode())
+
+    def test_apex_xml_declaration_rejected(self):
+        with self.assertRaisesRegex(ValueError, "declaration"):
+            audit.r800_apex_inventory.info_list(b'<!DOCTYPE x><apex-info-list/>')
+
+    def test_apex_version_mismatch(self):
+        records = [self.put_apex_metadata("com.android.runtime", 1, 2),
+                   self.put_apex_metadata("com.android.art")]
+        self.put("apex/apex-info-list.xml",
+                 ("<apex-info-list>" + "".join(records) + "</apex-info-list>").encode())
+        out = audit.r800_apex_inventory.audit(self.root)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["modules"]["com.android.runtime"]["version_consistent"])
+
+    def test_apex_protobuf_presence_not_validation(self):
+        self.put("apex/com.android.runtime/apex_manifest.pb", b"x")
+        out = audit.r800_apex_inventory.audit(self.root)
+        self.assertTrue(out["modules"]["com.android.runtime"]["protobuf_manifest_present"])
+        self.assertIsNone(out["modules"]["com.android.runtime"]["json_manifest"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_apex_manifest_invalid_fields(self):
+        for raw in (b'{"name":"../lib","version":1}',
+                    b'{"name":"com.android.art","version":true}',
+                    b'{"name":"com.android.art","version":1,"version":2}'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                audit.r800_apex_inventory.json_manifest(raw)
+
+    def test_apex_report_integrated_without_activation_claim(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["apex_metadata"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["apex_activation_verified"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
