@@ -146,20 +146,35 @@ def verify_build(root, source_commit):
     if report.get("source_commit") != source_commit:
         raise ValueError("Build pipeline source commit differs from current checkout")
     steps = report.get("steps", [])
-    expected = ["01-runtime", "02-init-service", "03-stock-policy", "04-fixture-policy",
-                "05-probe-transition", "06-probe-relabel", "07-probe-service",
-                "08-compile-preflight", "08-spec-preflight", "09-compile-stock-load", "09-spec-stock-load"]
+    contracts = {
+        "01-runtime": ("runtime/runtime-extraction.json", "ANDROID_RUNTIME_EXTRACTED_STATIC_ONLY"),
+        "02-init-service": ("service/init-dependencies.json", "INIT_DEPENDENCY_CANDIDATES_ONLY"),
+        "03-stock-policy": ("stock/sepolicy-audit.json", "ANDROID_SEPOLICY_STATIC_COMPATIBILITY_ONLY"),
+        "04-fixture-policy": ("fixture/fixture-policy-audit.json", "GALWEAR_CLIENT_POLICY_STATIC_ONLY"),
+        "05-probe-transition": ("probe-transition/initramfs-evidence.json", "NON_RELEASE_INITRAMFS_SPEC_ONLY"),
+        "06-probe-relabel": ("probe-relabel/initramfs-evidence.json", "NON_RELEASE_INITRAMFS_SPEC_ONLY"),
+        "07-probe-service": ("probe-service/initramfs-evidence.json", "NON_RELEASE_INITRAMFS_SPEC_ONLY"),
+        "08-compile-preflight": None,
+        "08-spec-preflight": ("preflight-compile.json", "NON_RELEASE_INITRAMFS_SPEC_ONLY"),
+        "09-compile-stock-load": None,
+        "09-spec-stock-load": ("stock-load-compile.json", "NON_RELEASE_INITRAMFS_SPEC_ONLY"),
+    }
+    expected = list(contracts)
     if [s.get("name") for s in steps] != expected or any(s.get("status") != "PASS" for s in steps):
         raise ValueError("Incomplete source build pipeline")
     for step in steps:
-        if step["name"] in ("08-compile-preflight", "09-compile-stock-load"):
+        contract = contracts[step["name"]]
+        if contract is None:
             continue
+        relative, expected_status = contract
         path = Path(step["evidence"])
+        if path != root/relative or step.get("evidence_status") != expected_status:
+            raise ValueError("Build stage evidence contract mismatch: " + step["name"])
         if not path.is_absolute() or not path.resolve(strict=True).is_relative_to(root):
             raise ValueError("Build stage evidence escapes build directory")
         if hashlib.sha256(snapshot(path, MAX_REPORT)).hexdigest() != step["evidence_sha256"]:
             raise ValueError("Build stage evidence changed: " + step["name"])
-        require_report(path, step["evidence_status"], safe=step["evidence_status"] != "NON_RELEASE_INITRAMFS_SPEC_ONLY")
+        require_report(path, expected_status, safe=expected_status != "NON_RELEASE_INITRAMFS_SPEC_ONLY")
 
 
 def boot_phase(p, a):
@@ -204,6 +219,9 @@ def boot_phase(p, a):
           "--stock-policy-report", stock_report, "--product-out", stock,
           "--checkfc", stock_checkfc, "--out-dir", o/"transition-boot"],
          transition, "VIRT_ANDROID_DIAGNOSTIC_INIT_DOMAIN_ONLY")
+    p.py("06-relabel-policy-gate", "r800_rootfs_relabel_policy_gate.py",
+         ["--product-out", stock, "--checkfc", stock_checkfc],
+         o/"relabel-policy-gate.json", "ROOTFS_RELABEL_POLICY_PREREQUISITES_ONLY")
     relabel = o/"relabel-boot.json"
     p.py("06-relabel", "r800_qemu_rootfs_relabel.py",
          [*layout, *common, "--preflight-init", preflight, "--init", b/"probe-relabel/init",
