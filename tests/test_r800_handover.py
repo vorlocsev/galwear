@@ -46,6 +46,16 @@ class HandoverTests(unittest.TestCase):
         self.assertNotIn("mount --bind $BT/libbt-vendor.so", helper)
         self.assertNotIn("mount --bind /oem/r800dev/fw /vendor/data/r800dev/fw", helper)
 
+    def test_no_unauthenticated_network_shell(self):
+        for path in (SCRIPT, ROOT / "payload/android-helper.sh"):
+            source = path.read_text()
+            self.assertNotIn("busybox-extras", source)
+            self.assertNotIn("telnetd", source)
+            self.assertNotIn("tnet()", source)
+            self.assertNotIn("telnet on 23", source)
+        candidate = (ROOT / "build/r800_payload_candidate.py").read_text()
+        self.assertNotIn('"busybox-extras"', candidate)
+
     def test_required_command_success(self):
         result = self.run_gate("true")
         self.assertEqual(result.returncode, 0)
