@@ -40,6 +40,30 @@ for module in hwcomposer gps sensors lights; do
     grep -Eq '[[:space:]]OBJECT[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+HMI$' "$out/$module-symbols.txt"
     "$toolchain/llvm-readelf" -d "$out/$soname" > "$out/$module-dynamic.txt"
 done
+# Reconstructed candidate, never a claim of original patch recovery.
+mkdir "$out/tinyalsa"
+git -C "$tiny" archive HEAD | tar -x -C "$out/tinyalsa"
+(
+    cd "$out/tinyalsa"
+    git apply --check "$repo/tools/audio/tinyalsa-2.0.0-sync-ptr.patch"
+    git apply "$repo/tools/audio/tinyalsa-2.0.0-sync-ptr.patch"
+)
+python3 "$repo/build/r800_tinyalsa_sync_test.py" "$out/tinyalsa"
+for unit in pcm pcm_hw pcm_plugin snd_card_plugin mixer mixer_hw mixer_plugin; do
+    "$cc" -std=gnu11 -O2 -fPIC -I"$out/tinyalsa/include" \
+        -c "$out/tinyalsa/src/$unit.c" -o "$out/tinyalsa/$unit.o"
+done
+"$toolchain/llvm-ar" rcs "$out/tinyalsa-candidate.a" "$out/tinyalsa/"*.o
+"$cc" -shared -Wl,--no-undefined -Wl,-soname,audio.primary.r800.so \
+    "$out/audio_r800.o" "$out/tinyalsa-candidate.a" -llog -ldl -lm \
+    -o "$out/audio.primary.r800.so"
+"$toolchain/llvm-readelf" -h "$out/audio.primary.r800.so" > "$out/audio-elf.txt"
+grep -Eq 'Class:[[:space:]]+ELF32' "$out/audio-elf.txt"
+grep -Eq 'Machine:[[:space:]]+ARM' "$out/audio-elf.txt"
+grep -Eq 'Type:[[:space:]]+DYN' "$out/audio-elf.txt"
+"$toolchain/llvm-readelf" --dyn-syms --wide "$out/audio.primary.r800.so" > "$out/audio-symbols.txt"
+grep -Eq '[[:space:]]OBJECT[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+HMI$' "$out/audio-symbols.txt"
+"$toolchain/llvm-readelf" -d "$out/audio.primary.r800.so" > "$out/audio-dynamic.txt"
 # Only JSON metadata leaves the runner, not binaries.
 python3 - "$out" "$repo" <<'PY'
 import hashlib, json, os, pathlib, re, subprocess, sys
@@ -84,7 +108,15 @@ report = {
     "hwc_shared_library": libraries["hwcomposer"],
     "linked_libraries": libraries,
     "audio_linked": False,
-    "audio_link_blocker": "hardware-specific tinyalsa sync_ptr patch not available",
+    "audio_link_blocker": "original hardware-validated patch unavailable",
+    "audio_candidate_linked": True,
+    "audio_candidate": {
+        "sha256": sha(out / "audio.primary.r800.so"),
+        "tinyalsa_patch_sha256": sha(repo / "tools/audio/tinyalsa-2.0.0-sync-ptr.patch"),
+        "sync_ptr_mock_passed": True,
+        "dynamic_section": (out / "audio-dynamic.txt").read_text(),
+        "hardware_validated": False,
+    },
     "patched_tinyalsa_linked": False,
     "android_boot_tested": False,
     "hardware_tested": False,
