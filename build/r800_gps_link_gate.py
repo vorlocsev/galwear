@@ -57,6 +57,8 @@ def elf(raw, executable=False):
             tag, _ = struct.unpack_from("<iI", raw, pos)
             if tag == 0:
                 break
+            if tag in (0x6000000f, 0x60000010, 0x60000011, 0x60000012):
+                raise ValueError("Unsupported APS2 dynamic tag")
             if tag in (35, 36, 37, 0x6fffe000, 0x6fffe001, 0x6fffe003):
                 raise ValueError("Unsupported RELR dynamic tag")
     return info
