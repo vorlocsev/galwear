@@ -12,12 +12,16 @@ import r800_qemu_system_init as boot
 from test_initramfs_recipe import fake_aarch64_elf
 
 LIST = "/scratch/initramfs.list"
-CONFIG = "\n".join("CONFIG_" + key + "=y" for key in a.REQUIRED) + '\nCONFIG_INITRAMFS_SOURCE="' + LIST + '"\nCONFIG_CMDLINE=""\nCONFIG_NR_CPUS=2\n'
+CONFIG = "\n".join("CONFIG_" + key + "=y" for key in a.REQUIRED) + '\nCONFIG_INITRAMFS_SOURCE="' + LIST + '"\nCONFIG_CMDLINE=""\nCONFIG_NR_CPUS=2\nCONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"\n'
 
 
 class VirtTests(unittest.TestCase):
     def test_required_config(self):
         self.assertFalse(a.inspect(CONFIG, LIST)["safe_to_flash"])
+
+    def test_wrong_binder_devices(self):
+        with self.assertRaisesRegex(ValueError, "Binder device list"):
+            a.inspect(CONFIG.replace("binder,hwbinder,vndbinder", "binder"), LIST)
 
     def test_wrong_cpu_capacity(self):
         with self.assertRaisesRegex(ValueError, "two CPUs"):
