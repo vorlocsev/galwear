@@ -14,11 +14,13 @@ from r800_donor_preflight import verify_components, checked
 from r800_payload_candidate import ASSET_SIZES, HALS, BINS, RADIO_FILES, CHARGER_TOOLS
 from r800_stage_components import TOOLS, static_arm, dex
 from r800_vendor_inputs import file_info
+from r800_peripheral_firmware import REQUIRED, check_bytes
 
 COMPILED = set(TOOLS) | {"bin/" + n for n in BINS} | {
     "hwc/" + n for n in HALS} | {
     "keepwifi.dex", "fw/bt/libbt-vendor.so", "fw/bt/bt_vendor.conf"}
 RADIO = set(RADIO_FILES) - {"fw/bt/libbt-vendor.so", "fw/bt/bt_vendor.conf"}
+PERIPHERAL = set(REQUIRED)
 MAX_FILE = 64*1024**2
 
 
@@ -59,6 +61,8 @@ def prepare(components, assets, radio, output, source_sha):
         def add(root, source, dest, evidence, origin, mode):
             raw = read_regular(checked(root,source),MAX_FILE)
             match(raw,evidence,dest)
+            if dest in PERIPHERAL:
+                check_bytes(dest,raw)
             if dest.startswith("bin/") or dest in CHARGER_TOOLS:
                 static_arm(raw)
             elif dest == "keepwifi.dex":
@@ -80,7 +84,7 @@ def prepare(components, assets, radio, output, source_sha):
             add(components,key,name,cm[key],"compiled:"+source_sha,mode)
         for name in sorted(ASSET_SIZES):
             add(assets,name,name,am[name],"local_asset_conversion",0o644)
-        for name in sorted(RADIO):
+        for name in sorted(RADIO | PERIPHERAL):
             key = "payload/"+name
             evidence = rm["files"].get(key,{})
             if evidence.get("status")!="EXTRACTED":
@@ -90,7 +94,7 @@ def prepare(components, assets, radio, output, source_sha):
             raise ValueError("WPCD copies differ")
         report = {"status":"PARTIAL_PAYLOAD_INPUTS_ONLY","source_sha":source_sha,
                   "files":files,"missing":["Android system image","Tizen configuration and plugins",
-                  "linked GPSBridge","remaining peripheral firmware","independent acceptance gates"],
+                  "linked GPSBridge","independent acceptance gates"],
                   "donor_authenticity_verified":False,"runtime_verified":False,
                   "payload_complete":False,"safe_to_flash":False}
         (tree/"payload-inputs-evidence.json").write_text(json.dumps(report,indent=2,sort_keys=True))
