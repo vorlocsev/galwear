@@ -2210,6 +2210,71 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["wifi_inventory"]["sdio_transport_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def gnss_fixture(self):
+        self.put("init.rc", b"service vendor.gnss /vendor/bin/hw/gnss-service\n"
+                 b"    interface android.hardware.gnss@1.0::IGnss default\n")
+        self.put_art_executable("vendor/bin/hw/gnss-service", "arm")
+        self.put("vendor/lib/hw/gps.exynos.so", fixture("arm"))
+        self.put("vendor/etc/vintf/manifest.xml", b'<manifest type="device"><hal format="hidl"><name>android.hardware.gnss</name><fqname>@1.0::IGnss/default</fqname></hal></manifest>')
+        self.put("vendor/firmware/gnss/gnss-test.bin", b"synthetic")
+        self.put("vendor/etc/gps.conf", b"SUPL_HOST=fixture.invalid\nSUPL_PORT=7275\n")
+
+    def inspect_gnss(self, kernel=None, dtb=None):
+        return audit.r800_gnss_inventory.audit(
+            self.root, audit.r800_init_inventory.audit(self.root),
+            audit.r800_vintf_inventory.audit(self.root), audit.inspect, kernel, dtb)
+
+    def test_gnss_static_candidates(self):
+        self.gnss_fixture()
+        out = self.inspect_gnss({"CONFIG_GNSS": "y"})
+        self.assertEqual(len(out["hal_declarations"]), 1)
+        self.assertTrue(out["services"][0]["elf"])
+        self.assertEqual(out["firmware_candidates"]["/vendor/firmware/gnss/gnss-test.bin"]["bytes"], 9)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["satellite_fix_verified"])
+
+    def test_gnss_config_redaction(self):
+        mod = audit.r800_gnss_inventory
+        self.assertEqual(mod.config_inventory(b"SUPL_HOST=fixture.invalid\nLATITUDE=1\nSUPL_PORT=7275\n"),
+                         {"SUPL_HOST": "PRESENT", "SUPL_PORT": "PRESENT"})
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            mod.config_inventory(b"SUPL_PORT=1\nSUPL_PORT=2\n")
+
+    def test_gnss_dt_receiver_serial_speed(self):
+        nodes = {"/": {}, "/uart": {"compatible": b"samsung,serial\0"},
+                 "/uart/gnss": {"compatible": b"fixture,gps\0",
+                                "current-speed": struct.pack(">I", 115200)}}
+        out = audit.r800_gnss_inventory.dt_inventory(nodes)
+        self.assertTrue(out[0]["transport_candidate"])
+        self.assertTrue(out[1]["receiver_candidate"])
+        self.assertEqual(out[1]["current-speed"], 115200)
+
+    def test_gnss_dt_disabled_parent(self):
+        nodes = {"/": {}, "/uart": {"status": b"disabled\0"},
+                 "/uart/gps": {"compatible": b"fixture,gps\0"}}
+        self.assertFalse(audit.r800_gnss_inventory.dt_inventory(nodes)[1]["enabled"])
+
+    def test_gnss_wrong_library_abi(self):
+        self.gnss_fixture()
+        self.put("vendor/lib/hw/gps.exynos.so", fixture("arm64"))
+        out = self.inspect_gnss()
+        self.assertIsNone(out["libraries"]["/vendor/lib/hw/gps.exynos.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_gnss_fake_device_node(self):
+        self.gnss_fixture()
+        self.put("dev/gnss0", b"fake")
+        out = self.inspect_gnss()
+        self.assertFalse(out["device_nodes"]["/dev/gnss0"])
+        self.assertTrue(any("not a character device" in e for e in out["errors"]))
+
+    def test_gnss_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",))
+        self.assertEqual(out["gnss_inventory"]["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["gnss_inventory"]["location_service_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
