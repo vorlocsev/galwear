@@ -61,6 +61,18 @@ class SystemExt4Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "expected context"):
                 a.expected_label("contexts", "system/bin/init", 0o100755, "matchpathcon")
 
+    def test_canned_root_and_exact_modes(self):
+        config = a.canned_config(a.system_entries(fixture(), {}), "system")
+        self.assertIn(b"/ 0 0 0755 capabilities=0\n", config)
+        self.assertIn(b"system/bin/linker64 0 0 0777 capabilities=0\n", config)
+        self.assertIn(b"system/bin/galwear_property_service 0 0 0755 capabilities=0\n", config)
+
+    def test_reject_special_mode_bits(self):
+        entries = {"system": (0o040755,b"",0,0),
+                   "system/bin": (0o042755,b"",0,0)}
+        with self.assertRaisesRegex(ValueError,"Invalid canned"):
+            a.canned_config(entries,"system")
+
     def test_readback_label_and_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             scratch = Path(tmp)
@@ -68,7 +80,7 @@ class SystemExt4Tests(unittest.TestCase):
             def mock(args):
                 command = args[2]
                 if command.startswith("stat "):
-                    return subprocess.CompletedProcess([], 0, stdout=b"Inode: 12 Type: regular Mode: 0755\n")
+                    return subprocess.CompletedProcess([], 0, stdout=b"Inode: 12 Type: regular Mode: 0755\nUser: 0 Group: 0 Size: 6\n")
                 if command.startswith("ea_get "):
                     (scratch/"label").write_bytes(label.encode()+b"\0")
                 elif command.startswith("dump "):
