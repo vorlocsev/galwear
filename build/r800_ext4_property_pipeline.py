@@ -78,6 +78,9 @@ def execute(p,a):
     p.py("01-stage-rootfs","r800_android_init_rootfs.py",
          ["--product-out",service,"--runtime-root",b/"runtime/runtime-root",
           "--choices",a.choices,"--out",staged],o/"layout.json","INIT_EXPERIMENTAL_ROOTFS_STAGED_ONLY")
+    p.py("01-artifact-origin","r800_aosp_artifact_origin.py",
+         ["--build-root",b,"--staged",staged,"--source-commit",p.source_commit],
+         o/"artifact-origin.json","AOSP_SELECTED_ARTIFACT_ORIGIN_ONLY")
     probes = compile_probes(p)
     common = ["--kernel",a.kernel,"--baseline",a.baseline,"--config-evidence",a.config_evidence]
     rootfs = ["--staged",staged,"--preflight-init",b/"preflight-init"]
@@ -136,7 +139,8 @@ def execute(p,a):
     p.py("09-property-service","r800_qemu_ext4_property_service.py",
          [*common,*fixture_args,*probes["service"],"--stock-system-report",o/"03-stock-system.json",
           "--product-out",fixture,"--checkfc",ft/"checkfc","--analyze",ft/"sepolicy-analyze",
-          "--transition-report",o/"transition.json","--out-dir",o/"service-boot"],
+          "--transition-report",o/"transition.json","--origin-report",o/"artifact-origin.json",
+          "--out-dir",o/"service-boot"],
          o/"service.json","VIRT_GALWEAR_EXT4_PROPERTY_SERVICE_ONLY")
     p.status = SUCCESS
 
