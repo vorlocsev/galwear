@@ -81,7 +81,7 @@ def interpreter(raw):
 def audit(root, targets=TARGETS):
     root = root.resolve(strict=True)
     queue = deque(targets)
-    visited, files, edges, problems = set(), {}, [], []
+    visited, files, edges, problems, aliases = set(), {}, [], [], {}
     total = 0
     while queue:
         guest = queue.popleft()
@@ -92,6 +92,7 @@ def audit(root, targets=TARGETS):
         visited.add(guest)
         try:
             path, canonical = resolve_guest(root, guest)
+            aliases[guest] = canonical
             if canonical in files:
                 continue
             raw = read_regular(path, MAX_FILE)
@@ -106,7 +107,8 @@ def audit(root, targets=TARGETS):
                 problems.append({"path":guest,"reason":"RPATH/RUNPATH requires review"})
             files[canonical] = {"bytes":len(raw), "sha256":hashlib.sha256(raw).hexdigest(),
                                 "needed":info["needed"], "interpreter":interp,
-                                "version_needs":info["version_needs"]}
+                                "version_needs":info["version_needs"],
+                                "version_definitions":info["version_definitions"]}
             if interp:
                 queue.append(interp)
                 edges.append({"from":guest,"needed":interp,"provider":interp})
@@ -131,8 +133,25 @@ def audit(root, targets=TARGETS):
                 queue.append(provider)
         except (OSError, ValueError) as exc:
             problems.append({"path":guest,"reason":str(exc)})
+    versions_checked = 0
+    weak_missing = []
+    for edge in edges:
+        source = files.get(aliases.get(edge["from"]))
+        provider = files.get(aliases.get(edge["provider"]))
+        if source is None or provider is None:
+            continue
+        supplied = {v["version"] for v in provider["version_definitions"]}
+        for need in source["version_needs"]:
+            if need["library"] != edge["needed"]:
+                continue
+            versions_checked += 1
+            if need["version"] not in supplied:
+                issue = {"path":edge["from"],"needed":edge["needed"],
+                         "version":need["version"],"reason":"VERSION_NOT_PROVIDED"}
+                (weak_missing if need["weak"] else problems).append(issue)
     return {"status":"TIZEN_DEPENDENCY_REVIEW_REQUIRED" if problems else "TIZEN_STATIC_CLOSURE_ONLY",
-            "files":files,"edges":edges,"problems":problems,
+            "files":files,"edges":edges,"problems":problems,"aliases":aliases,
+            "version_records_checked":versions_checked,"weak_versions_missing":weak_missing,
             "dlopen_plugins_verified":False,"symbol_resolution_verified":False,
             "permissions_verified":False,"runtime_verified":False,"safe_to_flash":False}
 
