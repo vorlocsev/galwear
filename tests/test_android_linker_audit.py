@@ -2548,6 +2548,61 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["power_inventory"]["suspend_resume_verified"])
         self.assertFalse(out["safe_to_flash"])
 
+    def test_selinux_binary_header(self):
+        mod = audit.r800_selinux_inventory
+        raw = struct.pack("<II", 0xf97cff8c, 8) + b"SE Linux" + struct.pack("<IIII", 30, 1, 8, 7)
+        self.assertEqual(mod.policy_header(raw)["version"], 30)
+        with self.assertRaises(ValueError):
+            mod.policy_header(raw[:-1])
+        with self.assertRaises(ValueError):
+            mod.policy_header(b"\0" * 32)
+
+    def test_selinux_context_conflicting_service(self):
+        mod = audit.r800_selinux_inventory
+        out = mod.contexts(b"activity u:object_r:activity_service:s0\nactivity u:object_r:other_service:s0\n", "service_contexts")
+        self.assertEqual(out["duplicates"], ["activity"])
+        self.assertEqual(out["types"], ["activity_service", "other_service"])
+
+    def test_selinux_file_context_regex_overlap_not_duplicate(self):
+        mod = audit.r800_selinux_inventory
+        out = mod.contexts(b"/vendor/bin(/.*)? u:object_r:vendor_file:s0\n/vendor/bin/foo -- u:object_r:foo_exec:s0\n", "file_contexts")
+        self.assertEqual(out["records"], 2)
+        self.assertEqual(out["duplicates"], [])
+        self.assertEqual(out["unsupported_lines"], 0)
+
+    def test_selinux_split_policy_inventory(self):
+        self.put("vendor/etc/selinux/vendor_sepolicy.cil", b"(type vendor_test)\n")
+        self.put("vendor/etc/selinux/plat_sepolicy_vers.txt", b"30.0\n")
+        self.put("system/etc/selinux/mapping/30.0.cil", b"(typeattribute test_30_0)\n")
+        out = audit.r800_selinux_inventory.audit(self.root, {"services": []})
+        self.assertEqual(out["platform_version_markers"]["/vendor/etc/selinux/plat_sepolicy_vers.txt"], "30.0")
+        self.assertFalse(out["files"]["/system/etc/selinux/mapping/30.0.cil"]["cil_compiled"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["neverallow_verified"])
+
+    def test_selinux_enforcing_snapshot_not_runtime_proof(self):
+        self.put("sys/fs/selinux/enforce", b"1\n")
+        out = audit.r800_selinux_inventory.audit(self.root, {"services": []})
+        self.assertTrue(out["enforcing_snapshot"])
+        self.assertFalse(out["runtime_enforcing_verified"])
+        self.put("sys/fs/selinux/enforce", b"0\n")
+        out = audit.r800_selinux_inventory.audit(self.root, {"services": []})
+        self.assertFalse(out["enforcing_snapshot"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_selinux_init_seclabel_syntax(self):
+        self.put("init.rc", b"service vendor.power /vendor/bin/power\n    seclabel invalid\n")
+        out = audit.r800_selinux_inventory.audit(self.root, audit.r800_init_inventory.audit(self.root))
+        self.assertEqual(out["init_seclabels"], [{"service": "vendor.power", "valid_syntax": False}])
+        self.assertTrue(any("Invalid init seclabel" in e for e in out["errors"]))
+
+    def test_selinux_report_integrated(self):
+        self.put("init", fixture())
+        out = audit.audit(self.root, ("/init",), kernel_config={"CONFIG_SECURITY_SELINUX": "y"})
+        self.assertEqual(out["selinux_inventory"]["kernel_config"]["CONFIG_SECURITY_SELINUX"], "y")
+        self.assertFalse(out["selinux_inventory"]["policy_loaded_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
     def test_symlink_alias_not_ambiguous(self):
         self.put("init", fixture(needed=["libx.so"]))
         self.put("system/lib64/libx.so", fixture())
