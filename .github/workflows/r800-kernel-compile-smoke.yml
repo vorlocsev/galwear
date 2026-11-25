@@ -10,9 +10,21 @@ on:
       - "build/r800_kernel_compile_smoke.sh"
       - "build/r800_aosp_source_probe.sh"
       - "tests/test_kernel_compile_recipe.py"
+      - "build/r800_initramfs_compile_smoke.sh"
+      - "build/r800_initramfs_spec.py"
+      - "build/r800_embedded_initramfs_config.py"
+      - "build/r800_cpio_audit.py"
+      - "tests/test_initramfs_recipe.py"
+      - "tests/test_cpio_audit.py"
+      - "src/initramfs/init-readonly.c"
       - "src/kernel/r800-wearos.patch"
       - "src/kernel/r800.config"
   workflow_dispatch:
+    inputs:
+      embed_readonly_initramfs:
+        description: "Embed the minimal read-only /init (non-release)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -20,7 +32,9 @@ permissions:
 jobs:
   kernel-image-smoke:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
+    env:
+      EMBED_INIT: ${{ (github.event_name == 'workflow_dispatch' && inputs.embed_readonly_initramfs || github.event_name == 'push' && github.ref_name == 'development/r800-display-error-propagation-20261125') && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +46,9 @@ jobs:
         run: |
           sh -n build/r800_kernel_compile_smoke.sh
           python3 -m unittest discover -s tests -p 'test_kernel_compile_recipe.py' -v
+          python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
+          python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
+          sh -n build/r800_initramfs_compile_smoke.sh
 
       - name: Fetch exact public kernel base and verify patch before any writes
         id: source
@@ -49,10 +66,11 @@ jobs:
             "50db73fc799f20a7120a8b5f653b16cc123d856f"
           git -C "$RUNNER_TEMP/combined-exynos-src" status --porcelain
 
-      - name: Compile Image with Alpine clang 19.1.4 (NO embedded initramfs)
+      - name: Compile Image with Alpine clang 19.1.4 (selected non-release mode)
         id: compile
         run: |
           docker run --rm --pull=always \
+            -e EMBED_INIT="$EMBED_INIT" \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             -v "$RUNNER_TEMP/combined-exynos-src:/source" \
             -v "$RUNNER_TEMP:/scratch" \
@@ -62,6 +80,11 @@ jobs:
                 git make bash bc bison flex perl python3 openssl-dev \
                 elfutils-dev build-base linux-headers coreutils findutils
               git config --global --add safe.directory /source
+              unset R800_SMOKE_INITRAMFS_LIST
+              if [ "$EMBED_INIT" = true ]; then
+                sh /repo/build/r800_initramfs_compile_smoke.sh /repo /scratch/r800-integrated-init
+                export R800_SMOKE_INITRAMFS_LIST=/scratch/r800-integrated-init/initramfs.list
+              fi
               sh /repo/build/r800_kernel_compile_smoke.sh \
                 /source /repo /scratch/compiled-kernel
             '
@@ -105,6 +128,55 @@ jobs:
           print(f"PASS: AArch64 ELF and Linux Image header; text_offset={text_offset:#x}, image_size={image_size}, flags={flags:#x}, file_size={image.stat().st_size}")
           PY
 
+      - name: Verify exact audited initramfs is linked into kernel Image
+        id: embedded
+        if: env.EMBED_INIT == 'true'
+        run: |
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import hashlib
+          import json
+          import mmap
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          out = root / "compiled-kernel"
+          audit = json.loads((out / "embedded-cpio-audit.json").read_text())
+          gate = json.loads((out / "embedded-initramfs-gate.json").read_text())
+          init = json.loads((root / "r800-integrated-init/initramfs-evidence.json").read_text())
+          if (audit.get("embedded_init_exact_match") is not True
+                  or audit.get("safe_to_flash") is not False
+                  or gate.get("status") != "TEMPORARY_KCONFIG_SET_ONLY"
+                  or init.get("status") != "NON_RELEASE_INITRAMFS_SPEC_ONLY"
+                  or audit["embedded_init_sha256"] != gate["init_sha256"]
+                  or gate["init_sha256"] != init["init"]["sha256"]):
+              raise SystemExit("Inconsistent /init evidence")
+          archive = out / "usr/initramfs_data.cpio.gz"
+          if not archive.is_file():
+              archive = out / "usr/initramfs_data.cpio"
+          if not 0 < archive.stat().st_size <= 32 * 1024 * 1024:
+              raise SystemExit("Archive size out of bounds")
+          data = archive.read_bytes()
+          if hashlib.sha256(data).hexdigest() != audit["archive_sha256"]:
+              raise SystemExit("Archive changed after audit")
+          offsets = {}
+          for binary in (out / "vmlinux", out / "arch/arm64/boot/Image"):
+              with binary.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                  offset = mm.find(data)
+                  if offset < 0 or mm.find(data, offset + 1) >= 0:
+                      raise SystemExit(f"Audited archive missing or ambiguous in {binary.name}")
+                  offsets[binary.name] = offset
+          report = {
+              "status": "EXACT_ARCHIVE_BYTES_LINKED_NON_RELEASE",
+              "archive_sha256": audit["archive_sha256"],
+              "init_sha256": gate["init_sha256"],
+              "offsets": offsets,
+              "kernel_boot_tested": False,
+              "safe_to_flash": False,
+          }
+          (out / "embedded-link-evidence.json").write_text(json.dumps(report, indent=2) + "\n")
+          PY
+
       - name: Record evidence only, never upload compiled Image
         if: always()
         env:
@@ -114,13 +186,18 @@ jobs:
           COMPILE_OUTCOME: ${{ steps.compile.outcome }}
           AUDIO_OUTCOME: ${{ steps.audio.outcome }}
           ARM64_OUTCOME: ${{ steps.arm64.outcome }}
+          EMBEDDED_OUTCOME: ${{ steps.embedded.outcome }}
         run: |
           {
             printf 'recipe=%s\nsource=%s\nexpand=%s\ncompile=%s\naudio=%s\narm64=%s\n' \
               "$RECIPE_OUTCOME" "$SOURCE_OUTCOME" "$EXPAND_OUTCOME" \
               "$COMPILE_OUTCOME" "$AUDIO_OUTCOME" "$ARM64_OUTCOME"
             if [ "$RECIPE_OUTCOME/$SOURCE_OUTCOME/$EXPAND_OUTCOME/$COMPILE_OUTCOME/$AUDIO_OUTCOME/$ARM64_OUTCOME" = success/success/success/success/success/success ]; then
-              echo "integrated_kernel_smoke=pass"
+              if [ "$EMBED_INIT" = false ] || [ "$EMBEDDED_OUTCOME" = success ]; then
+                echo "integrated_kernel_smoke=pass"
+              else
+                echo "integrated_kernel_smoke=not_passed"
+              fi
             else
               echo "integrated_kernel_smoke=not_passed"
             fi
@@ -136,7 +213,8 @@ jobs:
             done
             echo "safe_to_flash=false"
             echo "build_kind=smoke_non_release"
-            echo "embedded_initramfs=disabled_in_temporary_config"
+            echo "embedded_initramfs_requested=$EMBED_INIT"
+            echo "embedded_link_outcome=$EMBEDDED_OUTCOME"
             echo "device_contacted=false"
             echo "image_published=false"
             if [ -s "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image" ]; then
@@ -155,5 +233,9 @@ jobs:
           path: |
             ${{ runner.temp }}/r800-source-preflight.json
             ${{ runner.temp }}/r800-smoke-evidence.txt
+            ${{ runner.temp }}/r800-integrated-init/initramfs-evidence.json
+            ${{ runner.temp }}/compiled-kernel/embedded-initramfs-gate.json
+            ${{ runner.temp }}/compiled-kernel/embedded-cpio-audit.json
+            ${{ runner.temp }}/compiled-kernel/embedded-link-evidence.json
           if-no-files-found: warn
           retention-days: 7
