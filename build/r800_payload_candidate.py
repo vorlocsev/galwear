@@ -24,6 +24,9 @@ HALS = ("audio.primary.r800.so", "gps.r800.so", "hwcomposer.r800.so", "sensors.r
 BINS = ("busybox", "busybox-extras", "fsfreeze", "loopdio", "r800boost", "r800keys", "ukey", "wpcd")
 DIRS = ("fw", "charger", "tzlite", "root", "lib")
 SINGLE = ("keepwifi.dex", "gpsbridge", "splash.raw")
+RADIO_FILES = ("fw/bcmdhd_sta.bin", "fw/nvram_net.txt", "fw/bcmdhd_clm.blob",
+               "fw/bt/BCM43012B0_002.001.021.0153.0156.hcd",
+               "fw/bt/bt_vendor.conf", "fw/bt/libbt-vendor.so")
 STATE = {"DEV", "STAY", "SLEEP", "CPUIDLE_DEEP", "OVERLAY", "RESET_DATA", "TZTRACE",
          "GPU_SCALE", "DIAG", "gemini.tries", "userdata.img", "product_overlay", "props",
          "accounts.db", "accounts_ce.db", "accounts_de.db", "wpa_supplicant.conf",
@@ -104,6 +107,21 @@ def inventory(src, release):
             raise ValueError("Non-executable payload binary: " + name)
     for name in DIRS:
         add(checked(name), name, recursive=True)
+    # Require the specific firmware paths used by the configured bcmdhd driver
+    # and Broadcom vendor library. Names/hashes are not proof of compatibility.
+    for name in RADIO_FILES:
+        if name not in entries:
+            raise ValueError("Missing radio input: " + name)
+        path = checked(name)
+        raw = read_regular(path, 64 * 1024**2)
+        if name.endswith(".so"):
+            elf = inspect(raw)
+            if elf["abi"] != "arm" or elf["elf_type"] != "ET_DYN" or not elf["has_dynamic"]:
+                raise ValueError("Expected ARM32 Bluetooth vendor library")
+        elif name.endswith("bt_vendor.conf"):
+            expected = read_regular(checked("src/vendor/libbt/bt_vendor.conf", release), 65536)
+            if raw != expected:
+                raise ValueError("Bluetooth configuration differs from repository profile")
     for name in SINGLE:
         add(checked(name), name)
     for name in SCRIPTS:
