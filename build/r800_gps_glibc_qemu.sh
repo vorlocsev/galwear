@@ -2,6 +2,7 @@
 # Execute only trusted donor glibc in an isolated, unprivileged QEMU user-mode sandbox.
 # Usage: r800_gps_glibc_qemu.sh <NDK r27c> <resolved donor library dir>
 set -eu
+export PYTHONDONTWRITEBYTECODE=1
 [ "$#" -eq 2 ] || { echo "usage: $0 NDK-r27c donor-libdir" >&2; exit 2; }
 [ "$(id -u)" -ne 0 ] || { echo "run as an unprivileged user" >&2; exit 2; }
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -33,11 +34,11 @@ for name in DONORS:
     print("DONOR_SHA256",name,hashlib.sha256(raw).hexdigest())
 PY
 (cd "$TMP/root/lib" && sha256sum libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3) > "$TMP/manifest"
-"$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
+"$TC/clang" --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 \
   -O2 -ffreestanding -fno-builtin -fno-stack-protector -fPIC -shared -nostdlib -fuse-ld=lld \
   -Wl,--hash-style=sysv,-z,noexecstack,--no-undefined \
   -o "$TMP/root/probe_plugin.so" "$ROOT/tests/r800_glibc_probe_plugin.c"
-"$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
+"$TC/clang" --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 \
   -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -no-pie -nostdlib -fuse-ld=lld \
   -Wl,--hash-style=sysv,-z,noexecstack,-z,now,--no-undefined \
   -Wl,--dynamic-linker=/lib/ld-linux.so.3,-e,_start \
@@ -56,9 +57,7 @@ timeout -k 5s 30s "$BWRAP" --unshare-all --die-with-parent --new-session \
     cat "$TMP/run.log"; echo "QEMU_PROBE=FAILED_OR_SANDBOX_UNAVAILABLE" >&2; exit 1;
   }
 cat "$TMP/run.log"
-for marker in GLIBC_2_24 PTHREAD_TLS DLOPEN_DLSYM R800_GLIBC_QEMU_PROBE; do
-    [ "$(grep -Fxc "$marker=PASS" "$TMP/run.log")" -eq 1 ]
-done
+python3 "$ROOT/build/r800_qemu_probe_log.py" "$TMP/run.log"
 (cd "$TMP/root/lib" && sha256sum -c "$TMP/manifest")
 echo "QEMU_USER_ONLY=PASS"
 echo "GNSS_RUNTIME_VERIFIED=false"
