@@ -101,6 +101,44 @@ def verify_hashtree(read, image, tree, tree_size, db, hb, algorithm, salt, root)
     return out
 
 
+FEC_BLOCK_SIZE = 4096
+FEC_RS_SYMBOLS = 255
+
+
+def fec_geometry(image, tree, tree_size, roots, fec, fec_size, vbmeta):
+    """Check AVB/libfec layout and RS(255, 255-roots) size, not parity."""
+    report = {"status": "NOT_PRESENT", "roots": roots, "offset": fec,
+              "bytes": fec_size, "parity_verified": False, "recovery_tested": False}
+    if not roots and not fec_size and not fec:
+        return report
+    report["status"] = "REVIEW_REQUIRED"
+    if not 1 <= roots < FEC_RS_SYMBOLS:
+        report["reason"] = "Invalid Reed-Solomon root count"
+        return report
+    if (image <= 0 or tree < image or tree_size < 0 or
+            fec < tree + tree_size or fec_size <= 0 or fec + fec_size > vbmeta or
+            fec % FEC_BLOCK_SIZE or fec_size % FEC_BLOCK_SIZE):
+        report["reason"] = "Invalid FEC layout or alignment"
+        return report
+    # avbtool protects all bytes before fec_offset, including the hash tree.
+    blocks = fec // FEC_BLOCK_SIZE
+    data_symbols = FEC_RS_SYMBOLS - roots
+    rounds = (blocks + data_symbols - 1) // data_symbols
+    expected = rounds * roots * FEC_BLOCK_SIZE
+    report.update({"protected_bytes": fec, "protected_blocks": blocks,
+                   "data_symbols": data_symbols, "rounds": rounds,
+                   "expected_bytes": expected})
+    if fec_size != expected:
+        report["reason"] = "FEC parity size mismatch"
+        return report
+    # Linux dm-verity supports 2..24 roots, unlike the generic libfec encoder.
+    if not 2 <= roots <= 24:
+        report["reason"] = "FEC root count outside dm-verity range"
+        return report
+    report["status"] = "FEC_GEOMETRY_ONLY"
+    return report
+
+
 def inspect(stream, base, size, package_key, trusted_key_sha256=None):
     def read(off, length):
         if off < 0 or length < 0 or off + length > size or length > MAX_VBMETA:
@@ -122,6 +160,8 @@ def inspect(stream, base, size, package_key, trusted_key_sha256=None):
     result["signature_status"] = "NOT_CHECKED"
     result["hashtree_status"] = "NOT_CHECKED"
     result["fec_verified"] = False
+    result["fec_status"] = "NOT_CHECKED"
+    result["fec_recovery_tested"] = False
     result["key_fingerprint_matches"] = None
     if size < 64:
         raise ValueError("AVB payload too small")
@@ -222,8 +262,10 @@ def inspect(stream, base, size, package_key, trusted_key_sha256=None):
                 raise ValueError("Invalid AVB hashtree geometry")
             if fec_size and (not roots or fec < tree + tree_size or fec + fec_size > offset):
                 raise ValueError("Invalid AVB FEC geometry")
-            if not fec_size and roots:
-                issues.append("FEC roots without FEC data")
+            fec_check = fec_geometry(image, tree, tree_size, roots, fec, fec_size, offset)
+            item["fec_check"] = fec_check
+            if fec_check["status"] == "REVIEW_REQUIRED":
+                issues.append(fec_check["reason"])
             if hash_alg not in ("sha256", "sha512") or digest_len != {"sha256": 32, "sha512": 64}.get(hash_alg):
                 issues.append("Unsupported or persistent hashtree digest")
             partition = body[164:164+pn].decode("utf-8")
@@ -245,6 +287,7 @@ def inspect(stream, base, size, package_key, trusted_key_sha256=None):
     if len(trees) != 1:
         issues.append("Expected one APEX hashtree descriptor")
     else:
+        result["fec_status"] = next(i["fec_check"]["status"] for i in items if i["tag"] == 1)
         result["hashtree_status"] = trees[0]["status"]
         result["hashtree_verified"] = trees[0]["status"] == "HASHTREE_MATCHES_DESCRIPTOR"
     # Keep structural status separate from cryptographic and payload evidence.
