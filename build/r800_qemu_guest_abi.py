@@ -67,6 +67,15 @@ def inspect_abi(log: bytes, bionic: bool = False) -> dict:
             **inspect_result(b"\n".join(abi_lines) + b"\n", b"", 0)}
 
 
+def unique_evidence_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate evidence key: " + key)
+        result[key] = value
+    return result
+
+
 def verify_baseline(path: Path, kernel: Path) -> str:
     if path.is_symlink() or not path.is_file():
         raise ValueError("Missing baseline boot evidence")
@@ -74,7 +83,7 @@ def verify_baseline(path: Path, kernel: Path) -> str:
         data = f.read(65537)
     if len(data) > 65536:
         raise ValueError("Oversized baseline boot evidence")
-    evidence = json.loads(data)
+    evidence = json.loads(data, object_pairs_hook=unique_evidence_object)
     digest = hashlib.sha256(kernel_bytes(kernel)).hexdigest()
     if not isinstance(evidence, dict) or (
         evidence.get("status") != "VIRT_EMBEDDED_PID1_BOOT_ONLY"
@@ -94,7 +103,7 @@ def read_bounded_json(path: Path) -> dict:
         raw = stream.read(65537)
     if len(raw) > 65536:
         raise ValueError("Oversized libc evidence")
-    result = json.loads(raw)
+    result = json.loads(raw, object_pairs_hook=unique_evidence_object)
     if not isinstance(result, dict):
         raise ValueError("Invalid libc evidence")
     return result
