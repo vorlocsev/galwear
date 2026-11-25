@@ -92,9 +92,10 @@ restarts into Wear OS.
 
 ## Developer mode
 
-An empty file at `/oem/r800dev/android/DEV` turns on developer mode. It adds a root
-telnet shell over Wi-Fi, keeps logs on the watch and skips the setup screen. To use
-it, add the file to the payload before you build a package. The release has it off.
+The legacy prototype used a `DEV` marker for developer diagnostics. This
+experimental branch removes the unauthenticated network shell from both boot
+paths. It excludes developer flags from candidate payloads. No remote diagnostic
+access is provided by the current candidate.
 
 ## Building
 
