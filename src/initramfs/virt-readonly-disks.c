@@ -16,6 +16,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(GALWEAR_SERVICE_PROBE) && (!defined(GALWEAR_LABEL_PROBE) || defined(GALWEAR_TRANSITION_PROBE))
+#error "Service requires label probe and excludes static transition"
+#endif
 #if defined(GALWEAR_TRANSITION_PROBE) && !defined(GALWEAR_LABEL_PROBE)
 #error "Transition requires label probe"
 #endif
@@ -79,8 +82,12 @@ static int mount_disk(const char *name)
 #endif
     unsigned long flags = MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC;
     unsigned long expected_flags = ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC;
-#ifdef GALWEAR_TRANSITION_PROBE
-    if (!strcmp(name, "system")) {
+#if defined(GALWEAR_TRANSITION_PROBE) || defined(GALWEAR_SERVICE_PROBE)
+    if (!strcmp(name, "system")
+#ifdef GALWEAR_SERVICE_PROBE
+        || !strcmp(name, "runtime")
+#endif
+        ) {
         flags &= ~MS_NOEXEC;
         expected_flags &= ~ST_NOEXEC;
     }
@@ -93,7 +100,7 @@ static int mount_disk(const char *name)
         (vfs.f_flag & (ST_RDONLY | ST_NOSUID | ST_NODEV | ST_NOEXEC)) !=
         expected_flags) return 7;
     printf("r800-virt-disk: %s serial=PASS block-ro=1 ext4-ro=1\n", name);
-#ifdef GALWEAR_TRANSITION_PROBE
+#if defined(GALWEAR_TRANSITION_PROBE) || defined(GALWEAR_SERVICE_PROBE)
     printf("r800-ext4-exec: %s noexec=%d\n", name, !!(vfs.f_flag & ST_NOEXEC));
 #endif
     return 0;
@@ -150,7 +157,11 @@ static int policy_and_labels(void)
     free(policy);
     if (!exact_text("/sys/fs/selinux/enforce", "1") ||
         !exact_text("/proc/self/attr/current", "u:r:kernel:s0")) return 3;
+#ifdef GALWEAR_SERVICE_PROBE
+    puts("r800-disk-label: fixture-policy=PASS domain=u:r:kernel:s0 enforce=1");
+#else
     puts("r800-disk-label: policy=PASS domain=u:r:kernel:s0 enforce=1");
+#endif
     char *save = NULL;
     unsigned count = 0;
     for (char *line = strtok_r((char *)list, "\n", &save); line;
@@ -203,8 +214,25 @@ int main(void)
     if (ferror(list) || fclose(list) || !count) return 5;
     /* No unlisted device is mounted; images stay mounted read-only. */
     printf("r800-virt-disk: PASS count=%u policy=not-loaded android=not-started\n", count);
+#ifdef GALWEAR_SERVICE_PROBE
+    /* After block mounts, replace device node staging with a private RAM /dev.
+     * Existing console descriptors are retained; no device is reopened. */
+    if (umount("/dev") || mount("tmpfs", "/dev", "tmpfs", MS_NOSUID | MS_NOEXEC, "size=8m,mode=0755") ||
+        mkdir("/dev/socket", 0755) || mount("tmpfs", "/data", "tmpfs",
+        MS_NOSUID | MS_NODEV | MS_NOEXEC, "size=8m,mode=0755")) return 8;
+    puts("r800-ext4-service: ram-dev-data=PASS");
+#endif
 #ifdef GALWEAR_LABEL_PROBE
     if (policy_and_labels()) return 6;
+#endif
+#ifdef GALWEAR_SERVICE_PROBE
+    char path[] = "/system/bin/galwear_property_service";
+    char stage[] = "--virt-property-service";
+    char *const args[] = {path, stage, NULL};
+    char *const env[] = {NULL};
+    puts("r800-ext4-service: exec=libinit-harness");
+    execve(path, args, env);
+    return 9;
 #endif
 #ifdef GALWEAR_TRANSITION_PROBE
     char path[] = "/system/bin/init";
