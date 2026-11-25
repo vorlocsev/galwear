@@ -268,6 +268,8 @@ def build(a):
             "policy_sha256": policy["policy_sha256"], "platform_file_contexts_sha256": sha(fc),
             "property_contexts_sha256": rootfs["property_contexts_sha256"],
             "verified_system_entries": observed, "e2fsck_read_only_passed": True,
+            "staged_elf_metadata": rootfs["elf_metadata"],
+            "selected_libraries": rootfs["selected_libraries"],
             "full_android_partition": False, "other_partitions_labeled": False,
             "apex_labels_verified": False, "kernel_mount_tested": False,
             "android_init_started": False, "property_service_started": False,
