@@ -66,8 +66,9 @@ def offline_gate(enabled, sha, clean):
             "DONOR_LINK_VERIFIED=false", "QEMU_RUNTIME_VERIFIED=false",
             "GNSS_RUNTIME_VERIFIED=false", "safe_to_flash=false")
         after_sha, after_clean=git_state()
-        passed=(p.returncode==0 and all(lines.count(m)==1 for m in markers)
-                and after_sha==sha and after_clean)
+        marker_ok = all([line for line in lines if line.startswith(m.split("=", 1)[0]+"=")] == [m]
+                        for m in markers)
+        passed=(p.returncode==0 and marker_ok and after_sha==sha and after_clean)
         return outcome("offline_regression","PASS" if passed else "FAILED",
                        exit_code=p.returncode,source_sha=sha,
                        stdout_sha256=hashlib.sha256(p.stdout).hexdigest(),
@@ -98,6 +99,8 @@ def main():
         sha,clean=git_state()
         if not clean:
             raise ValueError("Use a clean checkout; cannot bind dirty source to HEAD")
+        if (a.binary is None) != (a.libdir is None):
+            raise ValueError("--binary and --libdir must be supplied together")
         for root in (a.android_root,a.tizen_root):
             if root is not None and (not root.is_dir() or root.resolve()==Path("/")):
                 raise ValueError("Use isolated, prepared offline roots")
