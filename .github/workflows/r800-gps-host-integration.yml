@@ -70,3 +70,26 @@ jobs:
           unzip -q "$archive" -d "$RUNNER_TEMP"
       - name: Compile and link Android GPS HAL IPC v1 and v2
         run: sh build/r800_gps_hal_ndk_checks.sh "$RUNNER_TEMP/android-ndk-r27c"
+  arm-qemu-synthetic:
+    if: github.repository == 'vorlocsev/galwear'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM soft-float compiler and QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-arm-linux-gnueabi libc6-dev-armel-cross qemu-user
+      - name: Execute actual bridge ARM32 code with synthetic Broadcom
+        env:
+          R800_GPS_TEST_QEMU_ARM: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "SOURCE_SHA=$GITHUB_SHA"
+          python3 build/r800_run_required_suite.py 'test_r800_gps_bridge_integration.py'
+          echo 'GPS_ARM32_SYNTHETIC_QEMU=PASS'
+          echo 'TIZEN_DONOR_LINK_VERIFIED=false'
+          echo 'TIZEN_GLIBC_QEMU_VERIFIED=false'
+          echo 'GNSS_RUNTIME_VERIFIED=false'
+          echo 'safe_to_flash=false'

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Host-only real bridge + Android HAL tests with a synthetic libbrcm."""
+"""Native HAL with native or QEMU ARM32 bridge and synthetic libbrcm."""
 import os
 from pathlib import Path
 import shutil
+import shlex
+import struct
 import socket
 import subprocess
 import tempfile
@@ -20,6 +22,17 @@ class BridgeIntegration(unittest.TestCase):
         cls.bin = Path(cls.tmp.name)
         flags = ["cc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
                  "-UNDEBUG", "-pthread", "-fsanitize=undefined", "-fno-sanitize-recover=all"]
+        arm = os.environ.get("R800_GPS_TEST_QEMU_ARM", "0")
+        if arm not in ("0", "1"):
+            raise ValueError("invalid R800_GPS_TEST_QEMU_ARM")
+        if arm == "1":
+            cls.arm_cc = shutil.which("arm-linux-gnueabi-gcc")
+            cls.qemu = shutil.which("qemu-arm")
+            cls.sysroot = Path("/usr/arm-linux-gnueabi")
+            if not cls.arm_cc or not cls.qemu or not (cls.sysroot/"lib/ld-linux.so.3").is_file():
+                raise RuntimeError("ARM soft-float toolchain or QEMU missing")
+            subprocess.run([cls.arm_cc, "--version"], check=True, timeout=10)
+            subprocess.run([cls.qemu, "--version"], check=True, timeout=10)
         for name, args in (
             ("gpsbridge", ["-DR800_GPS_BRIDGE_HOST_TEST", "src/tools/gps/gpsbridge.c", "-ldl"]),
             ("libbrcm-test.so", ["-fPIC", "-shared", "tests/r800_mock_brcm.c"]),
@@ -28,8 +41,31 @@ class BridgeIntegration(unittest.TestCase):
             ("android-peer-default", ["-DR800_GPS_TEST_SOURCE_DEFAULT=1", "tests/test_r800_gps_both_sides.c"]),
             ("android-peer-restart", ["tests/test_r800_gps_hal_bridge_restart.c"]),
         ):
-            subprocess.run(flags + args + ["-o", str(cls.bin/name)],
-                           cwd=ROOT, check=True, timeout=30)
+            if arm == "1" and name in ("gpsbridge", "libbrcm-test.so"):
+                target = cls.bin/("gpsbridge-arm" if name=="gpsbridge" else name)
+                # ARM cross-libc fixture only. UBSan remains enabled on native HAL.
+                cross = [cls.arm_cc, "-std=gnu11", "-O2", "-Wall", "-Wextra",
+                         "-Werror", "-UNDEBUG", "-pthread", "-march=armv7-a",
+                         "-marm", "-mfloat-abi=softfp", "-mfpu=vfpv3-d16"]
+                subprocess.run(cross+args+["-o",str(target)],
+                               cwd=ROOT,check=True,timeout=30)
+                with target.open("rb") as stream:
+                    elf=stream.read(52)
+                if (len(elf)!=52 or elf[:7]!=b"\x7fELF\x01\x01\x01"
+                    or struct.unpack_from("<H",elf,18)[0]!=40):
+                    raise RuntimeError("expected ARM32 little-endian ELF")
+                flags_arm=struct.unpack_from("<I",elf,36)[0]
+                if flags_arm & 0xff000000 != 0x05000000 or flags_arm & 0x400:
+                    raise RuntimeError("expected EABI5 soft-float")
+                print("ARM32_SYNTHETIC_ELF="+name,flush=True)
+                if name=="gpsbridge":
+                    command=[cls.qemu,"-cpu","cortex-a15","-L",str(cls.sysroot),str(target)]
+                    launcher=cls.bin/name
+                    launcher.write_text("#!/bin/sh\nexec "+shlex.join(command)+' "$@"\n')
+                    launcher.chmod(0o700)
+            else:
+                subprocess.run(flags + args + ["-o", str(cls.bin/name)],
+                               cwd=ROOT, check=True, timeout=30)
 
     def launch(self, mode):
         tmp = tempfile.TemporaryDirectory(prefix="r800-bridge-")
