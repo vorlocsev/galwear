@@ -23,9 +23,9 @@ class BridgeIntegration(unittest.TestCase):
         flags = ["cc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
                  "-UNDEBUG", "-pthread", "-fsanitize=undefined", "-fno-sanitize-recover=all"]
         arm = os.environ.get("R800_GPS_TEST_QEMU_ARM", "0")
-        if arm not in ("0", "1"):
+        if arm not in ("0", "1", "2"):
             raise ValueError("invalid R800_GPS_TEST_QEMU_ARM")
-        if arm == "1":
+        if arm in ("1", "2"):
             cls.arm_cc = shutil.which("arm-linux-gnueabi-gcc")
             cls.qemu = shutil.which("qemu-arm")
             cls.sysroot = Path("/usr/arm-linux-gnueabi")
@@ -33,6 +33,10 @@ class BridgeIntegration(unittest.TestCase):
                 raise RuntimeError("ARM soft-float toolchain or QEMU missing")
             subprocess.run([cls.arm_cc, "--version"], check=True, timeout=10)
             subprocess.run([cls.qemu, "--version"], check=True, timeout=10)
+        if arm == "2":
+            cls.arm_clang = shutil.which("clang")
+            if not cls.arm_clang or os.getuid()==0 or os.getgid()==0:
+                raise RuntimeError("freestanding fixture requires Clang and non-root UID/GID")
         for name, args in (
             ("gpsbridge", ["-DR800_GPS_BRIDGE_HOST_TEST", "src/tools/gps/gpsbridge.c", "-ldl"]),
             ("libbrcm-test.so", ["-fPIC", "-shared", "tests/r800_mock_brcm.c"]),
@@ -41,14 +45,32 @@ class BridgeIntegration(unittest.TestCase):
             ("android-peer-default", ["-DR800_GPS_TEST_SOURCE_DEFAULT=1", "tests/test_r800_gps_both_sides.c"]),
             ("android-peer-restart", ["tests/test_r800_gps_hal_bridge_restart.c"]),
         ):
-            if arm == "1" and name in ("gpsbridge", "libbrcm-test.so"):
+            if arm in ("1", "2") and name in ("gpsbridge", "libbrcm-test.so"):
                 target = cls.bin/("gpsbridge-arm" if name=="gpsbridge" else name)
                 # ARM cross-libc fixture only. UBSan remains enabled on native HAL.
                 cross = [cls.arm_cc, "-std=gnu11", "-O2", "-Wall", "-Wextra",
                          "-Werror", "-UNDEBUG", "-pthread", "-march=armv7-a",
                          "-marm", "-mfloat-abi=softfp", "-mfpu=vfpv3-d16"]
-                subprocess.run(cross+args+["-o",str(target)],
-                               cwd=ROOT,check=True,timeout=30)
+                if arm=="2" and name=="gpsbridge":
+                    obj=cls.bin/"bridge-freestanding.o"
+                    subprocess.run([cls.arm_clang, "--target=armv7a-linux-gnueabi",
+                        "-std=c11","-O2","-Wall","-Wextra","-Werror","-ffreestanding",
+                        "-fno-builtin","-fno-pic","-fno-stack-protector","-marm",
+                        "-mfloat-abi=softfp","-mfpu=vfpv3-d16",
+                        "-DR800_GPS_FREESTANDING_FIXTURE=1",
+                        "-DR800_GPS_PEER_UID="+str(os.getuid()),
+                        "-DR800_GPS_PEER_GID="+str(os.getgid()),
+                        "-c","src/tools/gps/gpsbridge.c","-o",str(obj)],
+                        cwd=ROOT,check=True,timeout=30)
+                    subprocess.run([cls.arm_cc,"-nostdlib","-no-pie",
+                        "-Wl,-e,_start,--no-undefined,--hash-style=sysv,-z,now,-z,noexecstack",
+                        "-Wl,--dynamic-linker=/lib/ld-linux.so.3",
+                        str(obj),"-o",str(target),"-lc","-ldl","-lpthread"],
+                        cwd=ROOT,check=True,timeout=30)
+                    print("ARM32_FREESTANDING_CRT=LINKED",flush=True)
+                else:
+                    subprocess.run(cross+args+["-o",str(target)],
+                                   cwd=ROOT,check=True,timeout=30)
                 with target.open("rb") as stream:
                     elf=stream.read(52)
                 if (len(elf)!=52 or elf[:7]!=b"\x7fELF\x01\x01\x01"

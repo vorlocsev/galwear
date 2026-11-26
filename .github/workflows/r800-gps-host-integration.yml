@@ -93,3 +93,15 @@ jobs:
           echo 'TIZEN_GLIBC_QEMU_VERIFIED=false'
           echo 'GNSS_RUNTIME_VERIFIED=false'
           echo 'safe_to_flash=false'
+      - name: Execute freestanding bridge and custom CRT in QEMU
+        env:
+          R800_GPS_TEST_QEMU_ARM: '2'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "SOURCE_SHA=$GITHUB_SHA"
+          python3 build/r800_run_required_suite.py 'test_r800_gps_bridge_integration.py'
+          echo 'GPS_ARM32_FREESTANDING_SYNTHETIC_QEMU=PASS'
+          echo 'TIZEN_DONOR_LINK_VERIFIED=false'
+          echo 'GNSS_RUNTIME_VERIFIED=false'
+          echo 'safe_to_flash=false'

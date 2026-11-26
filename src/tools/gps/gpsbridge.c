@@ -103,9 +103,17 @@ int pthread_mutex_unlock(void *);
 #define MSG_DONTWAIT 0x40
 #define MSG_NOSIGNAL 0x4000
 #define SHUT_RDWR 2
+/* Freestanding QEMU fixture changes only paths, never the ABI/CRT.
+ * Do not use this configuration for deployment. */
+#ifdef R800_GPS_FREESTANDING_FIXTURE
+#define SOCK_PATH "./gps.sock"
+#define GPS_IPC_DIR "."
+#define GPS_BRIDGE_LIB "./libbrcm-test.so"
+#else
 #define SOCK_PATH "/opt/usr/r800dev/gps.sock"
 #define GPS_IPC_DIR "/opt/usr/r800dev"
 #define GPS_BRIDGE_LIB "/usr/lib/libbrcm.so"
+#endif
 #define GPS_MUTEX(name) static int name[8]
 #ifndef R800_GPS_PEER_UID
 #define R800_GPS_PEER_UID -1
@@ -197,7 +205,7 @@ static void set_callback_phase(enum gps_callback_phase phase)
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
 
-#ifdef R800_GPS_BRIDGE_HOST_TEST
+#if defined(R800_GPS_BRIDGE_HOST_TEST) || defined(R800_GPS_FREESTANDING_FIXTURE)
 #define LTO_PATH "./lto2.dat"
 #define LAST_PATH "./gps.last"
 #else
