@@ -36,12 +36,26 @@ def parse_elf(raw, *, include_tags=False):
             raise ValueError("Invalid segment bounds")
         (loads if typ == 1 else dynamic).append((va, off, fs, ms, pf))
 
-    def mapping(va, size):
-        hits = [(off + va - start, pf) for start, off, fs, _, pf in loads
-                if start <= va and 0 < size <= fs - (va - start)]
+    def memory_mapping(va, size):
+        # Count every intersecting memory extent, including zero-fill tails.
+        # A partial overlap is ambiguous even if one segment covers the range.
+        if not 0 <= va < 2**32 or not 0 < size <= 2**32 - va:
+            raise ValueError("Invalid address range")
+        end = va + size
+        hits = [segment for segment in loads
+                if segment[3] and segment[0] < end and va < segment[0] + segment[3]]
         if len(hits) != 1:
+            raise ValueError("Address not uniquely mapped in load memory")
+        start, off, fs, ms, pf = hits[0]
+        if va < start or end > start + ms:
+            raise ValueError("Address not wholly mapped in load memory")
+        return start, off, fs, ms, pf
+
+    def mapping(va, size):
+        start, off, fs, _, pf = memory_mapping(va, size)
+        if va + size > start + fs:
             raise ValueError("Address not uniquely file-backed")
-        return hits[0]
+        return off + va - start, pf
 
     if len(dynamic) != 1:
         raise ValueError("Expected one PT_DYNAMIC")
@@ -92,8 +106,10 @@ def parse_elf(raw, *, include_tags=False):
                 continue
             if typ not in (2, 3, 21, 22, 23) or target % 4 or target in relocations or (typ == 23 and sym):
                 raise ValueError("Unsupported or ambiguous relocation record")
-            if not any(start <= target and 4 <= ms - (target - start) for start, _, _, ms, _ in loads):
-                raise ValueError("Relocation outside load memory")
+            try:
+                memory_mapping(target, 4)
+            except ValueError as exc:
+                raise ValueError("Relocation outside or ambiguously mapped in load memory") from exc
             relocations[target] = (typ, sym)
     return (mapping, relocations, tags) if include_tags else (mapping, relocations)
 
