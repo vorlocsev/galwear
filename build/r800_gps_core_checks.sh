@@ -9,11 +9,11 @@ trap 'exit 1' HUP INT TERM
 export PYTHONDONTWRITEBYTECODE=1
 cc --version
 clang --version
-for test in frame command lto output wire nmea ipc interface standalone daemon; do
+for test in frame command lto output wire nmea ipc interface standalone daemon shutdown; do
     standard=c11
-    case "$test" in ipc|interface) standard=gnu11;; esac
+    case "$test" in ipc|interface|shutdown) standard=gnu11;; esac
     cc -std="$standard" -O2 -Wall -Wextra -Werror -UNDEBUG \
-        -fsanitize=undefined -fno-sanitize-recover=all \
+        -fsanitize=undefined -fno-sanitize-recover=all -pthread \
         "tests/test_r800_gps_$test.c" -o "$TMP/test-$test"
     timeout 10s "$TMP/test-$test"
     echo "HOST_$test=PASS"
