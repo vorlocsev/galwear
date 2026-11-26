@@ -7,7 +7,7 @@ import struct
 
 from r800_gps_interface_table import discover, parse_elf, symbolic_code_targets, LIMIT
 
-from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow, leaf_analyzer
+from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow, leaf_analyzer, code_spans
 
 MAX_RANGE = 65536
 MAX_REFS = 4096
@@ -118,7 +118,7 @@ def thumb_pic_clues(raw, off, start, size, relocations, tables, direct):
     return clues
 
 
-def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(), callee_depth=1):
+def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(), callee_depth=1, data_by_range=None):
     discovery = discover(raw, symbolic=symbolic)
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
     tables = {r["table_va"]: r for r in discovery["candidates"]}
@@ -171,6 +171,7 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
         raise ValueError("Callee depth requires explicit ranges and must be between 1 and 4")
     if callee_ranges and (not assume_aapcs or len(callee_ranges) > 16):
         raise ValueError("Explicit callee ranges require AAPCS mode; maximum 16")
+    data_by_range = data_by_range or {}
     leaves = {}
     spans = [(start, start + size) for _, _, start, size in ranges]
     for isa, start, size in callee_ranges:
@@ -185,7 +186,7 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
             raise ValueError("Callee range not executable and nonwritable")
         leaves[(start, isa)] = size
         spans.append((start, start + size))
-    leaf = leaf_analyzer(raw, mapping, relocations, tables, direct, leaves, max_depth=callee_depth) if leaves else None
+    leaf = leaf_analyzer(raw, mapping, relocations, tables, direct, leaves, max_depth=callee_depth, data_by_range=data_by_range) if leaves else None
     code = []
     seen = set()
     for role, isa, start, size in ranges:
@@ -199,53 +200,56 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
         off, flags = mapping(start, size)
         if not flags & 1 or flags & 2:
             raise ValueError("Code range must be executable and nonwritable")
-        pos = 0
+        data_ranges = data_by_range.get((start, isa), ())
+        islands = code_spans(start, size, isa, data_ranges)
         refs = []
-        while pos < size:
-            va = start + pos
-            literal, reg = None, None
-            if isa == "arm":
-                word, = struct.unpack_from("<I", raw, off + pos)
-                width = 4
-                if word & 0xff7f0000 == 0xe51f0000:
-                    delta = word & 0xfff
-                    literal = va + 8 + (delta if word & (1 << 23) else -delta)
-                    reg = (word >> 12) & 15
-            else:
-                word, = struct.unpack_from("<H", raw, off + pos)
-                width = 4 if word >> 11 in (0b11101, 0b11110, 0b11111) else 2
-                if pos + width > size:
-                    raise ValueError("Truncated Thumb instruction candidate")
-                if width == 2 and word & 0xf800 == 0x4800:
-                    literal = ((va + 4) & ~3) + 4 * (word & 255)
-                    reg = (word >> 8) & 7
-            touched = range(va & ~3, ((va + width - 1) & ~3) + 1, 4)
-            if (literal in direct and reg <= 12
-                    and not any(slot in relocations for slot in touched)):
-                refs.append({"instruction_va": va, "register": "r" + str(reg),
-                             "literal_va": literal, "table_va": direct[literal]["table_va"]})
-                if literal in symbolic_refs:
-                    refs[-1]["reference_kind"] = "SYMBOLIC_OBJECT"
-            if (literal in indirect and reg <= 12 and pos + width + align <= size
-                    and not any(slot in relocations for slot in touched)):
-                next_va = va + width
-                next_touched = range(next_va & ~3, ((next_va + align - 1) & ~3) + 1, 4)
-                dest = None
+        for lo, hi in islands:
+            pos = lo - start
+            while pos < hi - start:
+                va = start + pos
+                literal, reg = None, None
                 if isa == "arm":
-                    op, = struct.unpack_from("<I", raw, off + pos + width)
-                    if op & 0xfff00fff == 0xe5900000 and (op >> 16) & 15 == reg:
-                        dest = (op >> 12) & 15
+                    word, = struct.unpack_from("<I", raw, off + pos)
+                    width = 4
+                    if word & 0xff7f0000 == 0xe51f0000:
+                        delta = word & 0xfff
+                        literal = va + 8 + (delta if word & (1 << 23) else -delta)
+                        reg = (word >> 12) & 15
                 else:
-                    op, = struct.unpack_from("<H", raw, off + pos + width)
-                    if op & 0xffc0 == 0x6800 and (op >> 3) & 7 == reg:
-                        dest = op & 7
-                if dest is not None and dest <= 12 and not any(slot in relocations for slot in next_touched):
-                    got = indirect[literal]
-                    refs.append({"instruction_va": va, "dereference_va": next_va,
-                                 "register": "r" + str(dest), "literal_va": literal,
-                                 "got_slot_va": got, "table_va": symbolic_refs[got]["table_va"],
-                                 "reference_kind": "ADJACENT_GOT_DEREFERENCE_CANDIDATE"})
-            pos += width
+                    word, = struct.unpack_from("<H", raw, off + pos)
+                    width = 4 if word >> 11 in (0b11101, 0b11110, 0b11111) else 2
+                    if pos + width > hi - start:
+                        raise ValueError("Truncated Thumb instruction candidate")
+                    if width == 2 and word & 0xf800 == 0x4800:
+                        literal = ((va + 4) & ~3) + 4 * (word & 255)
+                        reg = (word >> 8) & 7
+                touched = range(va & ~3, ((va + width - 1) & ~3) + 1, 4)
+                if (literal in direct and reg <= 12
+                        and not any(slot in relocations for slot in touched)):
+                    refs.append({"instruction_va": va, "register": "r" + str(reg),
+                                 "literal_va": literal, "table_va": direct[literal]["table_va"]})
+                    if literal in symbolic_refs:
+                        refs[-1]["reference_kind"] = "SYMBOLIC_OBJECT"
+                if (literal in indirect and reg <= 12 and pos + width + align <= hi - start
+                        and not any(slot in relocations for slot in touched)):
+                    next_va = va + width
+                    next_touched = range(next_va & ~3, ((next_va + align - 1) & ~3) + 1, 4)
+                    dest = None
+                    if isa == "arm":
+                        op, = struct.unpack_from("<I", raw, off + pos + width)
+                        if op & 0xfff00fff == 0xe5900000 and (op >> 16) & 15 == reg:
+                            dest = (op >> 12) & 15
+                    else:
+                        op, = struct.unpack_from("<H", raw, off + pos + width)
+                        if op & 0xffc0 == 0x6800 and (op >> 3) & 7 == reg:
+                            dest = op & 7
+                    if dest is not None and dest <= 12 and not any(slot in relocations for slot in next_touched):
+                        got = indirect[literal]
+                        refs.append({"instruction_va": va, "dereference_va": next_va,
+                                     "register": "r" + str(dest), "literal_va": literal,
+                                     "got_slot_va": got, "table_va": symbolic_refs[got]["table_va"],
+                                     "reference_kind": "ADJACENT_GOT_DEREFERENCE_CANDIDATE"})
+                pos += width
         matches = [r["table_va"] for r in tables.values()
                    if r["layout_assumption"] == "gps" and any(
                        e["field"] == "get_extension" and e["target_va"] == start
@@ -253,10 +257,12 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
         code.append({"role_assumption": role, "isa_assumption": isa, "start_va": start,
                      "size": size, "get_extension_entry_matches": matches,
                      "literal_load_clues": refs,
-                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf)
-                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf),
-                     "pic_clues": arm_pic_clues(raw, off, start, size, relocations, tables, direct)
-                     if isa == "arm" else thumb_pic_clues(raw, off, start, size, relocations, tables, direct)})
+                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf, data_ranges=data_ranges)
+                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf, data_ranges=data_ranges),
+                     "data_ranges": data_ranges,
+                     "pic_clues": [clue for lo, hi in islands for clue in
+                                   (arm_pic_clues if isa == "arm" else thumb_pic_clues)(
+                                       raw, off + lo - start, lo, hi - lo, relocations, tables, direct)]})
         if sum(len(r["literal_load_clues"]) + len(r["pic_clues"])
                + len((r["pic_flow"] or {}).get("events", [])) + len((r["pic_flow"] or {}).get("assumed_calls", [])) for r in code) > MAX_REFS:
             raise ValueError("Code reference budget exceeded")
