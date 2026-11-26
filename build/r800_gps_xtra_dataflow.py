@@ -40,7 +40,7 @@ def transfer(address, instruction, state):
     return (regs, sp, {k: v for k, v in slots.items() if v is not None}), trace["events"]
 
 
-def solve(raw, function, isa, *, initial=None, resume_direct_calls=False):
+def solve(raw, function, isa, *, initial=None, resume_direct_calls=False, call_return=None):
     graph = cfg_audit(raw, function, isa, resume_direct_calls=resume_direct_calls)
     entry, instructions = parse(raw, function)
     nodes = {n["address"]: n for n in graph["nodes"]}
@@ -58,6 +58,10 @@ def solve(raw, function, isa, *, initial=None, resume_direct_calls=False):
         for edge in nodes[address]["edges"]:
             if edge["kind"] == "assumed_call_return":
                 outgoing = after_aapcs_call(incoming[address])
+                if call_return is not None and outgoing is not None:
+                    value = call_return(address, instructions[address], incoming[address])
+                    if value is not None:
+                        outgoing[0]["r0"] = value
             dest = edge["target"]
             new = merge(incoming[dest], outgoing) if dest in incoming else outgoing
             if dest not in incoming or incoming[dest] != new:
