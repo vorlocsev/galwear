@@ -179,5 +179,73 @@ class DisassemblyTests(unittest.TestCase):
         self.assertEqual(trace["events"], [])
 
 
+
+    def test_thumb_frame_pointer(self):
+        trace = self.trace("  1000: push {r7, lr}\n"
+                           "  1002: sub sp, #8\n"
+                           "  1004: add r7, sp, #0\n"
+                           "  1006: str r0, [r7, #4]\n"
+                           "  1008: mov r0, r1\n"
+                           "  100a: ldr r2, [r7, #4]\n"
+                           "  100c: ldr r3, [r2, #8]\n"
+                           "  100e: blx r3")
+        self.assertEqual([e["offset"] for e in trace["events"]], [8, 8])
+
+    def test_arm_frame_pointer_negative_offset(self):
+        trace = self.trace("  1000: push {r11, lr}\n"
+                           "  1004: add fp, sp, #4\n"
+                           "  1008: sub sp, sp, #8\n"
+                           "  100c: str r0, [fp, #-0x8]\n"
+                           "  1010: mov r0, r1\n"
+                           "  1014: ldr r2, [r11, #-8]\n"
+                           "  1018: ldr r3, [r2, #4]\n"
+                           "  101c: blx r3")
+        self.assertEqual([e["offset"] for e in trace["events"]], [4, 4])
+
+    def test_frame_overwritten_and_unknown_store(self):
+        for middle in ("mov r7, r1", "str r1, [r7]"):
+            with self.subTest(middle=middle):
+                trace = self.trace("  1000: sub sp, #8\n"
+                                   "  1002: mov r7, sp\n"
+                                   "  1004: str r0, [r7]\n"
+                                   "  1006: " + middle + "\n"
+                                   "  1008: ldr r2, [r7]\n"
+                                   "  100a: ldr r3, [r2, #8]")
+                self.assertEqual(trace["events"], [])
+
+    def test_released_frame_aliases_invalidated(self):
+        trace = self.trace("  1000: sub sp, #8\n"
+                           "  1002: mov r7, sp\n"
+                           "  1004: mov r4, r7\n"
+                           "  1006: add sp, #8\n"
+                           "  1008: sub sp, #8\n"
+                           "  100a: str r0, [sp]\n"
+                           "  100c: ldr r2, [r4]\n"
+                           "  100e: ldr r3, [r2, #8]")
+        self.assertEqual(trace["events"], [])
+
+    def test_frame_restore_sp(self):
+        trace = self.trace("  1000: push {r0, lr}\n"
+                           "  1002: mov r7, sp\n"
+                           "  1004: sub sp, #8\n"
+                           "  1006: mov r0, r1\n"
+                           "  1008: mov sp, r7\n"
+                           "  100a: pop {r2, lr}\n"
+                           "  100e: ldr r3, [r2, #4]")
+        self.assertEqual([e["offset"] for e in trace["events"]], [4])
+        self.assertEqual(trace["stack_delta_at_stop"], 0)
+
+    def test_frame_bounds_and_unknown_restore(self):
+        for instruction in ("str r0, [r7, #-4]", "ldr r2, [r7, #8]",
+                            "ldr r2, [r7, #2]", "add r11, sp, #12"):
+            with self.subTest(instruction=instruction):
+                trace = self.trace("  1000: sub sp, #8\n"
+                                   "  1002: mov r7, sp\n"
+                                   "  1004: " + instruction)
+                self.assertEqual(trace["stop_reason"], "stack_bounds")
+        self.assertEqual(self.trace("  1000: mov sp, r7")["stop_reason"],
+                         "unsupported_move")
+
+
 if __name__ == "__main__":
     unittest.main()
