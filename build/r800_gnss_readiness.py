@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 from r800_gnss_ci import check as check_ci
+from r800_gnss_donor_gate import run as run_donor
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -97,6 +98,16 @@ def ci_gate(enabled, sha):
         return outcome("exact_head_ci","ERROR",reason=str(exc))
 
 
+def donor_gate(sha,image,digest,ndk,output):
+    if ndk is None:
+        return outcome("donor_image_link","NOT_TESTED",reason="Local donor build not requested")
+    try:
+        result=run_donor(ROOT,sha,image,digest,ndk,output)
+        return outcome("donor_image_link",result.pop("status"),**result)
+    except (OSError,ValueError,subprocess.SubprocessError) as exc:
+        return outcome("donor_image_link","ERROR",reason=str(exc))
+
+
 def summarize(sha, clean, gates):
     all_gates=list(gates)+[outcome(name,"NOT_TESTED",reason="Separate runtime evidence required")
                            for name in RUNTIME]
@@ -115,6 +126,8 @@ def main():
         p.add_argument("--"+name,type=Path)
     p.add_argument("--tizen-image",type=Path)
     p.add_argument("--tizen-image-sha256")
+    p.add_argument("--donor-ndk",type=Path)
+    p.add_argument("--donor-output",type=Path)
     p.add_argument("--run-offline",action="store_true")
     p.add_argument("--check-ci",action="store_true",help="Query live exact-head GitHub Actions metadata via gh")
     a=p.parse_args()
@@ -128,6 +141,8 @@ def main():
             raise ValueError("--tizen-image and --tizen-image-sha256 must be supplied together")
         if a.tizen_image_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}",a.tizen_image_sha256):
             raise ValueError("Expected lowercase image SHA-256")
+        if (a.donor_ndk is None)!=(a.donor_output is None) or (a.donor_ndk is not None and a.tizen_image is None):
+            raise ValueError("Donor link requires --donor-ndk, --donor-output and image inputs")
         for root in (a.android_root,a.tizen_root):
             if root is not None and (not root.is_dir() or root.resolve()==Path("/")):
                 raise ValueError("Use isolated, prepared offline roots")
@@ -154,6 +169,7 @@ def main():
                static_gate("glibc_link","r800_gps_link_gate.py",
                            ["--binary",a.binary,"--libdir",a.libdir] if a.binary and a.libdir else None,
                            "STATIC_GLIBC_CLOSURE_ONLY")]
+        gates.append(donor_gate(sha,a.tizen_image,a.tizen_image_sha256,a.donor_ndk,a.donor_output))
         end_sha,end_clean=git_state()
         if end_sha!=sha or not end_clean:
             raise ValueError("Checkout changed during audit")
