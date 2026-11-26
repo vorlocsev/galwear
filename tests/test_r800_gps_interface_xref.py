@@ -19,6 +19,21 @@ def image(isa="arm", relocation=23):
     return bytes(raw)
 
 
+def object_image(isa="arm", typ=21, other=2, section=1, size=12, value=0x2100, info=0x11):
+    strings = b"\0local_table\0"
+    raw = bytearray(fixture(relocs=[(0x2104, 23), (0x2108, 23), (0x1180, 23), (0x2140, 256 | typ)],
+                            extra=[(4, 0x2240), (5, 0x2280), (10, len(strings)), (6, 0x22c0), (11, 16)]))
+    struct.pack_into("<5I", raw, 0x440, 1, 2, 1, 0, 0)
+    raw[0x480:0x480 + len(strings)] = strings
+    struct.pack_into("<IIIBBH", raw, 0x4d0, 1, value, size, info, other, section)
+    struct.pack_into("<I", raw, 0x180, 0x2140)
+    if isa == "arm":
+        struct.pack_into("<II", raw, 0x100, 0xe59f0078, 0xe5900000)
+    else:
+        struct.pack_into("<HH", raw, 0x100, 0x481f, 0x6800)
+    return bytes(raw)
+
+
 class XrefTests(unittest.TestCase):
     def test_data_reference_without_code_claim(self):
         report = target.audit(image())
@@ -70,6 +85,55 @@ class XrefTests(unittest.TestCase):
         struct.pack_into("<I", raw, 0x20c, 32)
         struct.pack_into("<II", raw, 0x418, 0x1100, 23)
         report = target.audit(bytes(raw), [("factory", "arm", 0x1100, 4)])
+        self.assertEqual(report["code_ranges"][0]["literal_load_clues"], [])
+
+
+    def test_symbolic_object_references(self):
+        for typ in (2, 21):
+            with self.subTest(typ=typ):
+                raw = object_image(typ=typ)
+                self.assertEqual(target.audit(raw)["symbolic_data_references"], [])
+                report = target.audit(raw, symbolic=True)
+                ref = report["symbolic_data_references"][0]
+                self.assertEqual(ref["table_va"], 0x2100)
+                self.assertEqual(ref["got_slot_candidate"], typ == 21)
+                self.assertFalse(report["got_membership_verified"])
+
+    def test_arm_thumb_got_dereference(self):
+        for isa, size in (("arm", 8), ("thumb", 4)):
+            with self.subTest(isa=isa):
+                report = target.audit(object_image(isa=isa), [("factory", isa, 0x1100, size)], symbolic=True)
+                clue = report["code_ranges"][0]["literal_load_clues"][0]
+                self.assertEqual(clue["got_slot_va"], 0x2140)
+                self.assertEqual(clue["table_va"], 0x2100)
+                self.assertEqual(clue["reference_kind"], "ADJACENT_GOT_DEREFERENCE_CANDIDATE")
+                self.assertFalse(report["safe_to_flash"])
+
+    def test_no_dereference_on_wrong_register(self):
+        raw = bytearray(object_image())
+        struct.pack_into("<I", raw, 0x104, 0xe5910000)
+        report = target.audit(bytes(raw), [("factory", "arm", 0x1100, 8)], symbolic=True)
+        self.assertEqual(report["code_ranges"][0]["literal_load_clues"], [])
+
+    def test_reject_ineligible_objects(self):
+        for kwargs in ({"other": 0}, {"section": 0}, {"size": 8}, {"value": 0x2104}, {"typ": 22}, {"info": 0x12}):
+            with self.subTest(kwargs=kwargs):
+                report = target.audit(object_image(**kwargs), symbolic=True)
+                self.assertEqual(report["symbolic_data_references"], [])
+
+    def test_direct_symbolic_literal(self):
+        raw = bytearray(object_image())
+        struct.pack_into("<II", raw, 0x410, 0x1180, 258)
+        struct.pack_into("<I", raw, 0x20c, 24)
+        struct.pack_into("<I", raw, 0x180, 0)
+        report = target.audit(bytes(raw), [("factory", "arm", 0x1100, 4)], symbolic=True)
+        self.assertEqual(report["code_ranges"][0]["literal_load_clues"][0]["reference_kind"], "SYMBOLIC_OBJECT")
+
+    def test_nonzero_addend_and_truncated_pair(self):
+        raw = bytearray(object_image())
+        struct.pack_into("<I", raw, 0x340, 4)
+        self.assertEqual(target.audit(bytes(raw), symbolic=True)["symbolic_data_references"], [])
+        report = target.audit(object_image(), [("factory", "arm", 0x1100, 4)], symbolic=True)
         self.assertEqual(report["code_ranges"][0]["literal_load_clues"], [])
 
 
