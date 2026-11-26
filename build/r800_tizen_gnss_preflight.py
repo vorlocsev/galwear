@@ -6,13 +6,14 @@ import json
 from pathlib import Path
 import stat
 
-from r800_android_linker_audit import inspect
+from r800_gps_link_gate import elf
+from r800_broadcom_export import assess, EXPORT
 from r800_android_userspace_preflight import read_regular
 from r800_tizen_dependencies import audit, resolve_guest, MAX_FILE
 
 TARGETS = ("/usr/bin/gpsd", "/usr/bin/lhd", "/usr/lib/libbrcm.so")
 BRIDGE_LIBRARY = "/usr/lib/libbrcm.so"
-BRIDGE_EXPORT = "gps_get_hardware_interface"
+BRIDGE_EXPORT = EXPORT
 SOCKET = "/opt/usr/r800dev/gps.sock"
 LTO = "/opt/gnss/data/lto2.dat"
 LAST = "/opt/usr/r800dev/gps.last"
@@ -56,15 +57,8 @@ def check(root):
         recorded = closure["files"].get(canonical)
         if recorded is None or hashlib.sha256(raw).hexdigest() != recorded["sha256"]:
             raise ValueError("Bridge library is not bound to audited closure")
-        info = inspect(raw)
-        matches = [s for s in info["symbol_exports"]
-                   if s["name"] == BRIDGE_EXPORT and s["type"] in (0,2)
-                   and not s["version_hidden"]]
-        library = {"status":"EXPORT_CANDIDATE" if matches else "EXPORT_NOT_CONFIRMED",
-                   "sha256":recorded["sha256"],"export":BRIDGE_EXPORT,
-                   "dynamic_symbol_count":info["dynamic_symbol_count"],
-                   "candidate_count":len(matches)}
-        if not matches:
+        library = assess(raw, elf(raw))
+        if library["problems"]:
             problems.append("BRIDGE_EXPORT_NOT_CONFIRMED")
     except (OSError,ValueError) as exc:
         library = {"status":"REJECTED","reason":str(exc)}
