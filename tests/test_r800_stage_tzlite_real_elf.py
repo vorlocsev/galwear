@@ -407,7 +407,7 @@ class RealStageTests(unittest.TestCase):
 
     def test_cache_review_real_image(self):
         from test_r800_tzlite_cache_review import new_cache, gconv_cache
-        (self.root/"etc/ld.so.cache").write_bytes(new_cache())
+        (self.root/"etc/ld.so.cache").write_bytes(new_cache(path=b"/lib/libfixture.so.1"))
         cache=self.root/"usr/lib/gconv/gconv-modules.cache"
         cache.parent.mkdir()
         cache.write_bytes(gconv_cache())
@@ -418,6 +418,21 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual(result["files"]["/usr/lib/gconv/gconv-modules.cache"]["outside_audited_subset_count"],1)
         self.assertFalse(result["cache_installation_authorized"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
+    def test_cache_existing_donor_alias_not_staged(self):
+        from test_r800_tzlite_cache_review import new_cache
+        (self.root/"etc/ld.so.cache").write_bytes(new_cache(path=b"/usr/lib/libfixture.so.1"))
+        self.assertTrue((self.root/"usr/lib/libfixture.so.1").is_symlink())
+        image,sha=self.image_fixture()
+        report=inspect_image(image,sha,review_caches=True)
+        closure=report["extra_plugin_audit"]["dependency_evidence"]
+        self.assertEqual(closure["aliases"]["/lib/libfixture.so.1"],PROVIDER)
+        self.assertNotIn("/usr/lib/libfixture.so.1",closure["aliases"])
+        record=report["cache_review"]["files"]["/etc/ld.so.cache"]["records"][0]
+        self.assertEqual(record["status"],"NOT_IN_AUDITED_SUBSET")
+        self.assertIsNone(record["canonical"])
+        self.assertIn("CACHE_PATH_REVIEW:/etc/ld.so.cache",report["cache_review"]["problems"])
+        self.assertFalse(report["cache_review"]["cache_installation_authorized"])
 
     def test_extended_stage_wrong_review(self):
         image,sha=self.image_fixture()

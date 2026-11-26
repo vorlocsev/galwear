@@ -57,6 +57,8 @@ class CacheTests(unittest.TestCase):
                  "files":{"/usr/lib/lib.so":{"sha256":"a"*64}}}
         self.assertEqual(classify("/lib/lib.so",closure)["status"],"AUDITED_PATH_CANDIDATE")
         self.assertEqual(classify("/opt/lib.so",closure)["status"],"NOT_IN_AUDITED_SUBSET")
+        self.assertEqual(classify("/usr/lib/lib.so",closure)["status"],"AUDITED_PATH_CANDIDATE")
+        self.assertEqual(classify("/usr/lib/other-alias.so",closure)["status"],"NOT_IN_AUDITED_SUBSET")
 
 
 if __name__=="__main__":

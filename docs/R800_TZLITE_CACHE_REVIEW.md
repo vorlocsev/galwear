@@ -21,3 +21,15 @@ Reference: https://github.com/bminor/glibc/tree/glibc-2.24
 iconv/iconvconfig.h, iconv/iconvconfig.c, iconv/gconv_cache.c).
 Eight unit tests and one real ext4 fixture pending CI.
 Original donor unavailable. safe_to_flash=false.
+
+## Exact-path fixture correction
+
+CI 2f820461f51611ae4619167a787dd211a85ba9bf: 4/7 workflows.
+Host run 45804413734 job 139855741305 failed only
+`test_cache_review_real_image`: fixture referenced donor alias
+/usr/lib/libfixture.so.1, while dependency audit selects the
+/lib/libfixture.so.1 alias (canonical /usr/lib/libfixture-real.so).
+Android HAL and synthetic ARM QEMU jobs succeeded. Correct positive
+fixture to use the audited alias and add separate real ext4
+negative test proving the donor-only alias stays outside the
+staged subset. No production classifier relaxation. CI pending.
