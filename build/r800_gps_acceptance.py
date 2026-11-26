@@ -25,7 +25,8 @@ def digest(path):
 
 
 def inputs(include_donor=False, include_qemu=False):
-    paths = [Path(__file__), *ROOT.glob('src/tools/gps/*.h'),
+    paths = [Path(__file__), ROOT / 'build/r800_gps_verify_report.py',
+             *ROOT.glob('src/tools/gps/*.h'),
              *(ROOT / 'tests' / ('test_r800_gps_' + s + '.py') for s in PY_SUITES),
              *(ROOT / 'build' / ('r800_gps_' + s + '.py') for s in PY_SUITES),
              *(ROOT / 'tests' / ('test_r800_gps_' + s + '.c') for s in (*C_SUITES, 'xtra_submit')),
