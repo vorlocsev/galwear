@@ -1,24 +1,77 @@
-"""Forward-only A32 address dataflow over a bounded, assumed code range."""
+"""Bounded ARM/Thumb address dataflow over a bounded, assumed code range."""
 import struct
+from collections import deque
+
+MAX_STEPS = 524288
+
+
+class Flow:
+    """Must-fact intersection: unseen nodes are distinct from unknown facts."""
+    def __init__(self, start, end, nodes):
+        self.end = end
+        self.nodes = nodes
+        self.incoming = {start: {}}
+        self.pending = deque([start])
+        self.queued = {start}
+        self.events = []
+        self.boundaries = []
+        self.steps = 0
+        self.emitting = False
+        self.converged = False
+        self.back_edges = set()
+        self.current = start
+
+    def enqueue(self, target, state):
+        if self.emitting:
+            return
+        if target <= self.current:
+            self.back_edges.add((self.current, target))
+        previous = self.incoming.get(target)
+        merged = dict(state) if previous is None else {
+            k: v for k, v in previous.items() if state.get(k) == v}
+        if previous == merged:
+            return
+        self.incoming[target] = merged
+        if target != self.end and target not in self.queued:
+            self.pending.append(target)
+            self.queued.add(target)
+
+    def walk(self):
+        while self.pending:
+            if self.steps >= MAX_STEPS:
+                self.boundaries.append({"address": self.current, "reason": "iteration_budget_exceeded"})
+                return
+            self.current = self.pending.popleft()
+            self.queued.remove(self.current)
+            self.steps += 1
+            yield self.current, dict(self.incoming[self.current])
+            # Transient events must not survive until the reporting pass.
+            self.events.clear()
+            self.boundaries.clear()
+        self.converged = True
+        self.emitting = True
+        for va in sorted(self.incoming):
+            if va != self.end:
+                yield va, dict(self.incoming[va])
+
+    def report(self):
+        return {"status": "PARTIAL_FLOW_REVIEW_REQUIRED" if self.boundaries or not self.converged else "CONDITIONAL_FIXED_POINT_FLOW_ONLY",
+                "events": self.events if self.converged and not self.boundaries else [],
+                "boundaries": self.boundaries,
+                "reached_instructions": sum(va != self.end for va in self.incoming),
+                "range_end_reached": self.end in self.incoming,
+                "converged": self.converged, "iterations": self.steps,
+                "back_edge_count": len(self.back_edges),
+                "control_flow_verified": False, "safe_to_flash": False}
 
 
 def audit(raw, off, start, size, relocations, tables, direct):
     if size % 4 or start % 4 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid A32 flow range")
     end = start + size
-    incoming = {start: {}}
-    events, boundaries = [], []
-
-    def enqueue(target, state):
-        if target in incoming:
-            incoming[target] = {k: v for k, v in incoming[target].items() if state.get(k) == v}
-        else:
-            incoming[target] = dict(state)
-
-    for va in range(start, end, 4):
-        if va not in incoming:
-            continue
-        state = dict(incoming[va])
+    flow = Flow(start, end, range(start, end, 4))
+    enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
+    for va, state in flow.walk():
         word, = struct.unpack_from("<I", raw, off + va - start)
         cond = word >> 28
         rd = (word >> 12) & 15
@@ -38,8 +91,8 @@ def audit(raw, off, start, size, relocations, tables, direct):
             if delta & 0x800000:
                 delta -= 1 << 24
             target = va + 8 + 4 * delta
-            if not va < target < end:
-                boundary("nonforward_or_external_branch")
+            if not start <= target < end:
+                boundary("external_branch")
             else:
                 enqueue(target, state)
             if cond != 14:
@@ -89,16 +142,11 @@ def audit(raw, off, start, size, relocations, tables, direct):
             boundary("unsupported_instruction")
             continue
         enqueue(va + 4, state)
-    # An unresolved path may reenter the modeled range. Suppress all facts.
-    return {"status": "PARTIAL_FLOW_REVIEW_REQUIRED" if boundaries else "CONDITIONAL_FORWARD_FLOW_ONLY",
-            "events": [] if boundaries else events, "boundaries": boundaries,
-            "reached_instructions": sum(va < end for va in incoming),
-            "range_end_reached": end in incoming, "control_flow_verified": False,
-            "safe_to_flash": False}
+    return flow.report()
 
 
 def audit_thumb(raw, off, start, size, relocations, tables, direct):
-    """Forward-only Thumb flow, with linear instruction-boundary assumptions."""
+    """Bounded Thumb flow, with linear instruction-boundary assumptions."""
     if size % 2 or start % 2 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid Thumb flow range")
     end = start + size
@@ -112,27 +160,18 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
         b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
         nodes[start + pos] = (a, b, width)
         pos += width
-    incoming = {start: {}}
-    events, boundaries = [], []
-
-    def enqueue(target, state):
-        if target in incoming:
-            incoming[target] = {k: v for k, v in incoming[target].items() if state.get(k) == v}
-        else:
-            incoming[target] = dict(state)
+    flow = Flow(start, end, nodes)
+    enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
 
     # Reject even an unreachable IT encoding: a branch into its body could
     # otherwise be mistaken for an unconditional instruction sequence.
     for va, (a, _, width) in nodes.items():
         if width == 2 and a & 0xff00 == 0xbf00 and a & 15:
             boundaries.append({"address": va, "reason": "it_block_not_modeled"})
-    it_present = bool(boundaries)
-    for va, (a, b, width) in nodes.items():
-        if it_present:
-            break
-        if va not in incoming:
-            continue
-        state = dict(incoming[va])
+    if boundaries:
+        return flow.report()
+    for va, state in flow.walk():
+        a, b, width = nodes[va]
         def boundary(reason):
             boundaries.append({"address": va, "reason": reason})
         def set_reg(reg, value):
@@ -158,8 +197,8 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
             if delta & (1 << (bits - 1)):
                 delta -= 1 << bits
             target = va + 4 + 2 * delta
-            if target <= va or target not in nodes:
-                boundary("nonforward_or_invalid_branch")
+            if target not in nodes:
+                boundary("invalid_branch")
             else:
                 enqueue(target, state)
             if conditional:
@@ -203,8 +242,4 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
             boundary("unsupported_instruction")
             continue
         enqueue(va + width, state)
-    return {"status": "PARTIAL_FLOW_REVIEW_REQUIRED" if boundaries else "CONDITIONAL_FORWARD_FLOW_ONLY",
-            "events": [] if boundaries else events, "boundaries": boundaries,
-            "reached_instructions": sum(va < end for va in incoming),
-            "range_end_reached": end in incoming, "control_flow_verified": False,
-            "safe_to_flash": False}
+    return flow.report()
