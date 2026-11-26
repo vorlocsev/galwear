@@ -1,4 +1,5 @@
 """Host-only shell contract tests: fake NDK and gate, no ARM execution."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -55,6 +56,10 @@ if mode == 'binary-symlink':
     binary.unlink()
     binary.symlink_to(libs / 'libc.so.6')
 print(json.dumps(report))
+if mode == 'source-code-mutate':
+    (out.parent / 'src/tools/gps/gpsbridge.c').write_text('changed source')
+if mode == 'tool-mutate':
+    (out.parent / 'ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld').write_text('changed linker')
 if mode == 'mutate':
     (Path(sys.argv[sys.argv.index('--libdir') + 1]) / 'libc.so.6').write_text('changed')
 if mode == 'source-mutate':
@@ -82,6 +87,7 @@ class BuildContract(unittest.TestCase):
         self.script = self.root / 'src/tools/gps/build.sh'
         self.script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, self.script)
+        (self.script.parent / 'gpsbridge.c').write_text('/* synthetic fixture */')
         self.ndk = self.root / 'ndk'
         tc = self.ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
         tc.mkdir(parents=True)
@@ -90,9 +96,11 @@ class BuildContract(unittest.TestCase):
             path = tc / name
             path.write_text(body)
             path.chmod(0o755)
+        (tc / 'ld.lld').write_text('synthetic linker')
         (self.root / 'build').mkdir()
         for name in ('r800_gps_donor_snapshot.py', 'r800_android_userspace_preflight.py',
-                     'r800_gps_publish.py'):
+                     'r800_gps_publish.py', 'r800_gps_provenance.py',
+                     'r800_android_linker_audit.py', 'r800_tizen_dependencies.py'):
             shutil.copyfile(SCRIPT.parents[3] / 'build' / name,
                             self.root / 'build' / name)
         (self.root / 'build/r800_gps_link_gate.py').write_text(GATE)
@@ -124,6 +132,12 @@ class BuildContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.out.read_text(), 'bridge')
         self.assertIn('NON-RELEASE', result.stdout)
+        evidence = [json.loads(line) for line in result.stdout.splitlines()
+                    if line.startswith('{"audit_sha256":')]
+        self.assertEqual(len(evidence), 1)
+        self.assertFalse(evidence[0]['signed_attestation'])
+        self.assertFalse(evidence[0]['safe_to_flash'])
+        self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
 
     def test_wrong_class(self):
         self.reject_donor('wide')
@@ -179,6 +193,13 @@ class BuildContract(unittest.TestCase):
     def test_audit_digest_or_scope_mismatch(self):
         for mode in ('wrong-digest', 'wrong-donor-digest', 'bad-scope',
                      'binary-mutate', 'binary-symlink'):
+            with self.subTest(mode=mode):
+                self.assertNotEqual(self.run_build(mode).returncode, 0)
+                self.assertTrue(self.marker.exists())
+                self.assertFalse(self.out.exists())
+
+    def test_provenance_changes(self):
+        for mode in ('source-code-mutate', 'tool-mutate'):
             with self.subTest(mode=mode):
                 self.assertNotEqual(self.run_build(mode).returncode, 0)
                 self.assertTrue(self.marker.exists())
