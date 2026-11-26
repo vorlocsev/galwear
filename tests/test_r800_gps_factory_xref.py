@@ -512,6 +512,87 @@ class LiteralPoolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.analyze(mapping_fixture([(b"$a", 0x1100), (b"$t", 0x1110)]))
 
+class AutomaticCallbackTests(unittest.TestCase):
+    def fixture(self, *, static=False, thumb=False, **kwargs):
+        raw = bytearray(static_fixture(thumb=thumb, **kwargs) if static else call_fixture(second_thumb=thumb, **kwargs))
+        struct.pack_into("<7I", raw, 0x100, 0xe3000ff0, 0xe3400000, 0xe08f0000, 0xe92d4010,
+                         0xe5903004, 0xe12fff33, 0xe8bd8010)
+        struct.pack_into("<II", raw, 0x304, 0x11c0, 0x11a0)
+        return raw
+
+    def analyze(self, raw, **kwargs):
+        return target.audit(bytes(raw), auto_callees=True, callback_calls=True, **kwargs)
+
+    def test_seed_and_nested_direct_call(self):
+        raw = self.fixture()
+        report = self.analyze(raw, callee_depth=2)
+        first, second = report["auto_callee_candidates"]
+        self.assertEqual(first["symbol_name"], "first")
+        self.assertEqual(first["callback_slot_candidates"][0]["slot_va"], 0x2104)
+        self.assertEqual(second["symbol_name"], "second")
+        flow = report["code_ranges"][0]["pic_flow"]
+        self.assertEqual(flow["boundaries"], [])
+        self.assertEqual(flow["assumed_calls"][0]["instruction"], "BLX_REG")
+        self.assertEqual(flow["assumed_calls"][0]["modeled_nested_depth"], 1)
+        self.assertFalse(report["callee_discovery_complete"])
+        self.assertFalse(report["safe_to_flash"])
+
+    def test_depth_budget_and_disabled_mode(self):
+        raw = self.fixture()
+        shallow = self.analyze(raw)
+        self.assertEqual(len(shallow["auto_callee_candidates"]), 1)
+        self.assertEqual(shallow["code_ranges"][0]["pic_flow"]["assumed_calls"], [])
+        disabled = target.audit(bytes(raw), auto_callees=True, callee_depth=2)
+        self.assertEqual(disabled["auto_callee_candidates"], [])
+        self.assertFalse(disabled["callback_call_mode"])
+        with self.assertRaises(ValueError):
+            target.audit(bytes(raw), callback_calls=True)
+
+    def test_static_callback_and_nested_interworking(self):
+        report = self.analyze(self.fixture(static=True, thumb=True), static_symbols=True, callee_depth=2)
+        first, second = report["auto_callee_candidates"]
+        self.assertEqual(first["symbol_source"], "SHT_SYMTAB")
+        self.assertEqual(second["isa"], "thumb")
+        self.assertEqual(report["code_ranges"][0]["pic_flow"]["boundaries"], [])
+
+    def test_thumb_callback_seed_exact_isa(self):
+        raw = self.fixture(thumb=True)
+        struct.pack_into("<I", raw, 0x304, 0x11e1)
+        report = self.analyze(raw)
+        row, = report["auto_callee_candidates"]
+        self.assertEqual((row["start_va"], row["isa"]), (0x11e0, "thumb"))
+        self.assertEqual(report["code_ranges"][0]["pic_flow"]["assumed_calls"][0]["target_isa"], "thumb")
+        struct.pack_into("<I", raw, 0x304, 0x11e0)
+        with self.assertRaisesRegex(ValueError, "No eligible"):
+            self.analyze(raw)
+
+    def test_alias_preemptible_and_interior_excluded(self):
+        for raw in (self.fixture(first_other=0), self.fixture(first_info=0x1a),
+                    self.fixture(second_value=0x11c4, second_size=0), self.fixture(static=True, alias=True)):
+            with self.assertRaisesRegex(ValueError, "No eligible"):
+                self.analyze(raw, static_symbols=True)
+        raw = self.fixture()
+        struct.pack_into("<I", raw, 0x304, 0x11c4)
+        with self.assertRaisesRegex(ValueError, "No eligible"):
+            self.analyze(raw)
+
+    def test_mapping_coverage_required_when_enabled(self):
+        raw = bytearray(mapping_fixture([(b"$a", 0x1100), (b"$d", 0x11c4), (b"$a.1", 0x11e0)]))
+        code = self.fixture()
+        raw[0x100:0x11c] = code[0x100:0x11c]
+        raw[0x304:0x30c] = code[0x304:0x30c]
+        with self.assertRaisesRegex(ValueError, "mapping range"):
+            self.analyze(raw, static_symbols=True, mapping_symbols=True)
+
+    def test_multiple_slots_seed_once_and_not_reachability(self):
+        raw = self.fixture()
+        struct.pack_into("<I", raw, 0x308, 0x11c0)
+        struct.pack_into("<I", raw, 0x110, 0xe12fff1e)  # No actual indirect call reached.
+        report = self.analyze(raw)
+        row, = report["auto_callee_candidates"]
+        self.assertEqual([e["slot_va"] for e in row["callback_slot_candidates"]], [0x2104, 0x2108])
+        self.assertEqual(report["code_ranges"][0]["pic_flow"]["assumed_calls"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
