@@ -153,6 +153,39 @@ $B sleep 1; $B pkill -f "charger/wpcd loop" 2>/dev/null
 # ---- memrec: memory/CPU flight recorder (developer mode only)
 dev && [ -x /oem/r800dev/memrec.sh ] && /oem/r800dev/memrec.sh &
 
+# BEGIN GNSS_IPC_METADATA
+# Read-only metadata heuristics: never connect, read the owner marker, chmod,
+# or remove IPC entries. Only the bridge itself owns stale-socket recovery.
+gnss_ipc_directory() {
+    [ "$#" -eq 3 ] || return 1
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -d "$2" ] && [ ! -L "$2" ] || return 1
+    left=$("$B" stat -c '%d:%i:%u:%a' "$1") || return 1
+    right=$("$B" stat -c '%d:%i:%u:%a' "$2") || return 1
+    [ "$left" = "$right" ] || return 1
+    owner_mode=${left#*:*:}
+    [ "${owner_mode%:*}" = "$3" ] || return 1
+    case "${owner_mode##*:}" in
+        [0-7][0145][0145]) return 0;;
+        *) return 1;;
+    esac
+}
+gnss_socket_metadata() {
+    [ "$#" -eq 3 ] || return 1
+    gnss_ipc_directory "$@" || return 1
+    for dir in "$1" "$2"; do
+        [ -S "$dir/gps.sock" ] && [ ! -L "$dir/gps.sock" ] &&
+        [ -f "$dir/gps.sock.owner" ] && [ ! -L "$dir/gps.sock.owner" ] || return 1
+    done
+    sock_a=$("$B" stat -c '%d:%i:%u:%a:%h' "$1/gps.sock") || return 1
+    sock_b=$("$B" stat -c '%d:%i:%u:%a:%h' "$2/gps.sock") || return 1
+    marker_a=$("$B" stat -c '%d:%i:%u:%a:%h:%s' "$1/gps.sock.owner") || return 1
+    marker_b=$("$B" stat -c '%d:%i:%u:%a:%h:%s' "$2/gps.sock.owner") || return 1
+    [ "$sock_a" = "$sock_b" ] && [ "$marker_a" = "$marker_b" ] || return 1
+    [ "${sock_a#*:*:}" = "$3:660:1" ] &&
+        [ "${marker_a#*:*:}" = "$3:600:1:40" ]
+}
+# END GNSS_IPC_METADATA
+
 # ---- sensors: the SSP sensor hub lives in the BCM47758 GPS chip. Tizen's lhd
 # downloads the MCU patch (/dev/bbd_patch -> request_firmware) and relays the
 # traffic; it runs unmodified from the Tizen rootfs (p18, read-only) in a chroot
@@ -237,17 +270,29 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
                 else
                     # Preserve the existing donor ownership recovery behavior.
                     # Do not start the GNSS engine if it fails.
-                    if "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss; then
+                    if ! gnss_ipc_directory /oem/r800dev /mnt/tz/opt/usr/r800dev 0; then
+                        k "gnss: shared IPC directory metadata not confirmed; no GPS workers"
+                    elif "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss; then
                         "$B" chroot /mnt/tz $TZE /usr/bin/gpsd -c /etc/gps-manager/brcm/gpsd.xml > /dev/null 2>&1 < /dev/null &
                         gpsd_pid=$!
                         "$B" sleep 5
-                        if kill -0 "$lhd_pid" 2>/dev/null && kill -0 "$gpsd_pid" 2>/dev/null; then
+                        if kill -0 "$lhd_pid" 2>/dev/null && kill -0 "$gpsd_pid" 2>/dev/null &&
+                            gnss_ipc_directory /oem/r800dev /mnt/tz/opt/usr/r800dev 0; then
                             # Avoid persistent logs containing network location or coordinates.
                             "$B" chroot /mnt/tz $TZE /opt/usr/r800dev/gpsbridge daemon > /dev/null 2>&1 < /dev/null &
                             bridge_pid=$!
+                            ipc_previous=
                             while kill -0 "$lhd_pid" 2>/dev/null &&
                                   kill -0 "$gpsd_pid" 2>/dev/null &&
                                   kill -0 "$bridge_pid" 2>/dev/null; do
+                                ipc_state=unconfirmed
+                                if gnss_socket_metadata /oem/r800dev /mnt/tz/opt/usr/r800dev 0; then
+                                    ipc_state=metadata-candidate
+                                fi
+                                if [ "$ipc_state" != "$ipc_previous" ]; then
+                                    k "gnss: ipc=$ipc_state; runtime access not verified"
+                                    ipc_previous=$ipc_state
+                                fi
                                 "$B" sleep 3
                             done
                         fi
