@@ -51,6 +51,9 @@ class PluginTests(unittest.TestCase):
         for kind in (3,7):
             self.reject(ph(6), kind, "Unexpected plugin segment")
 
+    def test_build_id_note_rejected(self):
+        self.reject(ph(6), 4, "Unexpected plugin segment: 0x4")
+
     def test_stack_and_wx(self):
         self.reject(ph(0x6474e551)+24, 7, "stack")
         self.reject(ph(1)+24, 7, "plugin load")
