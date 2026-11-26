@@ -32,17 +32,20 @@ int main(void)
                     .location_cb=got_fix,.status_cb=got_status,.nmea_cb=got_nmea};
     assert(!iface.init(&c));
     assert(!iface.start());
-    wait_for(&received,1);
-    wait_for(&nmeas,1);
     wait_for(&states,1);
     assert(!iface.inject_time(123,0,50));
     assert(!iface.inject_location(52,5,0.25f));
+    wait_for(&received,1);
+    wait_for(&nmeas,1);
     assert(!iface.stop());
     wait_for(&states,2);
     assert(!iface.start());
+    wait_for(&states,3);
+#if R800_GPS_IPC_V2
+    assert(!iface.inject_location(52,5,0.25f));
+#endif
     wait_for(&received,2);
     wait_for(&nmeas,2);
-    wait_for(&states,3);
     assert(!iface.stop());
     wait_for(&states,4);
     iface.cleanup();
