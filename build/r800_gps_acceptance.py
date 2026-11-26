@@ -53,6 +53,54 @@ def candidate_digest(path):
     return digest(path)
 
 
+def expected_checks(donor=False, qemu=False):
+    """Minimum successful evidence matrix for the requested invocation."""
+    expected = {'python-' + suite: ('host', 'PASS') for suite in PY_SUITES}
+    for suite, abi in [(s, 0) for s in C_SUITES] + [('xtra_submit', i) for i in range(3)]:
+        name = 'native-' + suite + '-' + str(abi)
+        expected[name + '-compile'] = expected[name] = ('host', 'PASS')
+    for abi in range(3):
+        expected['arm-xtra-%d' % abi] = ('arm32_compile_only', 'PASS')
+    for abi, stage, case in [(0, i, 0) for i in range(8)] + [(a, 0, c) for a in (1, 2) for c in range(1, 5)]:
+        expected['arm-hal-%d-%d-%d' % (abi, stage, case)] = ('arm32_compile_only', 'PASS')
+    expected['experimental-build'] = ('donor_build', 'PASS' if donor else 'NOT_TESTED')
+    if donor:
+        expected['experimental-link-audit'] = ('donor_build', 'PASS')
+        expected['experimental-candidate-integrity'] = ('donor_build', 'PASS')
+    for suite in QEMU_SUITES:
+        expected[suite] = ('qemu_synthetic', 'PASS' if qemu else 'NOT_TESTED')
+    return expected
+
+
+def evidence_errors(rows, out, expected, candidate_hash=None):
+    """Reject incomplete matrices and missing, changed or mislabelled logs."""
+    errors, seen = [], set()
+    for row in rows:
+        name = row['name']
+        if name in seen:
+            errors.append(name + ': duplicate result')
+        seen.add(name)
+        if name not in expected or (row['group'], row['status']) != expected[name]:
+            errors.append(name + ': unexpected group or status')
+        if row['status'] != 'PASS':
+            continue
+        if name == 'experimental-candidate-integrity':
+            if not candidate_hash or row.get('candidate_sha256') != candidate_hash:
+                errors.append(name + ': candidate digest mismatch')
+            continue
+        if (type(row.get('exit_code')) is not int or row['exit_code'] != 0
+                or row.get('log') != name + '.log'):
+            errors.append(name + ': invalid execution evidence')
+            continue
+        try:
+            if candidate_digest(out / row['log']) != row.get('log_sha256'):
+                errors.append(name + ': log digest mismatch')
+        except (OSError, ValueError):
+            errors.append(name + ': missing or invalid log')
+    errors.extend(name + ': missing result' for name in sorted(set(expected) - seen))
+    return errors
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--out', type=Path, required=True, help='new evidence directory outside checkout')
@@ -192,9 +240,14 @@ def main():
                              status='PASS', candidate_sha256=candidate_hash))
             print('experimental-candidate-integrity=PASS', flush=True)
     unchanged = unchanged and before == snapshot()
-    ok = unchanged and all(r['status'] in ('PASS', 'NOT_TESTED') for r in rows)
+    errors = evidence_errors(rows, out, expected_checks(bool(args.ndk), args.qemu),
+                             candidate_hash if build_ok else None)
+    if not unchanged:
+        errors.append('requested source inputs changed')
+    ok = not errors
     report = dict(schema='galwear-r800-gps-acceptance-v1', status='REQUESTED_CHECKS_PASS' if ok else 'REVIEW_REQUIRED',
                   input_sha256=before, host_inputs_unchanged=unchanged, checks=rows,
+                  evidence_errors=errors,
                   experimental_binary_sha256=candidate_hash if build_ok else None,
                   vendor_abi_verified=False, gnss_runtime_verified=False, safe_to_flash=False, signed_attestation=False)
     (out / 'report.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
