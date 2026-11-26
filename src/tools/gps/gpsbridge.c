@@ -63,9 +63,11 @@ int open(const char *, int, ...);
 int rename(const char *, const char *);
 int mkstemp(char *);
 int fsync(int);
+long syscall(long, ...);
 #define O_RDONLY 0
 #define O_NONBLOCK 04000
 #define O_NOFOLLOW 0100000 /* Linux ARM UAPI, not asm-generic */
+#define O_CLOEXEC 02000000
 #define O_WRONLY_CREAT_TRUNC 01101
 int strcmp(const char *, const char *);
 int strncmp(const char *, const char *, size_t);
@@ -102,6 +104,8 @@ static int daemon_mode;
 #define LAST_TMP LAST_PATH ".XXXXXX"
 
 #include "gps_cache.h"
+#include "gps_cache_read.h"
+#include "gps_cache_arm_stat.h"
 static struct gps_cache position_cache = GPS_CACHE_INIT;
 
 static void save_fix(const GpsLocation *l, gps_client_epoch epoch)
@@ -309,24 +313,13 @@ static void inject_lto(void)
 /* seed the engine with the last fix: accuracy grows with its age */
 static void inject_last(void)
 {
-	char b[96];
 	double lat, lon;
-	int64_t t, age, now;
+	int64_t t, age, now = clk_ms(0);
 	float acc;
-	int fd = open(LAST_PATH, O_RDONLY | O_NONBLOCK | O_NOFOLLOW), r, n;
-	if (fd < 0)
-		return;
-	n = gps_read_lto(lto_read, &fd, b, sizeof(b) - 1);
-	close(fd);
-	if (n <= 0 || !gps_parse_seed(b, n, &lat, &lon, &t))
-		return;
-	now = clk_ms(0);
-	if (now < t)
+	int r;
+	if (!gps_cache_load(&position_cache, LAST_PATH, now, &lat, &lon, &t, &acc))
 		return;
 	age = now - t;
-	if (age > 30LL * 86400000 || (lat == 0 && lon == 0))
-		return;
-	acc = age < 86400000 ? 2000.0f : 25000.0f;
 	r = gps->inject_location(lat, lon, acc);
 	printf("inject_location (last fix, %lld min old) acc %.0f -> %d\n", age / 60000,
 	       (double)acc, r);
@@ -514,6 +507,13 @@ int main(int argc, char **argv, char **envp)
 	    !gps->start || !gps->stop || !gps->cleanup || !gps->inject_time ||
 	    !gps->inject_location || !gps->set_position_mode)
 		return 1;
+	/* Restore the persisted watermark before init can invoke callbacks. */
+	{
+		double lat, lon;
+		int64_t utc;
+		float acc;
+		gps_cache_load(&position_cache, LAST_PATH, clk_ms(0), &lat, &lon, &utc, &acc);
+	}
 	r = gps->init(&cbs);
 	printf("init %d\n", r);
 	if (r != 0)
