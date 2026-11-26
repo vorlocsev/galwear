@@ -544,8 +544,8 @@ def thumb_immediate_alu(state, a, b, width):
     return True
 
 
-def callback_slots(tables):
-    """Only unambiguous relative code-pointer slots of discovered table candidates."""
+def callback_slots(tables, *, symbolic=False):
+    """Unambiguous relative and opt-in zero-addend symbolic table slots."""
     slots, seen = {}, set()
     for table in tables.values():
         for entry in table["entries"]:
@@ -554,9 +554,15 @@ def callback_slots(tables):
                 slots.pop(slot, None)
                 continue
             seen.add(slot)
-            if entry["status"] == "RELATIVE_EXECUTABLE_CANDIDATE":
+            evidence = entry.get("symbolic_evidence", {})
+            relative = entry["status"] == "RELATIVE_EXECUTABLE_CANDIDATE"
+            local_symbol = (symbolic and entry["status"] == "SYMBOLIC_EXECUTABLE_CANDIDATE"
+                            and evidence.get("relocation_type") == 2 and evidence.get("zero_addend_only") is True)
+            if relative or local_symbol:
                 slots[slot] = {"table_va": table["table_va"], "field": entry["field"],
                                "target_va": entry["target_va"], "isa": entry["isa"]}
+                if local_symbol:
+                    slots[slot]["symbolic_evidence"] = evidence
     return slots
 
 
