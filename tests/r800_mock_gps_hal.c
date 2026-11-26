@@ -9,7 +9,7 @@ typedef unsigned long pthread_t;
 #ifndef MOCK_FAIL
 #define MOCK_FAIL 0
 #endif
-#if MOCK_FAIL < 0 || MOCK_FAIL > 6
+#if MOCK_FAIL < 0 || MOCK_FAIL > 7
 #error Invalid mock failure stage
 #endif
 #if R800_XTRA_ABI != 0
@@ -41,6 +41,10 @@ static int mock_init(GpsCallbacks *cb)
 static int mock_time(GpsUtcTime utc, int64_t ref, int unc)
 {
     if ((state != 1 && state != 3) || utc <= 0 || ref < 0 || unc < 0) return -91;
+    if (MOCK_FAIL == 7 && state == 1) {
+        callbacks->location_cb(&fix);
+        callbacks->nmea_cb(fix.timestamp, nmea, sizeof(nmea)-1);
+    }
     time_seen = 1;
     return 0;
 }
@@ -78,6 +82,10 @@ static int mock_stop(void)
     state = 1;
     time_seen = 0;
     callbacks->status_cb(&stopped);
+    if (MOCK_FAIL == 7) {
+        callbacks->location_cb(&fix);
+        callbacks->nmea_cb(fix.timestamp, nmea, sizeof(nmea)-1);
+    }
     return 0;
 }
 static void mock_cleanup(void)
