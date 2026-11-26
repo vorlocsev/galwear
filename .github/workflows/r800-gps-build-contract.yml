@@ -238,7 +238,7 @@ jobs:
           python3 -m unittest discover -s tests -p test_r800_gps_mock_resources.py -v
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
-          for stage in 0 1 2 3 4 5 6; do
+          for stage in 0 1 2 3 4 5 6 7; do
             output="$tmp/mock-$stage.so"
             clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -Wall -Wextra -Werror -fPIC -fvisibility=hidden -shared -nostdlib -fuse-ld=lld -Wl,--hash-style=sysv,-z,noexecstack,-z,now,--no-undefined -DR800_XTRA_ABI=0 -DMOCK_FAIL="$stage" -o "$output" tests/r800_mock_gps_hal.c
             readelf -h "$output" > "$tmp/header"
