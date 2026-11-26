@@ -22,6 +22,11 @@ mkdir -m 700 "$TMP/libs"
 SNAPSHOT=$ROOT/build/r800_gps_donor_snapshot.py
 python3 "$SNAPSHOT" create "$SR" "$TMP/libs" "$TMP/input.json"
 python3 "$SNAPSHOT" verify "$SR" "$TMP/libs" "$TMP/input.json"
+# Optional archive-bound NON-RELEASE mode. Verify before invoking compiler.
+ARCHIVE=${R800_TIZEN_ARCHIVE:-}
+if [ -n "$ARCHIVE" ]; then
+    python3 "$ROOT/build/r800_pack_tizen_stage.py" verify --archive "$ARCHIVE" --donor-manifest "$TMP/input.json" > "$TMP/archive.json"
+fi
 # Validate the exact private snapshot used by the linker, not just its source.
 for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
     "$TC/llvm-readelf" -h "$TMP/libs/$lib" > "$TMP/donor-elf.txt"
@@ -50,6 +55,10 @@ python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "
 cat "$TMP/audit.json"
 python3 "$SNAPSHOT" verify "$SR" "$TMP/libs" "$TMP/input.json"
 python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
-python3 "$ROOT/build/r800_gps_publish.py" "$TMP/gpsbridge" "$TMP/audit.json" "$TMP/input.json" "$OUT" "$TMP/provenance.json"
+if [ -n "$ARCHIVE" ]; then
+    python3 "$ROOT/build/r800_gps_publish.py" "$TMP/gpsbridge" "$TMP/audit.json" "$TMP/input.json" "$OUT" "$TMP/provenance.json" --archive "$ARCHIVE" --archive-record "$TMP/archive.json"
+else
+    python3 "$ROOT/build/r800_gps_publish.py" "$TMP/gpsbridge" "$TMP/audit.json" "$TMP/input.json" "$OUT" "$TMP/provenance.json"
+fi
 echo "R800_XTRA_ABI=$XTRA_ABI (0=disabled; 1=legacy; 2=sized vendor candidate)"
 echo "NON-RELEASE Tizen GPS bridge; glibc compatibility and GNSS runtime NOT verified."
