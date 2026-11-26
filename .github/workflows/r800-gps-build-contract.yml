@@ -79,6 +79,8 @@ on:
       - src/tools/gps/gps_command.h
       - src/tools/gps/gps_frame.h
       - src/tools/gps/gps_lto.h
+      - src/tools/gps/gps_lto_file.h
+      - tests/test_r800_gps_lto_file.c
       - src/tools/gps/gps_output.h
       - src/tools/gps/gps_client.h
       - src/tools/gps/gps_cache.h
@@ -278,4 +280,6 @@ jobs:
           timeout 15 "$tmp/gps-cache-test"
           cc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -Isrc/tools/gps tests/test_r800_gps_cache_read.c -o "$tmp/gps-cache-read-test"
           timeout 15 "$tmp/gps-cache-read-test"
+          cc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -Isrc/tools/gps tests/test_r800_gps_lto_file.c -o "$tmp/gps-lto-file-test"
+          timeout 15 "$tmp/gps-lto-file-test"
           echo "ARM32_RUNTIME_VERIFIED=false"
