@@ -46,6 +46,20 @@ def pic_image(address, load=None, symbolic=False):
     return bytes(raw)
 
 
+def thumb_pic_image(address, load=None, symbolic=False, start=0x1100, reg=0):
+    raw = bytearray(object_image() if symbolic else image())
+    delta = (address - (start + 12)) & 0xffffffff
+    def mov(base, imm):
+        return (base | ((imm >> 12) & 15) | ((imm >> 1) & 0x400),
+                ((imm << 4) & 0x7000) | (reg << 8) | (imm & 255))
+    pos = start - 0x1000
+    struct.pack_into("<5H", raw, pos, *mov(0xf240, delta & 0xffff),
+                     *mov(0xf2c0, delta >> 16), 0x4478 | (reg & 7) | ((reg & 8) << 4))
+    if load is not None:
+        struct.pack_into("<HH", raw, pos + 10, *load)
+    return bytes(raw)
+
+
 class XrefTests(unittest.TestCase):
     def test_data_reference_without_code_claim(self):
         report = target.audit(image())
@@ -198,6 +212,54 @@ class XrefTests(unittest.TestCase):
         for isa, size in (("arm", 8), ("thumb", 12)):
             with self.subTest(isa=isa):
                 self.assertEqual(target.audit(raw, [("factory", isa, 0x1100, size)])["code_ranges"][0]["pic_clues"], [])
+
+    def test_thumb_pic_assembler_bytes(self):
+        raw = thumb_pic_image(0x2100)
+        self.assertEqual(raw[0x100:0x10a].hex(), "40f6f470c0f200007844")
+        clue = target.audit(raw, [("factory", "thumb", 0x1100, 10)])["code_ranges"][0]["pic_clues"][0]
+        self.assertEqual(clue["table_va"], 0x2100)
+        self.assertEqual(clue["reference_kind"], "THUMB_PIC_TABLE_ADDRESS_CANDIDATE")
+
+    def test_thumb_pic_got_and_high_register(self):
+        raw = thumb_pic_image(0x2140, load=(0xf8d8, 0x1000), symbolic=True, reg=8)
+        report = target.audit(raw, [("factory", "thumb", 0x1100, 14)], symbolic=True)
+        clue = report["code_ranges"][0]["pic_clues"][0]
+        self.assertEqual((clue["slot_va"], clue["table_va"], clue["register"]), (0x2140, 0x2100, "r1"))
+        self.assertFalse(report["safe_to_flash"])
+
+    def test_thumb_pic_signed_offsets(self):
+        for addr, op in ((0x117c, (0xf8d0, 0x1004)), (0x1184, (0xf850, 0x1c04)),
+                         (0x1100, (0xf8d0, 0x1080))):
+            with self.subTest(addr=addr):
+                raw = thumb_pic_image(addr, load=op)
+                clue = target.audit(raw, [("factory", "thumb", 0x1100, 14)])["code_ranges"][0]["pic_clues"][0]
+                self.assertEqual(clue["slot_va"], 0x1180)
+
+    def test_thumb_pic_halfword_aligned_pc(self):
+        raw = thumb_pic_image(0x2100, start=0x1102)
+        clue = target.audit(raw, [("factory", "thumb", 0x1102, 10)])["code_ranges"][0]["pic_clues"][0]
+        self.assertEqual(clue["computed_va"], 0x2100)
+
+    def test_thumb_pic_reject_wrong_register_and_it(self):
+        for offset, word in ((0x106, 0x0100), (0x108, 0x4479)):
+            raw = bytearray(thumb_pic_image(0x2100))
+            struct.pack_into("<H", raw, offset, word)
+            self.assertEqual(target.audit(bytes(raw), [("factory", "thumb", 0x1100, 10)])["code_ranges"][0]["pic_clues"], [])
+        raw = bytearray(thumb_pic_image(0x2100, start=0x1102))
+        struct.pack_into("<H", raw, 0x100, 0xbf08)
+        self.assertEqual(target.audit(bytes(raw), [("factory", "thumb", 0x1100, 12)])["code_ranges"][0]["pic_clues"], [])
+
+    def test_thumb_pic_relocated_halfword_and_truncation(self):
+        raw = bytearray(thumb_pic_image(0x2100, start=0x1102))
+        struct.pack_into("<I", raw, 0x20c, 32)
+        struct.pack_into("<II", raw, 0x418, 0x1100, 23)
+        self.assertEqual(target.audit(bytes(raw), [("factory", "thumb", 0x1102, 10)])["code_ranges"][0]["pic_clues"], [])
+        self.assertEqual(target.audit(thumb_pic_image(0x2100), [("factory", "thumb", 0x1100, 8)])["code_ranges"][0]["pic_clues"], [])
+
+    def test_thumb_pic_wrong_load_forms(self):
+        for op in ((0xf8d1, 0x1000), (0xf850, 0x1f00), (0xf8d0, 0xf000)):
+            raw = thumb_pic_image(0x1180, load=op)
+            self.assertEqual(target.audit(raw, [("factory", "thumb", 0x1100, 14)])["code_ranges"][0]["pic_clues"], [])
 
 
 if __name__ == "__main__":
