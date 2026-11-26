@@ -143,3 +143,54 @@ class LoopFlowTests(unittest.TestCase):
         r = ThumbFlowTests().run_flow([0xf240, 0, 0xe7fd])
         self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
         self.assertEqual(r['events'], [])
+
+
+class StackFlowTests(unittest.TestCase):
+    def test_arm_push_pop_alias(self):
+        r = run([0xe3000070, 0xe3400000, 0xe08f0000, 0xe92d0001, 0xe3000000,
+                 0xe8bd0004, 0xe5921000, 0xe12fff1e])
+        self.assertEqual(r['events'][0]['slot_va'], 0x1180)
+        self.assertEqual(r['events'][0]['register'], 'r1')
+
+    def test_arm_local_slot(self):
+        r = run([0xe3000070, 0xe3400000, 0xe08f0000, 0xe24dd008, 0xe58d0004,
+                 0xe3000000, 0xe59d2004, 0xe5921000, 0xe28dd008, 0xe12fff1e])
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
+        self.assertEqual(r['boundaries'], [])
+
+    def test_thumb_push_pop_alias_and_return(self):
+        r = ThumbFlowTests().run_flow([0xf240, 0x0074, 0xf2c0, 0, 0x4478,
+                                       0xb501, 0xf240, 0, 0xbc04, 0x6811, 0xbd00])
+        self.assertEqual(r['events'][0]['slot_va'], 0x1180)
+        self.assertEqual(r['boundaries'], [])
+
+    def test_thumb_stack_local_wide_load(self):
+        r = ThumbFlowTests().run_flow([0xf240, 0x0074, 0xf2c0, 0, 0x4478,
+                                       0xb082, 0x9001, 0xf240, 0, 0xf8dd, 0x2004,
+                                       0x6811, 0xb002, 0x4770])
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
+        self.assertEqual(r['boundaries'], [])
+
+    def test_stack_depth_conflict(self):
+        r = run([0x0a000000, 0xe24dd004, 0xe320f000, 0xe12fff1e])
+        self.assertEqual(r['events'], [])
+        self.assertEqual(r['boundaries'][0]['reason'], 'ambiguous_stack_depth')
+
+    def test_deallocated_slot_not_reused(self):
+        r = run([0xe3000070, 0xe3400000, 0xe08f0000, 0xe24dd004, 0xe58d0000,
+                 0xe28dd004, 0xe24dd004, 0xe59d2000, 0xe5921000, 0xe28dd004, 0xe12fff1e])
+        self.assertEqual(r['events'], [])
+        self.assertEqual(r['boundaries'], [])
+
+    def test_invalid_stack_access_and_unbalanced_return(self):
+        for words in ([0xe59d0000, 0xe12fff1e], [0xe24dd004, 0xe58d0002, 0xe12fff1e],
+                      [0xe24dd004, 0xe12fff1e], [0xe24ddf80, 0xe12fff1e]):
+            with self.subTest(words=words):
+                r = run(words)
+                self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+                self.assertEqual(r['events'], [])
+
+    def test_unverified_pop_pc(self):
+        for r in (run([0xe92d0001, 0xe8bd8000]), ThumbFlowTests().run_flow([0xb401, 0xbd00])):
+            self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+            self.assertEqual(r['events'], [])
