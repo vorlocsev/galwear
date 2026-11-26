@@ -952,3 +952,90 @@ class AddressAluTests(unittest.TestCase):
         self.assertEqual(r['events'], [{'address': 0x1104, 'register': 'r0', 'table_va': 0x2100,
                                        'kind': 'DERIVED_TABLE_ADDRESS'}])
         self.assertEqual(r['leaf_summary']['r0'], ('address', 0x2100))
+
+
+class CallbackFlowTests(unittest.TestCase):
+    def evaluate(self, *, thumb=False, target_thumb=False, enabled=True, ranges=None, replacement=None):
+        raw = bytearray(pic_image(0x2100))
+        struct.pack_into('<II', raw, 0x304, 0x11c1 if target_thumb else 0x11c0, 0x11e1)
+        if thumb:
+            words = [0xf640, 0x70f4, 0xf2c0, 0, 0x4478, 0xb510, 0x6843, 0x4798, 0xbd10]
+            if replacement is not None:
+                words[6] = replacement
+            struct.pack_into('<' + 'H'*len(words), raw, 0x100, *words)
+        else:
+            words = [0xe3000ff0, 0xe3400000, 0xe08f0000, 0xe92d4010, 0xe5903004, 0xe12fff33, 0xe8bd8010]
+            if replacement is not None:
+                words[4] = replacement
+            struct.pack_into('<' + 'I'*len(words), raw, 0x100, *words)
+        if target_thumb:
+            struct.pack_into('<H', raw, 0x1c0, 0x4770)
+        else:
+            struct.pack_into('<I', raw, 0x1c0, 0xe12fff1e)
+        if ranges is None:
+            ranges = [('thumb' if target_thumb else 'arm', 0x11c0, 2 if target_thumb else 4)]
+        return audit(bytes(raw), [('factory', 'thumb' if thumb else 'arm', 0x1100, len(words)*(2 if thumb else 4))],
+                     assume_aapcs=True, callee_ranges=ranges, callback_calls=enabled)
+
+    def test_arm_thumb_callback_interworking(self):
+        for thumb in (False, True):
+            for target_thumb in (False, True):
+                with self.subTest(thumb=thumb, target_thumb=target_thumb):
+                    report = self.evaluate(thumb=thumb, target_thumb=target_thumb)
+                    flow = report['code_ranges'][0]['pic_flow']
+                    self.assertEqual(flow['boundaries'], [])
+                    self.assertEqual(flow['events'][-1]['kind'], 'RELOCATED_CALLBACK_LOAD')
+                    self.assertEqual(flow['events'][-1]['slot_va'], 0x2104)
+                    call = flow['assumed_calls'][0]
+                    self.assertEqual(call['instruction'], 'BLX_REG')
+                    self.assertEqual(call['target_isa'], 'thumb' if target_thumb else 'arm')
+                    self.assertEqual(call['modeled_return_r0'], ('address', 0x2100))
+                    self.assertTrue(call['callee_analyzed'])
+                    self.assertFalse(report['callback_identity_verified'])
+                    self.assertFalse(report['safe_to_flash'])
+
+    def test_disabled_callback_mode(self):
+        report = self.evaluate(enabled=False)
+        self.assertEqual(report['callback_slot_count'], 0)
+        self.assertEqual(report['code_ranges'][0]['pic_flow']['assumed_calls'], [])
+
+    def test_unlisted_target_rejected(self):
+        r = self.evaluate(ranges=[('thumb', 0x11e0, 2)])['code_ranges'][0]['pic_flow']
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+        self.assertEqual(r['assumed_calls'], [])
+
+    def test_constant_is_not_callback(self):
+        for thumb, op in ((False, 0xe30131c0), (True, 0x23c0)):
+            r = self.evaluate(thumb=thumb, replacement=op)['code_ranges'][0]['pic_flow']
+            self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+            self.assertEqual(r['assumed_calls'], [])
+
+    def test_memory_invalidated_or_ambiguous(self):
+        from r800_gps_pic_flow import load_fact
+        callbacks = {0x2104: {'table_va': 0x2100, 'field': 'init', 'target_va': 0x11c0, 'isa': 'arm'}}
+        for state, direct in (({3: ('constant', 1)}, {}), ({'memory_unchanged': True}, {0x2104: {'table_va': 0x2100}})):
+            events = []
+            load_fact(state, 3, 0x2104, 0x1100, direct, callbacks, events, 'RELOCATED_TABLE_LOAD')
+            self.assertNotIn(3, state)
+            self.assertEqual(events, [])
+
+    def test_callback_slot_duplicate_and_symbolic_excluded(self):
+        from r800_gps_pic_flow import callback_slots
+        e = {'slot_va': 0x2104, 'field': 'init', 'target_va': 0x11c0, 'isa': 'arm', 'status': 'RELATIVE_EXECUTABLE_CANDIDATE'}
+        a = {'table_va': 0x2100, 'entries': [e]}
+        b = {'table_va': 0x20fc, 'entries': [{**e, 'status': 'SYMBOLIC_EXECUTABLE_CANDIDATE'}]}
+        self.assertEqual(callback_slots({0: a, 1: b}), {})
+        self.assertEqual(callback_slots({0: b}), {})
+
+    def test_callback_mode_requires_ranges(self):
+        raw = pic_image(0x2100)
+        for kwargs in ({}, {'assume_aapcs': True}):
+            with self.assertRaises(ValueError):
+                audit(raw, callback_calls=True, **kwargs)
+
+    def test_register_blx_never_uses_opaque_summary(self):
+        from r800_gps_pic_flow import assumed_call
+        state = {'sp': 0, 3: ('callback', 0x11c0)}
+        self.assertIsNone(assumed_call(state, (0x11c0, 'arm', 'BLX_REG'), 0x1100,
+                                       0x1100, 0x1120, lambda *args: (0, 5)))
+        self.assertEqual(state[3], ('callback', 0x11c0))
