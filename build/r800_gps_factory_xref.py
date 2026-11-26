@@ -125,7 +125,7 @@ def checked_range(mapping, index, value, size, info, other, section, kind, versi
         raise ValueError("Factory range not executable and nonwritable")
     return {"symbol_index": index, "symbol_name": FACTORY.decode(), "isa": isa,
             "start_va": start, "size": size, "hash_kind": kind,
-            "symbol_version": version, "default_visible_candidate": True}
+            "symbol_version": version, "default_visible_candidate": True, "section_index": section}
 
 
 def factory_range(raw):
@@ -193,7 +193,7 @@ def factory_range(raw):
     return checked_range(mapping, index, value, size, info, other, section, "SYSV", None)
 
 
-def static_function_spans(raw, mapping, dynamic_keys):
+def static_function_spans(raw, mapping, dynamic_keys, markers=None):
     """Optional section-backed local functions; exact dynsym duplicates are ignored."""
     shoff, = struct.unpack_from("<I", raw, 32)
     entsize, count, names = struct.unpack_from("<HHH", raw, 46)
@@ -223,6 +223,30 @@ def static_function_spans(raw, mapping, dynamic_keys):
         name, value, extent, info, other, section = struct.unpack_from("<IIIBBH", raw, off+16*i)
         if (info >> 4 == 0) != (i < local_end):
             raise ValueError("Invalid static symbol binding partition")
+        if markers is not None and name < ss:
+            stop = strings.find(b"\0", name, min(ss, name + 4096))
+            label = strings[name:stop] if stop >= 0 else b""
+            if label[:2] in (b"$a", b"$t", b"$d") and (len(label) == 2 or label[2:3] == b"." and len(label) > 3):
+                if info != 0 or other != 0 or extent != 0 or not 0 < section < count:
+                    raise ValueError("Invalid ARM mapping symbol")
+                _, typ, flags, addr, fileoff, length, *_ = sections[section]
+                mode = {b"$a": "arm", b"$t": "thumb", b"$d": "data"}[label[:2]]
+                if mode == "data" and not flags & 4:
+                    continue  # Non-code section data is outside this audit.
+                align = {"arm": 4, "thumb": 2, "data": 1}[mode]
+                if (typ != 1 or flags & 7 != 6 or not addr <= value < addr + length
+                        or addr + length > 2**32 or value % align or fileoff + length > len(raw)):
+                    raise ValueError("Mapping symbol outside valid executable section")
+                if section not in markers:
+                    mapped, pf = mapping(addr, length)
+                    if mapped != fileoff or not pf & 1 or pf & 2:
+                        raise ValueError("Mapping symbol section not consistently file-backed")
+                    markers[section] = (addr, addr + length, {})
+                entries = markers[section][2]
+                if value in entries and entries[value] != mode:
+                    raise ValueError("Conflicting ARM mapping symbols")
+                entries[value] = mode
+                continue
         if info & 15 not in (2, 10) or not value or not 0 < section < 0xff00:
             continue
         if section >= count or name >= ss:
@@ -256,7 +280,23 @@ def static_function_spans(raw, mapping, dynamic_keys):
     return spans
 
 
-def automatic_callees(raw, factory, depth, *, static_symbols=False):
+def require_mapped_code(row, markers):
+    """Strict opt-in: the complete declared range must have one matching ISA."""
+    from bisect import bisect_right
+    section = markers.get(row["section_index"])
+    start, end = row["start_va"], row["start_va"] + row["size"]
+    if section is None or not section[0] <= start < end <= section[1]:
+        raise ValueError("Missing ARM mapping coverage for function range")
+    entries = section[2]
+    addresses = sorted(entries)
+    first = bisect_right(addresses, start) - 1
+    last = bisect_right(addresses, end - 1)
+    if first < 0 or any(entries[a] != row["isa"] for a in addresses[first:last]):
+        raise ValueError("ARM mapping range contains data, unknown mode or mismatched ISA")
+    row["mapping_symbol_coverage"] = "UNIFORM_ISA_METADATA_ONLY"
+
+
+def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symbols=False):
     """Find nonpreemptible dynamic function ranges at direct call candidates."""
     from r800_gps_pic_flow import arm_call, thumb_call
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
@@ -314,14 +354,17 @@ def automatic_callees(raw, factory, depth, *, static_symbols=False):
                 row = {"symbol_index": i, "symbol_name": strings[name:stop].decode("utf-8", "replace"),
                        "isa": isa, "start_va": start, "size": size,
                        "version_index": version_index, "symbol_version": definitions.get(version_index),
-                       "version_hidden": hidden}
+                       "version_hidden": hidden, "section_index": section}
         if static_symbols and name < len(strings):
             stop = strings.find(b"\0", name, min(len(strings), name + 256))
             if stop >= 0:
                 dynamic_keys.add((value, size, info, other, section, strings[name:stop]))
         spans.append((start, end, i, row))
+    markers = {} if mapping_symbols else None
     if static_symbols:
-        spans.extend(static_function_spans(raw, mapping, dynamic_keys))
+        spans.extend(static_function_spans(raw, mapping, dynamic_keys, markers))
+    if mapping_symbols:
+        require_mapped_code(factory, markers)
     spans.sort(key=lambda s: (s[0], s[1], s[2]))
     candidates = {}
     previous_end = 0
@@ -360,23 +403,27 @@ def automatic_callees(raw, factory, depth, *, static_symbols=False):
             if entry in candidates and entry not in selected:
                 if len(selected) >= 16:
                     raise ValueError("Automatic callee range budget exceeded")
+                if mapping_symbols:
+                    require_mapped_code(candidates[entry], markers)
                 selected[entry] = candidates[entry]
                 pending.append((candidates[entry], level + 1))
     return list(selected.values())
 
 
-def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False):
+def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False, mapping_symbols=False):
     symbol = factory_range(raw)
     if type(callee_depth) is not int or not 1 <= callee_depth <= 4 or (callee_depth != 1 and not auto_callees):
         raise ValueError("Callee depth requires automatic mode and must be between 1 and 4")
     if static_symbols and not auto_callees:
         raise ValueError("Static symbol mode requires automatic callee mode")
-    callees = automatic_callees(raw, symbol, callee_depth, static_symbols=static_symbols) if auto_callees else []
+    if mapping_symbols and not static_symbols:
+        raise ValueError("Mapping symbol mode requires static symbols")
+    callees = automatic_callees(raw, symbol, callee_depth, static_symbols=static_symbols, mapping_symbols=mapping_symbols) if auto_callees else []
     report = xref(raw, [("factory", symbol["isa"], symbol["start_va"], symbol["size"])],
                   assume_aapcs=auto_callees, callee_ranges=[(r["isa"], r["start_va"], r["size"]) for r in callees],
                   callee_depth=callee_depth if callees else 1)
     report.update(auto_callee_mode=auto_callees, auto_callee_candidates=callees,
-                  requested_callee_depth=callee_depth, static_symbol_mode=static_symbols, callee_discovery_complete=False)
+                  requested_callee_depth=callee_depth, static_symbol_mode=static_symbols, mapping_symbol_mode=mapping_symbols, callee_discovery_complete=False)
     report.update(schema="galwear-r800-gps-factory-xref-v1", factory_symbol=symbol,
                   symbol_range_from_metadata=True, function_boundaries_verified=False,
                   factory_signature_verified=False)
@@ -390,9 +437,10 @@ def main():
     parser.add_argument("--auto-callees", action="store_true", help="Discover bounded direct-call symbol candidates")
     parser.add_argument("--callee-depth", type=int, default=1)
     parser.add_argument("--static-symbols", action="store_true", help="Include section-backed local function symbols")
+    parser.add_argument("--mapping-symbols", action="store_true", help="Require uniform ARM/Thumb mapping metadata for every analyzed range")
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth, static_symbols=args.static_symbols)
+        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth, static_symbols=args.static_symbols, mapping_symbols=args.mapping_symbols)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc),
                   "selected_abi": None, "safe_to_flash": False}
