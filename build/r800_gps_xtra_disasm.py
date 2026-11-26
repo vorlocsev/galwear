@@ -22,7 +22,11 @@ FIELD = re.compile(r"^(" + REG + r"),\s*\[(" + REG +
                    r")(?:,\s*#(0x[0-9a-f]+|[0-9]+))?\]$")
 
 
-STACK_WORD = re.compile(r"^(" + REG + r"),\s*\[sp(?:,\s*#(0x[0-9a-f]+|[0-9]+))?\]$")
+STACK_WORD = re.compile(r"^(" + REG + r"),\s*\[(sp|" + REG +
+                        r")(?:,\s*#(-?(?:0x[0-9a-f]+|[0-9]+)))?\]$")
+FRAME_MOVE = re.compile(r"^(r7|r11),\s*sp$")
+FRAME_RESTORE = re.compile(r"^sp,\s*(" + REG + r")$")
+FRAME_ADJUST = re.compile(r"^(r7|r11),\s*sp,\s*#(0x[0-9a-f]+|[0-9]+)$")
 STACK_ADJUST = re.compile(r"^sp,\s*(?:sp,\s*)?#(0x[0-9a-f]+|[0-9]+)$")
 STACK_LIMIT = 4096
 
@@ -52,7 +56,7 @@ def register_list(operands):
 
 
 def immediate_value(value):
-    return int(value, 16 if value.startswith("0x") else 10)
+    return int(value, 16 if value.lstrip("-").startswith("0x") else 10)
 
 
 def trace_prefix(lines, entry):
@@ -63,6 +67,20 @@ def trace_prefix(lines, entry):
     slots = {}
     previous = None
     reason = "end_of_function"
+
+    def adjust_stack(new_sp):
+        nonlocal sp
+        # Do not reuse data or frame aliases into a released stack region.
+        for pos in list(slots):
+            if min(sp, new_sp) <= pos < max(sp, new_sp):
+                del slots[pos]
+        if new_sp > sp:
+            for mapping in (regs, slots):
+                for key, value in list(mapping.items()):
+                    if value is not None and value[0] == "stack" and value[1] < new_sp:
+                        del mapping[key]
+        sp = new_sp
+
     for line in lines:
         if not line.strip():
             continue
@@ -78,6 +96,7 @@ def trace_prefix(lines, entry):
             break
         previous = address
         operands = operands.split("@", 1)[0].split(";", 1)[0].strip().lower()
+        operands = re.sub(r"\bfp\b", "r11", operands)
         if mnemonic in ("push", "push.w", "push.n", "pop", "pop.w", "pop.n"):
             names = register_list(operands)
             if names is None:
@@ -100,9 +119,19 @@ def trace_prefix(lines, entry):
                     regs.pop(name, None)
                     if value is not None:
                         regs[name] = value
-                sp += size
+                adjust_stack(sp + size)
         elif mnemonic in ("sub", "sub.w", "sub.n", "add", "add.w", "add.n"):
             adjust = STACK_ADJUST.fullmatch(operands)
+            frame = FRAME_ADJUST.fullmatch(operands)
+            if frame is not None:
+                dest, immediate = frame.groups()
+                size = immediate_value(immediate)
+                pos = sp + (-size if mnemonic.startswith("sub") else size)
+                if pos % 4 or not sp <= pos <= 0:
+                    reason = "stack_bounds"
+                    break
+                regs[dest] = ("stack", pos, None)
+                continue
             if adjust is None:
                 reason = "unsupported_instruction_or_control_flow"
                 break
@@ -111,14 +140,13 @@ def trace_prefix(lines, entry):
             if size % 4 or not -STACK_LIMIT <= new_sp <= 0:
                 reason = "stack_bounds"
                 break
-            # Neither newly allocated nor released slots retain provenance.
-            for pos in list(slots):
-                if min(sp, new_sp) <= pos < max(sp, new_sp):
-                    del slots[pos]
-            sp = new_sp
-        elif mnemonic in ("str", "str.w", "str.n", "ldr", "ldr.w", "ldr.n") and STACK_WORD.fullmatch(operands):
-            name, immediate = STACK_WORD.fullmatch(operands).groups()
-            pos = sp + immediate_value(immediate or "0")
+            adjust_stack(new_sp)
+        elif (mnemonic in ("str", "str.w", "str.n", "ldr", "ldr.w", "ldr.n")
+              and (access := STACK_WORD.fullmatch(operands)) is not None
+              and (access[2] == "sp" or regs.get(access[2], (None,))[0] == "stack")):
+            name, base, immediate = access.groups()
+            base_pos = sp if base == "sp" else regs[base][1]
+            pos = base_pos + immediate_value(immediate or "0")
             if pos % 4 or not sp <= pos <= -4:
                 reason = "stack_bounds"
                 break
@@ -130,6 +158,21 @@ def trace_prefix(lines, entry):
                 if value is not None:
                     regs[name] = value
         elif mnemonic in ("mov", "mov.w", "mov.n", "movs"):
+            frame = FRAME_MOVE.fullmatch(operands)
+            restore = FRAME_RESTORE.fullmatch(operands)
+            if mnemonic != "movs" and frame is not None:
+                regs[frame[1]] = ("stack", sp, None)
+                continue
+            if mnemonic != "movs" and restore is not None:
+                value = regs.get(restore[1])
+                if value is None or value[0] != "stack":
+                    reason = "unsupported_move"
+                    break
+                if not sp <= value[1] <= 0:
+                    reason = "stack_bounds"
+                    break
+                adjust_stack(value[1])
+                continue
             move = MOVE.fullmatch(operands)
             if move is None:
                 reason = "unsupported_move"
