@@ -19,6 +19,7 @@ from r800_tzlite_audit import TARGETS, PROGRAMS, check, closure_problems
 from r800_tzlite_manifest import verify, inventory
 from r800_tzlite_image_metadata import inspect_metadata
 from r800_tzlite_dac import identity_candidates, summarize
+from r800_tzlite_metadata_compare import staged_metadata, compare_access
 
 
 def config_hashes(resolver):
@@ -98,12 +99,15 @@ def compare(root,image,image_sha,manifest_sha):
         principal=identity_candidates(candidate["configuration_evidence"]["location_account_candidates"])
         original_metadata=inspect_metadata(resolver,expected_files,principal)
         dac=summarize(original_metadata["entries"],closure,configs,PROGRAMS,principal,resolver.traces)
+        staged_permissions=staged_metadata(root,before_tree,principal)
+        permission_comparison=compare_access(original_metadata["entries"],staged_permissions,dac,closure)
         st=image.lstat()
         if (st.st_dev,st.st_ino,st.st_mode,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=identity:
             raise ValueError("Donor image changed")
         if image_info(snapshot)!=before:
             raise ValueError("Donor snapshot changed")
-        if verify(root,manifest_sha)!=before_manifest or inventory(root)!=before_tree:
+        if (verify(root,manifest_sha)!=before_manifest or inventory(root)!=before_tree
+                or staged_metadata(root,before_tree,principal)!=staged_permissions):
             raise ValueError("Candidate changed during image audit")
         return {"schema":"r800-tzlite-image-binding-v1",
                 "status":"REVIEW_REQUIRED" if problems else "STATIC_IMAGE_COMPONENT_MATCH_ONLY",
@@ -113,6 +117,7 @@ def compare(root,image,image_sha,manifest_sha):
                 "alias_count":len(expected_aliases),
                 "original_metadata":original_metadata,
                 "dac_candidates":dac,
+                "permission_comparison":permission_comparison,
                 "donor_authenticity_verified":False,"original_ownership_verified":False,
                 "runtime_verified":False,"safe_to_flash":False}
 

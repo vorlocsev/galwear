@@ -185,6 +185,11 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual((self.output/"usr/bin/lhd").stat().st_mode&0o7777,0o755)
         self.assertFalse(result["original_ownership_verified"])
         self.assertFalse(meta["effective_access_verified"])
+        comparison=result["permission_comparison"]
+        differences=comparison["metadata_differences"]["/usr/bin/lhd"]["fields"]
+        self.assertEqual(differences["mode"],{"original":"0o4755","staged":"0o755"})
+        self.assertEqual(differences["uid"]["original"],12345)
+        self.assertFalse(comparison["permission_changes_applied"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 
     def test_original_xattr_inventory_not_restored(self):
