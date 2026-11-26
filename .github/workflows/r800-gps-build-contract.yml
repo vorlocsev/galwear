@@ -1,0 +1,36 @@
+name: R800 GPS builder contract (NON-RELEASE)
+
+on:
+  push:
+    branches:
+      - development/r800-gps-glibc-closure-20261125
+    paths:
+      - .github/workflows/r800-gps-build-contract.yml
+      - src/tools/gps/build.sh
+      - tests/test_r800_gps_build.py
+      - build/r800_gps_link_gate.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Record exact checkout and scope
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git log -1 --format='%H'
+          git hash-object src/tools/gps/build.sh tests/test_r800_gps_build.py
+          echo "HOST-ONLY synthetic contract; safe_to_flash=false"
+      - name: Shell and Python syntax
+        run: |
+          sh -n src/tools/gps/build.sh
+          python3 -m py_compile tests/test_r800_gps_build.py
+      - name: Synthetic builder regression tests
+        run: python3 -m unittest discover -s tests -p test_r800_gps_build.py -v
