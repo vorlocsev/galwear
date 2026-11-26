@@ -59,12 +59,7 @@ done
     "$OUT/limits.o" "$OUT/mixer.o" "$OUT/pcm.o" "$OUT/pcm_plugin.o" \
     "$OUT/pcm_hw.o" "$OUT/snd_card_plugin.o" "$OUT/mixer_plugin.o" "$OUT/mixer_hw.o"
 "$TC/llvm-nm" --defined-only "$OUT/libtinyalsa-r800.a" > "$OUT/tinyalsa-symbols.txt"
-grep -Eq '[[:space:]][Tt][[:space:]]snd_utils_close_dev_node
-build audio_r800.c audio.primary.r800.so -I "$TINY/include" \
-    "$OUT/libtinyalsa-r800.a" -Wl,--exclude-libs,ALL
-echo "NON-RELEASE ARM32 HAL compilation only; PCM runtime untested."
-echo "No HAL executed, no device contact, no firmware published."
- "$OUT/tinyalsa-symbols.txt"
+grep -Eq '[[:space:]][Tt][[:space:]]snd_utils_close_dev_node$' "$OUT/tinyalsa-symbols.txt"
 build audio_r800.c audio.primary.r800.so -I "$TINY/include" \
     "$OUT/libtinyalsa-r800.a" -Wl,--exclude-libs,ALL
 echo "NON-RELEASE ARM32 HAL compilation only; PCM runtime untested."
