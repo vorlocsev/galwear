@@ -14,7 +14,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Record exact checkout
+        run: |
+          set -eu
+          evidence="$RUNNER_TEMP/r800-integrated-evidence"
+          mkdir -m 700 "$evidence"
+          git rev-parse HEAD > "$evidence/checkout-sha.txt"
+          test "$(cat "$evidence/checkout-sha.txt")" = "$GITHUB_SHA"
+          test "$GITHUB_REF_NAME" != main
+          python3 --version > "$evidence/python-version.txt"
       - name: Python syntax validation
         run: python3 -m compileall -q installer build tests
       - name: Vendor assembly syntax (no mounts)
@@ -42,8 +53,25 @@ jobs:
           test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
           command -v magick || command -v convert
       - name: Complete synthetic test suite (no device, no external firmware)
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+        id: integrated
+        shell: bash
+        run: |
+          set -eo pipefail
+          evidence="$RUNNER_TEMP/r800-integrated-evidence"
+          rc=0
+          python3 -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee "$evidence/unittest.log" || rc=$?
+          printf '%s\n' "$rc" > "$evidence/unittest-exit-code.txt"
+          exit "$rc"
       - name: Ensure root has not been touched
         run: |
           test "$(git rev-parse --abbrev-ref HEAD)" != "main"
           git status --porcelain
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Preserve integrated validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-integrated-offline-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/r800-integrated-evidence/
+          if-no-files-found: error
+          retention-days: 14
