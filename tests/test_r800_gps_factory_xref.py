@@ -175,6 +175,42 @@ def call_fixture(*, second_thumb=False, first_info=0x12, first_other=2,
     return bytes(raw)
 
 
+def extended_call_fixture(*, gnu=False, both=False, version=None):
+    raw = bytearray(call_fixture(first_other=3))
+    # Local symbol first, then protected first callee and visible factory.
+    a, b = raw[0x4d0:0x4e0], raw[0x4f0:0x500]
+    raw[0x4d0:0x4e0], raw[0x4f0:0x500] = b, a
+    struct.pack_into("<I", raw, 0x448, 3)
+    tags = [(17, 0x2200), (18, 24), (19, 8), (5, 0x2280), (6, 0x22c0), (11, 16)]
+    strings = b"\0" + target.FACTORY + b"\0first\0second\0"
+    if not gnu or both:
+        tags.append((4, 0x2240))
+    if gnu:
+        tags.append((0x6ffffef5, 0x2320))
+        hashes = []
+        bloom = 0
+        for name in (b"first", target.FACTORY):
+            h = 5381
+            for byte in name:
+                h = (h * 33 + byte) & 0xffffffff
+            hashes.append(h)
+            bloom |= (1 << (h % 32)) | (1 << ((h >> 5) % 32))
+        struct.pack_into("<8I", raw, 0x520, 1, 2, 1, 5, bloom, 2, hashes[0] & ~1, hashes[1] | 1)
+    if version is not None:
+        index = len(strings)
+        strings += b"GPS_1.0\0"
+        tags += [(0x6ffffff0, 0x2340), (0x6ffffffc, 0x2350), (0x6ffffffd, 1)]
+        struct.pack_into("<4H", raw, 0x540, 0, 0, version, 2)
+        struct.pack_into("<HHHHIII", raw, 0x550, 1, 0, 2, 1, target.elf_hash(b"GPS_1.0"), 20, 0)
+        struct.pack_into("<II", raw, 0x564, index, 0)
+    tags += [(10, len(strings)), (0, 0)]
+    raw[0x200:0x280] = bytes(0x80)
+    for i, pair in enumerate(tags):
+        struct.pack_into("<II", raw, 0x200 + 8*i, *pair)
+    raw[0x480:0x480 + len(strings)] = strings
+    return bytes(raw)
+
+
 class AutomaticCalleeTests(unittest.TestCase):
     def test_opt_in_and_depth(self):
         raw = call_fixture()
@@ -209,10 +245,45 @@ class AutomaticCalleeTests(unittest.TestCase):
         report = target.audit(call_fixture(relocated=True), auto_callees=True, callee_depth=2)
         self.assertEqual(report["auto_callee_candidates"], [])
 
-    def test_unsupported_hash_and_version_modes(self):
+    def test_extended_inventory_without_callees(self):
         for raw in (gnu_fixture(), gnu_fixture(True), version_fixture()):
-            with self.subTest(raw=raw[0x218:0x220]), self.assertRaisesRegex(ValueError, "unversioned SYSV"):
-                target.audit(raw, auto_callees=True)
+            with self.subTest(raw=raw[0x218:0x220]):
+                report = target.audit(raw, auto_callees=True)
+                self.assertEqual(report["auto_callee_candidates"], [])
+
+    def test_gnu_and_dual_auto_callees(self):
+        for both in (False, True):
+            report = target.audit(extended_call_fixture(gnu=True, both=both), auto_callees=True, callee_depth=2)
+            self.assertEqual([r["symbol_name"] for r in report["auto_callee_candidates"]], ["first", "second"])
+            self.assertEqual(report["code_ranges"][0]["pic_flow"]["events"][0]["table_va"], 0x2100)
+
+    def test_versioned_callee_hidden_and_default(self):
+        for hidden in (False, True):
+            report = target.audit(extended_call_fixture(gnu=True, version=0x8002 if hidden else 2), auto_callees=True, callee_depth=2)
+            first = report["auto_callee_candidates"][0]
+            self.assertEqual(first["symbol_version"], "GPS_1.0")
+            self.assertEqual(first["version_hidden"], hidden)
+            self.assertEqual(len(report["code_ranges"][0]["pic_flow"]["events"]), 1)
+
+    def test_version_invalid_local_and_nonlocal(self):
+        for version in (0, 0x8001):
+            report = target.audit(extended_call_fixture(version=version), auto_callees=True, callee_depth=2)
+            self.assertEqual(report["auto_callee_candidates"], [])
+        raw = bytearray(extended_call_fixture(version=2))
+        struct.pack_into("<H", raw, 0x542, 1)
+        report = target.audit(bytes(raw), auto_callees=True, callee_depth=2)
+        self.assertEqual([r["symbol_name"] for r in report["auto_callee_candidates"]], ["first"])
+        self.assertEqual(report["code_ranges"][0]["pic_flow"]["events"], [])
+
+    def test_unknown_version_and_corrupt_gnu_rejected(self):
+        raw = bytearray(extended_call_fixture(version=2))
+        struct.pack_into("<H", raw, 0x544, 3)
+        with self.assertRaises(ValueError):
+            target.audit(bytes(raw), auto_callees=True)
+        raw = bytearray(extended_call_fixture(gnu=True))
+        struct.pack_into("<I", raw, 0x530, 0)
+        with self.assertRaises(ValueError):
+            target.audit(bytes(raw), auto_callees=True)
 
     def test_depth_validation(self):
         for depth in (0, 5, True):
