@@ -62,7 +62,8 @@ for stage in 0 1 2 3 4 5 6; do
             else
                 RECOVERY=$ROOT/build/r800_gps_mock_recovery.py
                 timeout -k 2s 35s python3 "$RECOVERY" drive --stage "$stage" \
-                    --socket "$TMP/daemon-runtime-$stage/gps.sock" --log "$TMP/daemon.log"
+                    --socket "$TMP/daemon-runtime-$stage/gps.sock" --log "$TMP/daemon.log" \
+                    --launcher-pid "$daemon_pid" --qemu "$QEMU"
                 if [ "$stage" = 5 ]; then
                     # 0 denotes successful client drive with daemon still alive.
                     kill -0 "$daemon_pid"
