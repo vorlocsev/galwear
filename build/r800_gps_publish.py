@@ -19,6 +19,7 @@ def publish(binary, report_path, manifest_path, output, evidence=None):
     if evidence is not None:
         evidence["audit_sha256"] = hashlib.sha256(report_raw).hexdigest()
         evidence["donor_manifest_sha256"] = hashlib.sha256(manifest_raw).hexdigest()
+        evidence["donor_sha256"] = report["donor_sha256"]
     if (report["status"] != "STATIC_GLIBC_CLOSURE_ONLY"
             or report["static_closure_pass"] is not True
             or report["safe_to_flash"] is not False
