@@ -9,7 +9,7 @@ trap 'exit 1' HUP INT TERM
 export PYTHONDONTWRITEBYTECODE=1
 cc --version
 clang --version
-for test in frame command lto output wire nmea ipc interface standalone daemon shutdown callback epoch protocol; do
+for test in frame command lto output wire nmea ipc interface standalone daemon shutdown callback epoch protocol server_v2; do
     standard=c11
     case "$test" in ipc|interface|shutdown) standard=gnu11;; esac
     cc -std="$standard" -O2 -Wall -Wextra -Werror -UNDEBUG \
