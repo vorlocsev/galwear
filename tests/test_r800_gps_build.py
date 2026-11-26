@@ -1,0 +1,144 @@
+"""Host-only shell contract tests: fake NDK and gate, no ARM execution."""
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'src/tools/gps/build.sh'
+LIBS = ('libc.so.6', 'libdl.so.2', 'libpthread.so.0', 'ld-linux.so.3')
+
+READ_ELF = '''#!/usr/bin/env python3
+import sys
+from pathlib import Path
+p = Path(sys.argv[-1])
+kind = p.read_text()
+if kind != 'bridge':
+    assert p.parent.name == 'libs', 'readelf must inspect the snapshot'
+print('Class: ' + ('ELF64' if kind == 'wide' else 'ELF32'))
+print('Data: ' + ('big endian' if kind == 'big' else 'little endian'))
+print('Machine: ' + ('AArch64' if kind == 'foreign' else 'ARM'))
+print('Type: ' + ('EXEC' if kind == 'exec' else 'DYN (Shared object file)'))
+print('/lib/ld-linux.so.3')
+if kind == 'broken':
+    sys.exit(1)
+'''
+CLANG = '''#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+Path(os.environ['TEST_MARKER']).touch()
+Path(sys.argv[sys.argv.index('-o') + 1]).write_text('bridge')
+'''
+GATE = '''import os, sys
+from pathlib import Path
+mode = os.environ['TEST_MODE']
+out = Path(os.environ['TEST_OUT'])
+if mode == 'reject':
+    sys.exit(2)
+if mode == 'mutate':
+    (Path(sys.argv[sys.argv.index('--libdir') + 1]) / 'libc.so.6').write_text('changed')
+if mode == 'directory':
+    out.mkdir()
+if mode == 'symlink':
+    out.symlink_to(out.parent, target_is_directory=True)
+if mode == 'file':
+    out.write_text('competitor')
+'''
+
+
+class BuildContract(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.script = self.root / 'src/tools/gps/build.sh'
+        self.script.parent.mkdir(parents=True)
+        shutil.copyfile(SCRIPT, self.script)
+        self.ndk = self.root / 'ndk'
+        tc = self.ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
+        tc.mkdir(parents=True)
+        (self.ndk / 'source.properties').write_text('Pkg.Revision = 27.2.12479018\n')
+        for name, body in [('llvm-readelf', READ_ELF), ('clang', CLANG)]:
+            path = tc / name
+            path.write_text(body)
+            path.chmod(0o755)
+        (self.root / 'build').mkdir()
+        (self.root / 'build/r800_gps_link_gate.py').write_text(GATE)
+        self.libs = self.root / 'donor'
+        self.libs.mkdir()
+        for name in LIBS:
+            (self.libs / name).write_text('valid')
+        self.out = self.root / 'output'
+        self.marker = self.root / 'clang-called'
+
+    def run_build(self, mode='ok'):
+        env = dict(os.environ, TEST_MODE=mode, TEST_OUT=str(self.out),
+                   TEST_MARKER=str(self.marker), R800_XTRA_ABI='0')
+        result = subprocess.run(['sh', str(self.script), str(self.ndk),
+                                 str(self.libs), str(self.out)], env=env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(list(self.root.glob('.gpsbridge.*')), [])
+        return result
+
+    def reject_donor(self, value):
+        (self.libs / LIBS[0]).write_text(value)
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
+
+    def test_success(self):
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.out.read_text(), 'bridge')
+        self.assertIn('NON-RELEASE', result.stdout)
+
+    def test_wrong_class(self):
+        self.reject_donor('wide')
+
+    def test_wrong_machine(self):
+        self.reject_donor('foreign')
+
+    def test_wrong_endianness(self):
+        self.reject_donor('big')
+
+    def test_wrong_type(self):
+        self.reject_donor('exec')
+
+    def test_readelf_failure_even_with_valid_output(self):
+        self.reject_donor('broken')
+
+    def test_donor_symlink(self):
+        p = self.libs / LIBS[0]
+        p.unlink()
+        p.symlink_to(self.libs / LIBS[1])
+        self.assertNotEqual(self.run_build().returncode, 0)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
+
+    def test_gate_failure(self):
+        self.assertNotEqual(self.run_build('reject').returncode, 0)
+        self.assertFalse(self.out.exists())
+
+    def test_snapshot_mutation(self):
+        self.assertNotEqual(self.run_build('mutate').returncode, 0)
+        self.assertFalse(self.out.exists())
+
+    def test_late_directory(self):
+        self.assertNotEqual(self.run_build('directory').returncode, 0)
+        self.assertTrue(self.out.is_dir())
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_late_symlink(self):
+        self.assertNotEqual(self.run_build('symlink').returncode, 0)
+        self.assertTrue(self.out.is_symlink())
+        self.assertFalse((self.root / 'gpsbridge').exists())
+
+    def test_late_file(self):
+        self.assertNotEqual(self.run_build('file').returncode, 0)
+        self.assertEqual(self.out.read_text(), 'competitor')
+
+
+if __name__ == '__main__':
+    unittest.main()
