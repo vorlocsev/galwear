@@ -17,7 +17,7 @@ DENIED = {7, 8, 9, 35, 36, 37, 0x6000000f, 0x60000010, 0x60000011,
           0x60000012, 0x6fffe000, 0x6fffe001, 0x6fffe003}
 
 
-def parse_elf(raw, *, include_tags=False):
+def parse_elf(raw, *, include_tags=False, strict_pages=False):
     if len(raw) < 52 or len(raw) > LIMIT or raw[:7] != b"\x7fELF\x01\x01\x01":
         raise ValueError("Expected bounded little-endian ELF32")
     etype, machine, version = struct.unpack_from("<HHI", raw, 16)
@@ -27,13 +27,25 @@ def parse_elf(raw, *, include_tags=False):
         raise ValueError("Expected ARM EABI5 shared object without hard-float flag")
     if ehsize != 52 or entsize != 32 or not 1 <= count <= 128 or phoff + 32 * count > len(raw):
         raise ValueError("Invalid program header table")
-    loads, dynamic = [], []
+    loads, dynamic, pages = [], [], []
     for i in range(count):
-        typ, off, va, _, fs, ms, pf, _ = struct.unpack_from("<8I", raw, phoff + 32 * i)
+        typ, off, va, _, fs, ms, pf, align = struct.unpack_from("<8I", raw, phoff + 32 * i)
         if typ not in (1, 2):
             continue
         if fs > ms or off + fs > len(raw) or va + ms > 2**32:
             raise ValueError("Invalid segment bounds")
+        if typ == 1:
+            if align > 1 and (align & (align - 1) or va % align != off % align):
+                raise ValueError("Invalid PT_LOAD alignment")
+            if strict_pages:
+                # Conservative 4 KiB page model; not a runtime loader simulation.
+                if (va & 4095) != (off & 4095):
+                    raise ValueError("PT_LOAD page offset mismatch")
+                if ms:
+                    lo, hi = va & ~4095, (va + ms + 4095) & ~4095
+                    if any(lo < end and start < hi for start, end in pages):
+                        raise ValueError("PT_LOAD shared memory page requires review")
+                    pages.append((lo, hi))
         (loads if typ == 1 else dynamic).append((va, off, fs, ms, pf))
 
     def memory_mapping(va, size):
@@ -243,16 +255,18 @@ def inspect_table(raw, address, layout, mapping, relocations, digest, symbolic_t
 MAX_CANDIDATES = 256
 
 
-def audit(raw, address, layout, *, symbolic=False):
-    mapping, relocations, tags = parse_elf(raw, include_tags=True)
+def audit(raw, address, layout, *, symbolic=False, strict_pages=False):
+    mapping, relocations, tags = parse_elf(raw, include_tags=True, strict_pages=strict_pages)
     targets = symbolic_code_targets(raw, mapping, relocations, tags) if symbolic else {}
-    return inspect_table(raw, address, layout, mapping, relocations,
-                         hashlib.sha256(raw).hexdigest(), targets)
+    report = inspect_table(raw, address, layout, mapping, relocations,
+                           hashlib.sha256(raw).hexdigest(), targets)
+    report["strict_4k_page_review"] = strict_pages
+    return report
 
 
-def discover(raw, *, symbolic=False):
+def discover(raw, *, symbolic=False, strict_pages=False):
     """Strict heuristic: exact size and a supported code pointer in every slot."""
-    mapping, relocations, tags = parse_elf(raw, include_tags=True)
+    mapping, relocations, tags = parse_elf(raw, include_tags=True, strict_pages=strict_pages)
     targets = symbolic_code_targets(raw, mapping, relocations, tags) if symbolic else {}
     digest = hashlib.sha256(raw).hexdigest()
     candidates = []
@@ -289,6 +303,7 @@ def discover(raw, *, symbolic=False):
             "relative_slots_examined": len(relative),
             "exact_size_all_relative_code_pointers_only": not symbolic,
             "symbolic_mode": symbolic, "symbolic_slots_resolved": len(targets),
+            "strict_4k_page_review": strict_pages,
             "discovery_complete": False, "table_identity_verified": False,
             "selected_abi": None, "runtime_verified": False, "safe_to_flash": False}
 
@@ -302,13 +317,14 @@ def main():
     mode.add_argument("--discover", action="store_true")
     parser.add_argument("--layout", choices=LAYOUTS)
     parser.add_argument("--symbolic", action="store_true", help="Opt in to conservative zero-addend symbol clues")
+    parser.add_argument("--strict-pages", action="store_true", help="Conservative 4 KiB PT_LOAD page review")
     args = parser.parse_args()
     if args.discover == (args.layout is not None):
         parser.error("--layout is required only with --table-va")
     try:
         raw = read_regular(args.library, LIMIT)
-        report = (discover(raw, symbolic=args.symbolic) if args.discover
-                  else audit(raw, args.table_va, args.layout, symbolic=args.symbolic))
+        report = (discover(raw, symbolic=args.symbolic, strict_pages=args.strict_pages) if args.discover
+                  else audit(raw, args.table_va, args.layout, symbolic=args.symbolic, strict_pages=args.strict_pages))
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
