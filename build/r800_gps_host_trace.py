@@ -118,6 +118,7 @@ def summarize(staging, report):
     expected.update({"compile": "clang", "compile.linker": "ld.lld", "result": "llvm-readelf"})
     records = {}
     shell_count = 0
+    shell_pid = linker_pid = None
     shell_libraries = []
     items = list(root.iterdir())
     if not 1 <= len(items) <= MAX_LOGS:
@@ -133,6 +134,7 @@ def summarize(staging, report):
             raise ValueError("Host trace filename/process mismatch")
         if role == "compile" and b"initialize program: /bin/sh" in raw:
             shell_count += 1
+            shell_pid = pid
             if shell_count != 1:
                 raise ValueError("Unexpected number of linker wrapper shells")
             shell_libraries = parse_log(raw, staging, report, tool="ld.lld", shell=True)
@@ -140,8 +142,12 @@ def summarize(staging, report):
         if role in records:
             raise ValueError("Duplicate host tool trace: " + role)
         records[role] = parse_log(raw, staging, report, tool=expected[role])
+        if role == "compile.linker":
+            linker_pid = pid
     if set(records) != set(expected) or shell_count != 1:
         raise ValueError("Missing captured host tool execution diagnostics")
+    if shell_pid != linker_pid:
+        raise ValueError("Linker wrapper and exec process IDs differ")
     return {"status": "HOST_LOADER_DIAGNOSTICS_MATCH",
             "method": "glibc-LD_DEBUG-files-libs", "observed": records,
             "wrapper_shell_libraries": shell_libraries,
