@@ -116,7 +116,7 @@ def thumb_call(a, b, width, va):
     return base + sign_extend(delta, 25), isa, kind
 
 
-def assumed_call(state, call, va, start, end, mapping):
+def assumed_call(state, call, va, start, end, mapping, leaf=None):
     target, isa, kind = call
     align = 4 if isa == "arm" else 2
     if state.get("sp") is None or state["sp"] % 8:
@@ -133,6 +133,20 @@ def assumed_call(state, call, va, start, end, mapping):
            "arguments": {"r" + str(r): {"kind": state[r][0], "value": state[r][1]}
                          for r in range(4) if r in state and state[r][0] in ("constant", "address")},
            "return_assumed": True, "callee_analyzed": False}
+    if leaf is not None:
+        summary = leaf(target, isa, state)
+        if summary is not None:
+            if not summary["accepted"]:
+                return None
+            for key in list(state):
+                if type(key) is int and key not in summary["preserved_registers"]:
+                    state.pop(key)
+            if summary["r0"] is not None:
+                state[0] = summary["r0"]
+            row.update(callee_analyzed=True, modeled_return_r0=summary["r0"],
+                       modeled_return_count=summary["return_count"],
+                       memory_preserved_by_model=True)
+            return row
     # Neither arbitrary memory nor the outgoing stack argument area is guaranteed
     # unchanged by an opaque callee. Do not preserve saved LR in memory either.
     for key in list(state):
@@ -143,10 +157,13 @@ def assumed_call(state, call, va, start, end, mapping):
 
 class Flow:
     """Must-fact intersection: unseen nodes are distinct from unknown facts."""
-    def __init__(self, start, end, nodes, assume_aapcs=False):
+    def __init__(self, start, end, nodes, assume_aapcs=False, initial=None):
         self.end = end
         self.nodes = nodes
         self.incoming = {start: {"sp": 0, 14: ("entry_lr", 0), "memory_unchanged": True}}
+        if initial is not None:
+            self.incoming[start].update(initial)
+        self.returns = []
         self.assume_aapcs = assume_aapcs
         self.calls = []
         self.pending = deque([start])
@@ -195,10 +212,23 @@ class Flow:
             if va != self.end:
                 yield va, dict(self.incoming[va])
 
+    def record_return(self, state):
+        if self.emitting:
+            self.returns.append(dict(state))
+
     def report(self):
         if self.converged and self.end in self.incoming and self.incoming[self.end].get("sp") != 0:
             self.boundaries.append({"address": self.end, "reason": "unbalanced_range_end"})
-        return {"status": "PARTIAL_FLOW_REVIEW_REQUIRED" if self.boundaries or not self.converged else "CONDITIONAL_FIXED_POINT_FLOW_ONLY",
+        accepted = (self.converged and not self.boundaries and self.end not in self.incoming
+                    and not self.back_edges and bool(self.returns) and not self.calls)
+        r0 = self.returns[0].get(0) if accepted else None
+        if r0 is not None and (r0[0] not in ("constant", "address") or any(r.get(0) != r0 for r in self.returns)):
+            r0 = None
+        preserved = [reg for reg in (4, 5, 6, 7, 8, 10, 11)
+                     if accepted and all(r.get(reg) == ("callee_saved", reg) for r in self.returns)]
+        return {"leaf_summary": {"accepted": accepted, "r0": r0,
+                                 "preserved_registers": preserved, "return_count": len(self.returns)},
+                "status": "PARTIAL_FLOW_REVIEW_REQUIRED" if self.boundaries or not self.converged else "CONDITIONAL_FIXED_POINT_FLOW_ONLY",
                 "events": self.events if self.converged and not self.boundaries else [],
                 "boundaries": self.boundaries,
                 "assume_aapcs": self.assume_aapcs,
@@ -211,11 +241,11 @@ class Flow:
                 "control_flow_verified": False, "safe_to_flash": False}
 
 
-def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None):
+def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None):
     if size % 4 or start % 4 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid A32 flow range")
     end = start + size
-    flow = Flow(start, end, range(start, end, 4), assume_aapcs)
+    flow = Flow(start, end, range(start, end, 4), assume_aapcs, initial)
     enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
     for va, state in flow.walk():
         word, = struct.unpack_from("<I", raw, off + va - start)
@@ -237,7 +267,7 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
             continue
         call = arm_call(word, va) if assume_aapcs else None
         if call is not None:
-            row = assumed_call(state, call, va, start, end, mapping)
+            row = assumed_call(state, call, va, start, end, mapping, leaf)
             if row is None:
                 boundary("unresolved_or_unaligned_call")
             else:
@@ -259,6 +289,8 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
         if word == 0xe12fff1e:  # BX LR, candidate return only
             if state.get("sp") != 0 or state.get(14) != ("entry_lr", 0):
                 boundary("unverified_stack_return")
+            else:
+                flow.record_return(state)
             continue
         if cond != 14:
             boundary("conditional_or_unknown_instruction")
@@ -269,6 +301,7 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
                 boundary("invalid_stack_access")
                 continue
             if stack[0] == "pop" and 15 in stack[1]:
+                flow.record_return(state)
                 continue
         elif word & 0xfff00000 == 0xe3000000 and rd <= 12:
             imm = ((word >> 4) & 0xf000) | (word & 0xfff)
@@ -312,7 +345,7 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
     return flow.report()
 
 
-def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None):
+def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None):
     """Bounded Thumb flow, with linear instruction-boundary assumptions."""
     if size % 2 or start % 2 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid Thumb flow range")
@@ -327,7 +360,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
         b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
         nodes[start + pos] = (a, b, width)
         pos += width
-    flow = Flow(start, end, nodes, assume_aapcs)
+    flow = Flow(start, end, nodes, assume_aapcs, initial)
     enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
 
     # Reject even an unreachable IT encoding: a branch into its body could
@@ -361,7 +394,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
             continue
         call = thumb_call(a, b, width, va) if assume_aapcs else None
         if call is not None:
-            row = assumed_call(state, call, va, start, end, mapping)
+            row = assumed_call(state, call, va, start, end, mapping, leaf)
             if row is None:
                 boundary("unresolved_or_unaligned_call")
             else:
@@ -386,6 +419,8 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
         if a == 0x4770 and width == 2:
             if state.get("sp") != 0 or state.get(14) != ("entry_lr", 0):
                 boundary("unverified_stack_return")
+            else:
+                flow.record_return(state)
             continue
         stack = thumb_stack(a, b, width)
         if stack is not None:
@@ -393,6 +428,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
                 boundary("invalid_stack_access")
                 continue
             if stack[0] == "pop" and 15 in stack[1]:
+                flow.record_return(state)
                 continue
         elif width == 4 and a & 0xfbf0 in (0xf240, 0xf2c0) and not b & 0x8000 and (b >> 8) & 15 <= 12:
             rd = (b >> 8) & 15
@@ -431,3 +467,29 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
             continue
         enqueue(va + width, state)
     return flow.report()
+
+
+def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges):
+    """One-level explicit leaf ranges; no inferred entry points or recursive calls."""
+    cache = {}
+    def resolve(target, isa, state):
+        if (target, isa) not in ranges:
+            return None
+        initial = {reg: state[reg] for reg in range(4)
+                   if reg in state and state[reg][0] in ("constant", "address")}
+        initial.update({reg: ("callee_saved", reg) for reg in (4, 5, 6, 7, 8, 10, 11)})
+        initial["memory_unchanged"] = bool(state.get("memory_unchanged"))
+        key = (target, isa, tuple(sorted((r, v) for r, v in initial.items() if type(r) is int)), initial["memory_unchanged"])
+        if key not in cache:
+            if len(cache) >= 32:
+                return {"accepted": False}
+            size = ranges[(target, isa)]
+            off, _ = mapping(target, size)
+            try:
+                report = (audit if isa == "arm" else audit_thumb)(
+                    raw, off, target, size, relocations, tables, direct, initial=initial)
+            except (ValueError, struct.error):
+                return {"accepted": False}
+            cache[key] = report["leaf_summary"]
+        return cache[key]
+    return resolve
