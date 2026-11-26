@@ -40,13 +40,13 @@ static int mock_init(GpsCallbacks *cb)
 }
 static int mock_time(GpsUtcTime utc, int64_t ref, int unc)
 {
-    if (state != 1 || utc <= 0 || ref < 0 || unc < 0) return -91;
+    if ((state != 1 && state != 3) || utc <= 0 || ref < 0 || unc < 0) return -91;
     time_seen = 1;
     return 0;
 }
 static int mock_location(double lat, double lon, float acc)
 {
-    return state == 1 && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 && acc > 0 ? 0 : -92;
+    return (state == 1 || state == 3) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 && acc > 0 ? 0 : -92;
 }
 static int mock_mode(uint32_t mode, uint32_t recurrence, uint32_t interval,
                      uint32_t accuracy, uint32_t time)
@@ -74,7 +74,8 @@ static int mock_stop(void)
 {
     if (state != 3) return -95;
     if (MOCK_FAIL == 4) return -14;
-    state = 4;
+    state = 1;
+    time_seen = 0;
     callbacks->status_cb(&stopped);
     return 0;
 }
