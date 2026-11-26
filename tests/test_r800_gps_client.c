@@ -72,6 +72,38 @@ static void disconnected_peer(void)
     gps_client_detach(&c, f[0]);
 }
 
+static pthread_barrier_t disconnected;
+
+static void *send_after_disconnect(void *arg)
+{
+    const char *line = arg;
+    int r = pthread_barrier_wait(&disconnected);
+    assert(r == 0 || r == PTHREAD_BARRIER_SERIAL_THREAD);
+    gps_client_send(&c, line, (int)strlen(line));
+    return NULL;
+}
+
+static void concurrent_disconnect(void)
+{
+    for (int i = 0; i < 32; ++i) {
+        int f[2], r;
+        pthread_t a, b;
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0);
+        assert(gps_client_attach(&c, f[0]));
+        assert(pthread_barrier_init(&disconnected, NULL, 3) == 0);
+        assert(pthread_create(&a, NULL, send_after_disconnect, "FIX\n") == 0);
+        assert(pthread_create(&b, NULL, send_after_disconnect, "NMEA\n") == 0);
+        close(f[1]);
+        r = pthread_barrier_wait(&disconnected);
+        assert(r == 0 || r == PTHREAD_BARRIER_SERIAL_THREAD);
+        assert(pthread_join(a, NULL) == 0);
+        assert(pthread_join(b, NULL) == 0);
+        assert(pthread_barrier_destroy(&disconnected) == 0);
+        assert(!gps_client_matches(&c, f[0]));
+        assert(close(f[0]) == 0);
+    }
+}
+
 static void saturated_peer(void)
 {
     int f[2], small = 4096;
@@ -112,6 +144,7 @@ int main(void)
 {
     concurrent_frames(); puts("CONCURRENT_FRAMES=PASS");
     disconnected_peer(); puts("DISCONNECTED_PEER=PASS");
+    concurrent_disconnect(); puts("CONCURRENT_DISCONNECT_32=PASS");
     saturated_peer(); puts("SATURATED_PEER=PASS");
     detach_and_reconnect(); puts("RECONNECT_64=PASS");
     return 0;
