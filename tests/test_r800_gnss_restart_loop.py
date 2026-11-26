@@ -31,6 +31,7 @@ gnss_launch_lhd() { exec python3 worker.py "lhd-$n"; }
 gnss_launch_gpsd() { exec python3 worker.py "gpsd-$n"; }
 gnss_launch_bridge() { exec python3 worker.py "bridge-$n"; }
 gnss_bridge_available() { return 0; }
+gnss_donor_config() { [ "$MODE" != config-fail ]; }
 gnss_shared_directory() {
     if [ "$MODE" = ipc-down ] || { [ "$MODE" = ipc-recover ] && [ "$n" -eq 1 ]; }; then
         return 1
@@ -120,6 +121,11 @@ gnss_restart_loop 2 || exit $?
     def test_ipc_lost_before_bridge(self):
         events=self.run_mode("ipc-lost")
         self.assertFalse(any(e.startswith("START:bridge") for e in events))
+
+    def test_configuration_failure(self):
+        events=self.run_mode("config-fail")
+        self.assertFalse(any(e.startswith(("START:gpsd","START:bridge")) for e in events))
+        self.assertEqual(events.count("gnss: donor configuration unavailable; no GPS workers"),2)
 
     def test_ownership_failure(self):
         events=self.run_mode("owner-fail")

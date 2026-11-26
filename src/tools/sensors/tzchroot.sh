@@ -95,6 +95,8 @@ else
     blocked "no Tizen subset and p18 is not the Tizen rootfs"
 fi
 [ -x "$T/usr/bin/lhd" ] || blocked "lhd unavailable in mounted root"
+[ -f "$T/etc/lhd/lhd.conf" ] && [ ! -L "$T/etc/lhd/lhd.conf" ] && [ -s "$T/etc/lhd/lhd.conf" ] ||
+    blocked "lhd configuration unavailable"
 for d in dev proc sys; do
     bind_mount "/$d" "$T/$d"
 done

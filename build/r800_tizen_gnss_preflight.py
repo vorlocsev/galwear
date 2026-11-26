@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import stat
 import struct
+import re
+import xml.etree.ElementTree as ET
 
 from r800_gps_link_gate import elf
 from r800_broadcom_export import assess, EXPORT
@@ -41,6 +43,60 @@ def metadata(root, guest):
             "socket" if stat.S_ISSOCK(st.st_mode) else
             "character" if stat.S_ISCHR(st.st_mode) else "other")
     return {"status":"PRESENT","kind":kind,"mode":oct(stat.S_IMODE(st.st_mode))}
+
+
+CONFIGS=("/etc/lhd/lhd.conf","/etc/gps-manager/brcm/gpsd.xml",
+         "/etc/passwd","/etc/group")
+CONFIG_LIMIT=1024*1024
+
+
+def location_account(raw, kind):
+    records=[]
+    for line in raw.decode("utf-8").splitlines():
+        fields=line.split(":")
+        if fields[0]!="location":
+            continue
+        expected=7 if kind=="passwd" else 4
+        if len(fields)!=expected:
+            raise ValueError("Malformed location account")
+        ids=fields[2:4] if kind=="passwd" else fields[2:3]
+        if any(not re.fullmatch(r"[1-9][0-9]{0,9}",v) or int(v)>2147483647 for v in ids):
+            raise ValueError("Invalid non-root location account ID")
+        records.append([int(v) for v in ids])
+    if len(records)!=1:
+        raise ValueError("Expected unique location account")
+    return records[0]
+
+
+def config_evidence(root):
+    files,problems,accounts={},[],{}
+    for guest in CONFIGS:
+        try:
+            if metadata(root,guest).get("kind")!="regular":
+                raise ValueError("Missing, nonregular or symlinked configuration")
+            path=root/guest.lstrip("/")
+            raw=read_regular(path,CONFIG_LIMIT)
+            if not raw.strip() or b"\0" in raw:
+                raise ValueError("Empty or unsupported configuration")
+            if guest.endswith(".xml"):
+                # Do not interpret vendor-specific settings or expand entities.
+                text=raw.decode("utf-8")
+                if "<!DOCTYPE" in text or "<!ENTITY" in text:
+                    raise ValueError("XML declaration requires review")
+                ET.fromstring(text)
+            elif guest.endswith("/passwd"):
+                uid,gid=location_account(raw,"passwd")
+                accounts.update(uid_candidate=uid,primary_gid_candidate=gid)
+            elif guest.endswith("/group"):
+                gid,=location_account(raw,"group")
+                accounts["chown_group_candidate"]=gid
+            files[guest]={"sha256":hashlib.sha256(raw).hexdigest(),"bytes":len(raw)}
+        except (OSError,ValueError,ET.ParseError):
+            # No raw configuration lines, account passwords or coordinates.
+            problems.append("CONFIGURATION_REVIEW:"+guest)
+    return {"files":files,"location_account_candidates":accounts,
+            "configuration_semantics_verified":False,
+            "effective_account_verified":False,"problems":problems}
 
 
 def closure_review(closure):
@@ -94,6 +150,8 @@ def check(root):
     except (OSError,ValueError,struct.error) as exc:
         library = {"status":"REJECTED","reason":str(exc)}
         problems.append("BRIDGE_LIBRARY_REJECTED")
+    config = config_evidence(root)
+    problems.extend(config["problems"])
     directories = {p:metadata(root,p) for p in DIRECTORIES}
     for p, item in directories.items():
         if item.get("kind") != "directory":
@@ -108,7 +166,7 @@ def check(root):
             problems.append("OPTIONAL_FILE_PATH_REVIEW:"+p)
     return {"status":"TIZEN_GNSS_REVIEW_REQUIRED" if problems else "TIZEN_GNSS_STATIC_ONLY",
             "problems":problems,"closure_status":closure["status"],"bridge_library":library,
-            "dependency_evidence":closure,
+            "dependency_evidence":closure,"configuration_evidence":config,
             "directories":directories,"socket_path":SOCKET,"socket_metadata":socket,
             "optional_metadata":optional,"runtime_mounts_verified":False,
             "socket_permissions_verified":False,"bridge_protocol_verified":False,

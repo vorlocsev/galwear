@@ -20,6 +20,10 @@ class GnssPreflightTests(unittest.TestCase):
         for name in ("/usr/bin/gpsd","/usr/bin/lhd"):
             self.put(name,self.bridge_fixture(name=b"daemon_symbol"))
         self.put("/usr/lib/libbrcm.so", self.bridge_fixture())
+        self.put("/etc/lhd/lhd.conf",b"synthetic lhd config\n")
+        self.put("/etc/gps-manager/brcm/gpsd.xml",b"<gpsd/>")
+        self.put("/etc/passwd",b"location:x:5001:5002::/:/bin/false\n")
+        self.put("/etc/group",b"location:x:5002:\n")
 
     @staticmethod
     def bridge_fixture(name=b"gps_get_hardware_interface", flags=0x05000200, binding=1):
@@ -45,6 +49,42 @@ class GnssPreflightTests(unittest.TestCase):
         self.assertFalse(report["hardware_interface_abi_verified"])
         self.assertFalse(report["gnss_fix_verified"])
         self.assertFalse(report["safe_to_flash"])
+
+    def test_config_evidence(self):
+        report=check(self.root)["configuration_evidence"]
+        self.assertEqual(len(report["files"]),4)
+        self.assertEqual(report["location_account_candidates"],
+                         {"uid_candidate":5001,"primary_gid_candidate":5002,"chown_group_candidate":5002})
+        self.assertFalse(report["configuration_semantics_verified"])
+        self.assertNotIn("synthetic lhd config",str(report))
+
+    def test_missing_gpsd_config(self):
+        (self.root/"etc/gps-manager/brcm/gpsd.xml").unlink()
+        self.assertIn("CONFIGURATION_REVIEW:/etc/gps-manager/brcm/gpsd.xml",check(self.root)["problems"])
+
+    def test_xml_malformed(self):
+        self.put("/etc/gps-manager/brcm/gpsd.xml",b"<gpsd>")
+        self.assertIn("CONFIGURATION_REVIEW:/etc/gps-manager/brcm/gpsd.xml",check(self.root)["problems"])
+
+    def test_xml_entity_rejected(self):
+        self.put("/etc/gps-manager/brcm/gpsd.xml",b'<!DOCTYPE gpsd [<!ENTITY x "secret">]><gpsd>&x;</gpsd>')
+        report=check(self.root)
+        self.assertIn("CONFIGURATION_REVIEW:/etc/gps-manager/brcm/gpsd.xml",report["problems"])
+        self.assertNotIn("secret",str(report))
+
+    def test_config_symlink(self):
+        p=self.root/"etc/lhd/lhd.conf"
+        p.unlink()
+        p.symlink_to("/etc/passwd")
+        self.assertIn("CONFIGURATION_REVIEW:/etc/lhd/lhd.conf",check(self.root)["problems"])
+
+    def test_duplicate_location_account(self):
+        self.put("/etc/passwd",b"location:x:5001:5002::/:/bin/false\nlocation:x:6001:5002::/:/bin/false\n")
+        self.assertIn("CONFIGURATION_REVIEW:/etc/passwd",check(self.root)["problems"])
+
+    def test_root_location_group(self):
+        self.put("/etc/group",b"location:x:0:\n")
+        self.assertIn("CONFIGURATION_REVIEW:/etc/group",check(self.root)["problems"])
 
     def test_missing_export(self):
         self.put("/usr/lib/libbrcm.so", self.bridge_fixture(name=b"other_symbol"))

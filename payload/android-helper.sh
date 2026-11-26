@@ -276,6 +276,14 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
         gnss_launch_gpsd() { exec "$B" chroot /mnt/tz $TZE /usr/bin/gpsd -c /etc/gps-manager/brcm/gpsd.xml > /dev/null 2>&1 < /dev/null; }
         gnss_launch_bridge() { exec "$B" chroot /mnt/tz $TZE /opt/usr/r800dev/gpsbridge daemon > /dev/null 2>&1 < /dev/null; }
         gnss_bridge_available() { [ -x /oem/r800dev/gpsbridge ]; }
+        # Existence only, not parsing or proof of original donor compatibility.
+        gnss_donor_config() {
+            [ -x /mnt/tz/usr/bin/gpsd ] &&
+            [ -f /mnt/tz/usr/lib/libbrcm.so ] &&
+            [ -f /mnt/tz/etc/gps-manager/brcm/gpsd.xml ] &&
+            [ ! -L /mnt/tz/etc/gps-manager/brcm/gpsd.xml ] &&
+            [ -s /mnt/tz/etc/gps-manager/brcm/gpsd.xml ]
+        }
         gnss_shared_directory() { gnss_ipc_directory /oem/r800dev /mnt/tz/opt/usr/r800dev 0; }
         gnss_observe_socket() { gnss_socket_metadata /oem/r800dev /mnt/tz/opt/usr/r800dev 0; }
         gnss_prepare_owner() { "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss; }
@@ -300,6 +308,8 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
                         # Do not start the GNSS engine if it fails.
                         if ! gnss_shared_directory; then
                             k "gnss: shared IPC directory metadata not confirmed; no GPS workers"
+                        elif ! gnss_donor_config; then
+                            k "gnss: donor configuration unavailable; no GPS workers"
                         elif gnss_prepare_owner; then
                             gnss_launch_gpsd &
                             gpsd_pid=$!
