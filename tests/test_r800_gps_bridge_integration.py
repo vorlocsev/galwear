@@ -157,6 +157,38 @@ class BridgeIntegration(unittest.TestCase):
         self.assertFalse((cwd/"gps.last").exists())
         self.assertIsNone(proc.poll())
 
+    def test_v2_ack_order_and_session_ids(self):
+        cwd,proc,log=self.launch("normal")
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+            s.settimeout(5); s.connect(str(cwd/"gps.sock"))
+            with s.makefile("rb") as lines:
+                s.sendall(b"HELLO 2\nSTART 1\n")
+                self.assertEqual(lines.readline(),b"READY 2\n")
+                self.assertEqual(lines.readline(),b"ACK START 1\n")
+                s.sendall(b"TIME 123 0 100\nLOC 52 5 0.25\nSTOP 1\n")
+                self.assertEqual(lines.readline(),b"ACK STOP 1\n")
+                s.sendall(b"START 2\nSTOP 2\n")
+                self.assertEqual(lines.readline(),b"ACK START 2\n")
+                self.assertEqual(lines.readline(),b"ACK STOP 2\n")
+                s.sendall(b"START 1\n")
+                self.assertEqual(lines.readline(),b"")
+        evidence=log.read_text()
+        self.assertEqual(evidence.count("MOCK_START\n"),2)
+        self.assertEqual(evidence.count("MOCK_STOP\n"),2)
+        self.assertIn("MOCK_LOC\n",evidence)
+        self.assertIsNone(proc.poll())
+
+    def test_v2_no_implicit_downgrade(self):
+        cwd,proc,log=self.launch("normal")
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+            s.settimeout(5); s.connect(str(cwd/"gps.sock"))
+            with s.makefile("rb") as lines:
+                s.sendall(b"HELLO 2\nSTART\n")
+                self.assertEqual(lines.readline(),b"READY 2\n")
+                self.assertEqual(lines.readline(),b"")
+        self.assertNotIn("MOCK_START\n",log.read_text())
+        self.assertIsNone(proc.poll())
+
     def test_sigterm_idle_cleans_up(self):
         cwd,proc,log=self.launch("normal")
         proc.terminate()
