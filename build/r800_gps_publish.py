@@ -43,6 +43,9 @@ def publish(binary, report_path, manifest_path, output, evidence=None, *, archiv
             evidence["tizen_archive"] = current
     elif evidence is not None:
         evidence["tizen_archive"] = None
+    if evidence is not None and evidence.get("inputs", {}).get("inputs", {}).get("host_snapshot") is not None:
+        from r800_gps_host_trace import summarize
+        evidence["host_trace"] = summarize(binary.parent, evidence["inputs"]["inputs"]["host_elf"])
     data = read_regular(binary, LIMIT)
     digest = hashlib.sha256(data).hexdigest()
     if digest != report["sha256"]:
