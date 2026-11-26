@@ -33,10 +33,11 @@ for name in DONORS:
     print("DONOR_SHA256",name,hashlib.sha256(raw).hexdigest())
 PY
 (cd "$TMP/root/lib" && sha256sum libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3) > "$TMP/manifest"
-"$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
+"$TC/clang" --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 \
   -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -fPIC -shared -nostdlib -fuse-ld=lld --ld-path="$TC/ld.lld" \
   -Wl,--hash-style=sysv,-z,noexecstack,--no-undefined \
   -o "$TMP/root/probe_plugin.so" "$ROOT/tests/r800_glibc_probe_plugin.c"
+python3 "$ROOT/build/r800_gps_probe_plugin.py" "$TMP/root/probe_plugin.so"
 # ARMv7 has the user-mode thread pointer register. Require actual TLS
 # relocations and avoid relying on an unverified donor __aeabi_read_tp.
 "$TC/clang" --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -mtp=cp15 -ftls-model=local-exec \
