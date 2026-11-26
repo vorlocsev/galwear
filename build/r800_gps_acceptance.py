@@ -24,13 +24,33 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def inputs():
+def inputs(include_donor=False, include_qemu=False):
     paths = [Path(__file__), *ROOT.glob('src/tools/gps/*.h'),
              *(ROOT / 'tests' / ('test_r800_gps_' + s + '.py') for s in PY_SUITES),
              *(ROOT / 'build' / ('r800_gps_' + s + '.py') for s in PY_SUITES),
              *(ROOT / 'tests' / ('test_r800_gps_' + s + '.c') for s in (*C_SUITES, 'xtra_submit')),
              ROOT / 'tests/r800_mock_gps_hal.c']
-    return {str(p.relative_to(ROOT)): digest(p) for p in sorted(paths)}
+    if include_donor:
+        # Conservative closure: include R800 build helpers, including transitive
+        # imports, rather than claiming that only host inputs attest the build.
+        paths.extend((ROOT / 'src/tools/gps').glob('*.c'))
+        paths.extend((ROOT / 'build').glob('r800_*.py'))
+        paths.extend((ROOT / 'build').glob('r800_*.sh'))
+        paths.extend(ROOT / name for name in (
+            'src/tools/gps/gpsbridge.c', 'src/tools/gps/build.sh',
+            'build/r800_gps_donor_snapshot.py', 'build/r800_gps_provenance.py',
+            'build/r800_gps_link_gate.py', 'build/r800_gps_publish.py'))
+    if include_qemu:
+        paths.extend(ROOT / 'tests' / name for name in
+                     ('r800_glibc_probe.c', 'r800_glibc_probe_plugin.c'))
+        paths.extend(ROOT / 'build' / ('r800_gps_' + s + '.sh') for s in QEMU_SUITES)
+    return {str(p.relative_to(ROOT)): digest(p) for p in sorted(set(paths))}
+
+
+def candidate_digest(path):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('candidate missing or not a regular file')
+    return digest(path)
 
 
 def main():
@@ -45,7 +65,10 @@ def main():
     out = args.out.resolve()
     if out == ROOT or ROOT in out.parents:
         p.error('--out must be outside the checkout')
-    before = inputs()
+    def snapshot():
+        return inputs(include_donor=bool(args.ndk), include_qemu=args.qemu)
+
+    before = snapshot()
     out.mkdir(mode=0o700, exist_ok=False)
     env = dict(os.environ, LC_ALL='C', TZ='UTC', PYTHONDONTWRITEBYTECODE='1',
                R800_XTRA_ABI='0', R800_TIZEN_ARCHIVE='', R800_HOST_SNAPSHOT='0')
@@ -129,9 +152,10 @@ def main():
                 '-DMOCK_FAIL=' + str(stage), '-DMOCK_XTRA_CASE=' + str(case), '-o', str(target),
                 'tests/r800_mock_gps_hal.c'], verify=arm_check(target, True))
     host_ok = all(r['status'] == 'PASS' for r in rows)
-    unchanged = before == inputs()
+    unchanged = before == snapshot()
     candidate = out / 'gpsbridge'
     build_ok = False
+    candidate_hash = None
     if not args.ndk:
         blocked('experimental-build', 'donor_build', 'NDK r27c and trusted Tizen glibc not supplied', 'NOT_TESTED')
     elif not host_ok or not unchanged:
@@ -139,6 +163,12 @@ def main():
     else:
         build_ok = run('experimental-build', 'donor_build', ['sh', 'src/tools/gps/build.sh',
                        str(args.ndk.resolve()), str(args.donor.resolve()), str(candidate)], timeout=600)
+        if build_ok:
+            try:
+                candidate_hash = candidate_digest(candidate)
+            except (OSError, ValueError) as exc:
+                blocked('experimental-candidate', 'donor_build', str(exc), 'FAIL')
+                build_ok = False
         if build_ok:
             build_ok = run('experimental-link-audit', 'donor_build', [sys.executable, 'build/r800_gps_link_gate.py',
                            '--binary', str(candidate), '--libdir', str(args.donor.resolve())])
@@ -150,11 +180,22 @@ def main():
         else:
             run(suite, 'qemu_synthetic', ['sh', 'build/r800_gps_' + suite + '.sh',
                 str(args.ndk.resolve()), str(args.donor.resolve())], timeout=900)
-    unchanged = unchanged and before == inputs()
+    if build_ok:
+        try:
+            if candidate_digest(candidate) != candidate_hash:
+                raise ValueError('candidate changed after build or during audit/QEMU')
+        except (OSError, ValueError) as exc:
+            blocked('experimental-candidate-integrity', 'donor_build', str(exc), 'FAIL')
+            build_ok = False
+        else:
+            rows.append(dict(name='experimental-candidate-integrity', group='donor_build',
+                             status='PASS', candidate_sha256=candidate_hash))
+            print('experimental-candidate-integrity=PASS', flush=True)
+    unchanged = unchanged and before == snapshot()
     ok = unchanged and all(r['status'] in ('PASS', 'NOT_TESTED') for r in rows)
     report = dict(schema='galwear-r800-gps-acceptance-v1', status='REQUESTED_CHECKS_PASS' if ok else 'REVIEW_REQUIRED',
                   input_sha256=before, host_inputs_unchanged=unchanged, checks=rows,
-                  experimental_binary_sha256=digest(candidate) if build_ok and candidate.is_file() else None,
+                  experimental_binary_sha256=candidate_hash if build_ok else None,
                   vendor_abi_verified=False, gnss_runtime_verified=False, safe_to_flash=False, signed_attestation=False)
     (out / 'report.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
     return 0 if ok else 2
