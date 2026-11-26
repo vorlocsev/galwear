@@ -112,7 +112,11 @@ class BridgeIntegration(unittest.TestCase):
                 self.fail("HAL marker missing: "+marker+"\n"+client_log.read_text())
             try:
                 wait_marker("FIRST_SESSION_READY\n")
-                self.assertIn("MOCK_ASYNC_DATA\n",original_log.read_text())
+                deadline=time.monotonic()+5
+                while "MOCK_ASYNC_DATA\n" not in original_log.read_text():
+                    if original.poll() is not None or time.monotonic()>=deadline:
+                        self.fail(original_log.read_text())
+                    time.sleep(.01)
                 if graceful:
                     original.terminate()
                     self.assertEqual(original.wait(timeout=5),0,original_log.read_text())
