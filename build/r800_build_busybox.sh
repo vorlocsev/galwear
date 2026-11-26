@@ -42,6 +42,7 @@ p.write_text(c)
 PY
 yes "" | make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- oldconfig >> "$OUT/configure.log"
 grep -qx 'CONFIG_STATIC=y' .config
+grep -qx '# CONFIG_TC is not set' .config || { echo 'TC unexpectedly enabled by oldconfig' >&2; exit 2; }
 make -j2 ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- > "$OUT/build.log" 2>&1 || { tail -80 "$OUT/build.log"; exit 1; }
 mkdir "$OUT/bin"
 cp busybox "$OUT/bin/busybox"
@@ -59,7 +60,7 @@ import sys
 from pathlib import Path
 actual=set(Path(sys.argv[1]).read_text().splitlines())
 required=set("ash sh awk basename cat chmod chown chroot cut date dd df dmesg find grep head ifconfig ip ln losetup ls mkdir mkfifo mknod mkswap mount mv nslookup od pgrep pidof pkill ps reboot rm route sed seq setsid sleep stat swapon switch_root sync tail timeout touch tr udhcpc umount wget zcat".split())
-forbidden=set("telnetd httpd ftpd tftpd inetd nc login passwd su".split())
+forbidden=set("tc telnetd httpd ftpd tftpd inetd nc login passwd su".split())
 if required-actual or actual&forbidden:
     raise SystemExit("Missing: %s; forbidden: %s" % (sorted(required-actual),sorted(actual&forbidden)))
 print("PASS: required BusyBox applets present; forbidden applets absent")
