@@ -12,8 +12,17 @@ typedef unsigned long pthread_t;
 #if MOCK_FAIL < 0 || MOCK_FAIL > 7
 #error Invalid mock failure stage
 #endif
-#if R800_XTRA_ABI != 0
-#error Mock exercises only the disabled XTRA contract
+#ifndef MOCK_XTRA_CASE
+#define MOCK_XTRA_CASE 0
+#endif
+#if MOCK_XTRA_CASE < 0 || MOCK_XTRA_CASE > 4
+#error Invalid mock XTRA case
+#endif
+#if (R800_XTRA_ABI == 0) != (MOCK_XTRA_CASE == 0)
+#error Explicit matching mock XTRA configuration required
+#endif
+#if MOCK_XTRA_CASE != 0 && MOCK_FAIL != 0
+#error XTRA integration fixture uses a successful GPS lifecycle
 #endif
 
 static GpsCallbacks *callbacks;
@@ -94,10 +103,54 @@ static void mock_cleanup(void)
     callbacks = 0;
     state = time_seen = 0;
 }
+#if MOCK_XTRA_CASE != 0
+static unsigned xtra_ready;
+static int mock_xtra_init(GpsXtraCallbacks *cb)
+{
+    if (state != 1 || !cb || !cb->download_request_cb || !cb->create_thread_cb)
+        goto invalid;
+#if R800_XTRA_ABI == 2
+    if (cb->size != sizeof(*cb)) goto invalid;
+#endif
+    callbacks->set_capabilities_cb(0xa102);
+    cb->download_request_cb();
+    if (MOCK_XTRA_CASE == 2) return -12;
+    xtra_ready = 1;
+    return 0;
+invalid:
+    callbacks->set_capabilities_cb(0xa1ff);
+    return -97;
+}
+static int mock_xtra_inject(char *data, int size)
+{
+    if (state != 1 || !xtra_ready || !data || size != 4 ||
+        data[0] != 1 || data[1] != 0 || data[2] != 3 || data[3] != 4) {
+        callbacks->set_capabilities_cb(0xa1ff);
+        return -97;
+    }
+    callbacks->set_capabilities_cb(0xa103);
+    return MOCK_XTRA_CASE == 3 ? -13 : 0;
+}
+static const GpsXtraInterface xtra_interface = {
+    MOCK_XTRA_CASE == 4 ? sizeof(size_t) : sizeof(GpsXtraInterface),
+    mock_xtra_init, mock_xtra_inject
+};
+#endif
 static const void *mock_extension(const char *name)
 {
+#if MOCK_XTRA_CASE != 0
+    const char *want = "gps-xtra";
+    if (state == 1 && name) {
+        while (*want && *want == *name) { ++want; ++name; }
+        if (!*want && !*name) {
+            callbacks->set_capabilities_cb(0xa101);
+            return &xtra_interface;
+        }
+    }
+#else
     (void)name;
-    /* Unexpected XTRA lookup must become visible in the transcript. */
+#endif
+    /* Unexpected lookup must become visible in the transcript. */
     if (callbacks) callbacks->set_capabilities_cb(0xdead);
     return 0;
 }
