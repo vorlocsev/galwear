@@ -634,11 +634,11 @@ class AluFlowTests(unittest.TestCase):
 
     def test_reject_unsupported_encodings(self):
         from r800_gps_pic_flow import arm_alu, thumb_alu
-        for word in (0xe0902181, 0xe090f001, 0xe0802001, 0x00902001, 0xe3b10101, 0xe0102091):
+        for word in (0xe0902111, 0xe090f001, 0xe0802001, 0x00902001, 0xe3b10101, 0xe0102091):
             s = {0: ('constant', 1)}
             self.assertFalse(arm_alu(s, word))
             self.assertEqual(s, {0: ('constant', 1)})
-        for word, width in ((0x0040, 2), (0x4148, 2), (0x2001, 4)):
+        for word, width in ((0x4248, 2), (0x4348, 2), (0x2001, 4)):
             self.assertFalse(thumb_alu({}, word, width))
 
     def test_alu_flags_drive_branch_and_it(self):
@@ -652,3 +652,87 @@ class AluFlowTests(unittest.TestCase):
         self.assertEqual(r['events'][0]['table_va'], 0x2100)
         r = ThumbFlowTests().run_flow([0xf640, 0x70f7, 0x3801, 0x4478, 0x4770])
         self.assertEqual(r['events'][0]['table_va'], 0x2100)
+
+class ShiftFlowTests(unittest.TestCase):
+    def test_shift_boundaries(self):
+        from r800_gps_pic_flow import shift_with_carry
+        for kind, n, result in (("lsl", 0, (0x80000001, True)), ("lsl", 1, (2, True)),
+                                ("lsl", 32, (0, True)), ("lsl", 33, (0, False)),
+                                ("lsr", 32, (0, True)), ("lsr", 33, (0, False)),
+                                ("asr", 32, (0xffffffff, True)), ("asr", 255, (0xffffffff, True)),
+                                ("ror", 1, (0xc0000000, True)), ("ror", 32, (0x80000001, True)),
+                                ("ror", 33, (0xc0000000, True))):
+            with self.subTest(kind=kind, n=n):
+                self.assertEqual(shift_with_carry(0x80000001, kind, n, True), result)
+
+    def test_rrx_and_unknown_facts(self):
+        from r800_gps_pic_flow import shift_with_carry
+        self.assertEqual(shift_with_carry(3, 'rrx', 1, True), (0x80000001, True))
+        self.assertEqual(shift_with_carry(3, 'rrx', 1, None), (None, True))
+        self.assertEqual(shift_with_carry(None, 'lsl', 32, False), (0, None))
+        self.assertEqual(shift_with_carry(3, 'ror', None, True), (None, None))
+
+    def test_arm_shifted_operand_and_rrx(self):
+        from r800_gps_pic_flow import arm_alu
+        s = {0: ('constant', 0x80000001), 'C': True, 'V': True}
+        for word, result, c in ((0xe1b01080, 2, True), (0xe1b01020, 0, True),
+                                (0xe1b01040, 0xffffffff, True), (0xe1b01060, 0xc0000000, True)):
+            self.assertTrue(arm_alu(s, word))
+            self.assertEqual(s[1], ('constant', result))
+            self.assertEqual(s['C'], c)
+            self.assertTrue(s['V'])
+        self.assertTrue(arm_alu(s, 0xe0902101))  # ADDS r2,r0,r1,LSL #2
+        self.assertEqual(s[2], ('constant', 0x80000001))
+        self.assertFalse(arm_alu(s, 0xe1b01210))  # register-controlled A32 shift not modeled
+
+    def test_thumb_immediate_and_register_shifts(self):
+        from r800_gps_pic_flow import thumb_alu
+        for word, amount, result, c in ((0x0040, 0, 2, True), (0x0800, 0, 0, True),
+                                        (0x1000, 0, 0xffffffff, True), (0x4088, 256, 0x80000001, False),
+                                        (0x40c8, 33, 0, False), (0x4108, 255, 0xffffffff, True),
+                                        (0x41c8, 32, 0x80000001, True)):
+            s = {0: ('constant', 0x80000001), 1: ('constant', amount), 'C': False, 'V': True}
+            self.assertTrue(thumb_alu(s, word, 2))
+            self.assertEqual(s[0], ('constant', result))
+            self.assertEqual(s['C'], c)
+            self.assertTrue(s['V'])
+
+    def test_adc_sbc_edge_cases(self):
+        from r800_gps_pic_flow import alu_flags
+        for op, a, b, cin, value, c, v in (('adc', 0xffffffff, 0, True, 0, True, False),
+                ('adc', 0x7fffffff, 0, True, 0x80000000, False, True),
+                ('sbc', 0, 0, False, 0xffffffff, False, False),
+                ('sbc', 0x80000000, 0, False, 0x7fffffff, True, True),
+                ('sbc', 0, 0xffffffff, False, 0, False, False)):
+            s = {'C': cin}
+            alu_flags(s, op, 0, a, b)
+            self.assertEqual(s[0], ('constant', value))
+            self.assertEqual((s['C'], s['V']), (c, v))
+
+    def test_adc_sbc_decoders_and_input_carry(self):
+        from r800_gps_pic_flow import arm_alu, thumb_alu
+        s = {0: ('constant', 1), 1: ('constant', 2), 'C': True}
+        self.assertTrue(arm_alu(s, 0xe0b02081))  # ADCS r2,r0,r1,LSL #1
+        self.assertEqual(s[2], ('constant', 6))
+        self.assertTrue(arm_alu(s, 0xe0d02001))
+        self.assertEqual(s[2], ('constant', 0xfffffffe))
+        s['C'] = True
+        self.assertTrue(thumb_alu(s, 0x4148, 2))
+        self.assertEqual(s[0], ('constant', 4))
+        self.assertTrue(thumb_alu(s, 0x4188, 2))
+        self.assertEqual(s[0], ('constant', 1))
+
+    def test_unknown_shift_and_carry_clear_stale_facts(self):
+        from r800_gps_pic_flow import arm_alu, thumb_alu
+        s = {0: ('constant', 9), 'C': True, 'V': True, 'Z': False}
+        self.assertTrue(thumb_alu(s, 0x4088, 2))
+        self.assertEqual(s, {'V': True})
+        s.update({0: ('constant', 1), 1: ('constant', 1), 2: ('constant', 7)})
+        self.assertTrue(arm_alu(s, 0xe0b02001))
+        self.assertEqual(s, {0: ('constant', 1), 1: ('constant', 1)})
+
+    def test_shift_carry_selects_branch(self):
+        r = run([0xe3b00102, 0xe1b00080, 0x2a000000, 0xffffffff, 0xe12fff1e])
+        self.assertEqual(r['boundaries'], [])
+        r = ThumbITTests().evaluate([0xf240, 1, 0x07c0, 0x0040, 0xbf2c, 0xf240, 7, 0xf240, 9, 0x4770])
+        self.assertEqual(r['leaf_summary']['r0'], ('constant', 7))
