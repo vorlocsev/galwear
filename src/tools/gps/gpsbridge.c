@@ -136,6 +136,7 @@ static void out(const char *line, int len)
 static int daemon_mode;
 
 #include "gps_abi.h"
+#include "gps_interface_gate.h"
 
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
@@ -340,8 +341,7 @@ static void inject_lto(void)
 	if (!xtra) {
 		const GpsXtraInterface *candidate = gps->get_extension ? gps->get_extension("gps-xtra") : 0;
 		xcbs.create_thread_cb = cbs.create_thread_cb;
-		if (candidate && candidate->size >= sizeof(GpsXtraInterface) &&
-		    candidate->init && candidate->inject_xtra_data && candidate->init(&xcbs) == 0)
+		if (gps_xtra_interface_valid(candidate) && candidate->init(&xcbs) == 0)
 			xtra = candidate;
 	}
 	if (!xtra) {
@@ -578,12 +578,13 @@ int main(int argc, char **argv, char **envp)
 		return 1;
 	}
 	gps = get();
-	printf("GpsInterface %p size %u\n", (void *)gps, gps ? (unsigned)gps->size : 0);
-	fflush(0);
-	if (!gps || gps->size < sizeof(GpsInterface) || !gps->init ||
-	    !gps->start || !gps->stop || !gps->cleanup || !gps->inject_time ||
-	    !gps->inject_location || !gps->set_position_mode)
+	if (!gps_interface_valid(gps)) {
+		printf("GPS bridge blocked: incompatible interface table\n");
+		fflush(0);
 		return 1;
+	}
+	printf("GPS interface table shape accepted (ABI unverified)\n");
+	fflush(0);
 	r = gps->init(&cbs);
 	printf("init %d\n", r);
 	if (r != 0)
