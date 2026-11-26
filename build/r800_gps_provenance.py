@@ -4,11 +4,48 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import stat
+from r800_gps_donor_snapshot import pinned_directory
 
 from r800_android_userspace_preflight import read_regular
 
 LIMIT = 256 * 1024**2
 HEADERS = ("gps_abi.h", "gps_command.h", "gps_frame.h", "gps_lto.h", "gps_output.h")
+SOURCES = ("gpsbridge.c", *HEADERS)
+SOURCE_LIMIT = 4 * 1024**2
+
+
+def source_snapshot(root, staging, record, *, create=False):
+    """Check private, read-only copies against recorded checkout bytes.
+
+    This detects persistent modifications, not a malicious same-UID process
+    that can modify and restore files between checks.
+    """
+    source = root / "src/tools/gps"
+    dest = staging / "sources"
+    if create:
+        dest.mkdir(mode=0o700)
+    with pinned_directory(source) as (original, _):
+        with pinned_directory(dest) as (snapshot, _):
+            if create and list(snapshot.iterdir()):
+                raise ValueError("Source snapshot is not empty")
+            for name in SOURCES:
+                key = "source" if name == "gpsbridge.c" else name
+                raw = read_regular(original / name, SOURCE_LIMIT)
+                expected = record["inputs"][key]["sha256"]
+                if hashlib.sha256(raw).hexdigest() != expected:
+                    raise ValueError("Checkout source changed: " + name)
+                target = snapshot / name
+                if create:
+                    with target.open("xb") as stream:
+                        stream.write(raw)
+                    target.chmod(0o400)
+                if (stat.S_IMODE(target.lstat().st_mode) != 0o400
+                        or target.lstat().st_nlink != 1
+                        or hashlib.sha256(read_regular(target, SOURCE_LIMIT)).hexdigest() != expected):
+                    raise ValueError("Source snapshot changed: " + name)
+            if {p.name for p in snapshot.iterdir()} != set(SOURCES):
+                raise ValueError("Unexpected source snapshot entries")
 
 
 def validate_command(root, ndk, command):
@@ -35,7 +72,7 @@ def validate_command(root, ndk, command):
                     "-Wl,--hash-style=sysv", "-Wl,-z,noexecstack", "-Wl,-z,now",
                     "-Wl,--no-undefined", "-Wl,--dynamic-linker=/lib/ld-linux.so.3",
                     "-Wl,-e,_start", "-o", str(output),
-                    str(root / "src/tools/gps/gpsbridge.c"),
+                    str(staging / "sources/gpsbridge.c"),
                     *[str(staging / "libs" / name) for name in
                       ("libc.so.6", "libdl.so.2", "libpthread.so.0")]]
         if command == expected:
@@ -71,7 +108,8 @@ def collect(root, ndk, command):
         files[name] = root / "build" / name
     return {"schema": "galwear-r800-gps-inputs-v1", "argv": command,
             "inputs": {key: fingerprint(path) for key, path in files.items()},
-            "compiler_contract": "freestanding-explicit-v1", "xtra_abi": abi,
+            "compiler_contract": "freestanding-snapshot-v2", "xtra_abi": abi,
+            "source_snapshot": {name: "source" if name == "gpsbridge.c" else name for name in SOURCES},
             "safe_to_flash": False, "signed_attestation": False}
 
 
@@ -85,11 +123,15 @@ def main():
     args = parser.parse_args()
     try:
         record = collect(args.root, args.ndk, args.command)
+        staging = Path(args.command[args.command.index("-o") + 1]).parent
         if args.mode == "capture":
+            source_snapshot(args.root, staging, record, create=True)
             with args.record.open("x", encoding="utf-8") as stream:
                 json.dump(record, stream, sort_keys=True)
-        elif json.loads(read_regular(args.record, 1024**2)) != record:
-            raise ValueError("Build inputs or compiler arguments changed")
+        else:
+            if json.loads(read_regular(args.record, 1024**2)) != record:
+                raise ValueError("Build inputs or compiler arguments changed")
+            source_snapshot(args.root, staging, record)
     except (OSError, ValueError) as exc:
         parser.exit(2, "Provenance rejected: " + str(exc) + "\n")
 
