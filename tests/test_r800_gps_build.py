@@ -11,6 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'build'))
 from r800_gps_repeatability import compare
+from r800_gps_provenance import HEADERS
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'src/tools/gps/build.sh'
 LIBS = ('libc.so.6', 'libdl.so.2', 'libpthread.so.0', 'ld-linux.so.3')
@@ -122,7 +123,10 @@ class BuildContract(unittest.TestCase):
         self.script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, self.script)
         (self.script.parent / 'gpsbridge.c').write_text('/* synthetic fixture */')
-        for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h', 'gps_client.h', 'gps_cache.h', 'gps_cache_read.h', 'gps_cache_arm_stat.h', 'gps_lto_file.h', 'gps_xtra.h'):
+        # Use the production snapshot inventory so adding a required header
+        # cannot silently leave the synthetic fixture behind.
+        for name in HEADERS:
+            self.assertTrue((SCRIPT.parent / name).is_file(), name)
             (self.script.parent / name).write_text('/* synthetic header */')
         self.ndk = self.root / 'ndk'
         tc = self.ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
@@ -185,7 +189,7 @@ class BuildContract(unittest.TestCase):
         self.assertIsNone(evidence[0]['inputs']['inputs']['host_snapshot'])
         self.assertEqual(evidence[0]['inputs']['tool_snapshot'],
                          {'clang': 'clang', 'ld.lld': 'lld', 'llvm-readelf': 'readelf'})
-        for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h', 'gps_client.h', 'gps_cache.h', 'gps_cache_read.h', 'gps_cache_arm_stat.h', 'gps_lto_file.h', 'gps_xtra.h'):
+        for name in HEADERS:
             self.assertIn(name, evidence[0]['inputs']['inputs'])
 
     def test_compiler_environment_is_filtered(self):
