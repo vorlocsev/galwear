@@ -200,35 +200,51 @@ TZE="/usr/bin/env ${TZPL:+LD_PRELOAD=$TZPL}"
 if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
     "$B" timeout 60 /oem/r800dev/tzchroot.sh > "$SLOG" 2>&1; then
     (
-        # This supervisor owns only its direct foreground children.
-        # No global process-name kills or PID files.
+        # BEGIN GNSS_CHILD_SUPERVISOR
+        # Direct children only. Compare PPid AND starttime on every check.
+        # /proc observation plus kill is still not atomic (no pidfd).
         lhd_pid= gpsd_pid= bridge_pid=
+        lhd_start= gpsd_start= bridge_start=
+        child_identity() (
+            case "$1" in ''|0|*[!0-9]*) exit 1;; esac
+            IFS= read -r record < "/proc/$1/stat" 2>/dev/null || exit 1
+            case "$record" in "$1 ("*") "*) ;; *) exit 1;; esac
+            # comm can contain spaces and parentheses; split after final ') '.
+            tail=${record##*) }
+            set -f
+            set -- $tail
+            [ "$#" -ge 20 ] && [ "$2" = "$supervisor_pid" ] || exit 1
+            case "$1" in Z|X|x) exit 1;; esac
+            shift 19
+            case "$1" in ''|*[!0-9]*) exit 1;; esac
+            printf '%s\n' "$1"
+        )
+        child_alive() {
+            [ -n "$1" ] && [ -n "$2" ] &&
+                [ "$(child_identity "$1")" = "$2" ] &&
+                kill -0 "$1" 2>/dev/null
+        }
         stop_child() {
             [ -n "$1" ] || return 0
-            # Only PIDs from this shell's foreground children; confirm PPid
-            # before each signal. This is not a pidfd and has a small race.
-            child_alive() {
-                [ "$("$B" awk '/^PPid:/ {print $2; exit}' "/proc/$1/status" 2>/dev/null)" = "$supervisor_pid" ] &&
-                    kill -0 "$1" 2>/dev/null
-            }
-            if child_alive "$1"; then
+            if child_alive "$1" "$2"; then
                 kill -TERM "$1" 2>/dev/null || :
                 grace=0
-                while child_alive "$1" && [ "$grace" -lt 5 ]; do
+                while child_alive "$1" "$2" && [ "$grace" -lt 5 ]; do
                     "$B" sleep 1
                     grace=$((grace+1))
                 done
-                if child_alive "$1"; then
+                if child_alive "$1" "$2"; then
                     kill -KILL "$1" 2>/dev/null || :
                     grace=0
-                    while child_alive "$1" && [ "$grace" -lt 5 ]; do
+                    while child_alive "$1" "$2" && [ "$grace" -lt 5 ]; do
                         "$B" sleep 1
                         grace=$((grace+1))
                     done
                 fi
             fi
-            # An unreadable /proc entry or recycled PID is not proof of exit.
-            if kill -0 "$1" 2>/dev/null; then
+            # A live PID with unknown/different identity is not safe to kill
+            # or to treat as a completed child. Refuse another stack attempt.
+            if kill -0 "$1" 2>/dev/null || [ -e "/proc/$1" ]; then
                 k "gnss: child still exists or identity uncertain; no restart"
                 return 1
             fi
@@ -236,18 +252,17 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
         }
         stop_stack() {
             stop_failed=0
-            if stop_child "$bridge_pid"; then bridge_pid=; else stop_failed=1; fi
-            if stop_child "$gpsd_pid"; then gpsd_pid=; else stop_failed=1; fi
-            if stop_child "$lhd_pid"; then lhd_pid=; else stop_failed=1; fi
+            if stop_child "$bridge_pid" "$bridge_start"; then bridge_pid=; bridge_start=; else stop_failed=1; fi
+            if stop_child "$gpsd_pid" "$gpsd_start"; then gpsd_pid=; gpsd_start=; else stop_failed=1; fi
+            if stop_child "$lhd_pid" "$lhd_start"; then lhd_pid=; lhd_start=; else stop_failed=1; fi
             return "$stop_failed"
         }
-        # Shell PID variables may identify the parent shell. Read /proc/self
-        # using a builtin in this subshell rather than an external command.
         supervisor_pid=
         while read -r key value rest; do
             if [ "$key" = Pid: ]; then supervisor_pid=$value; break; fi
         done < /proc/self/status
-        case "$supervisor_pid" in ''|*[!0-9]*) exit 1;; esac
+        case "$supervisor_pid" in ''|0|*[!0-9]*) exit 1;; esac
+        # END GNSS_CHILD_SUPERVISOR
         trap 'trap - EXIT HUP INT TERM; stop_stack; exit $?' HUP INT TERM
         trap 'stop_stack' EXIT
         # Existing kernel-owned GPIO remains preferred. The fallback holder
@@ -261,12 +276,13 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
             k "gnss: stack attempt $n"
             "$B" chroot /mnt/tz $TZE /usr/bin/lhd /etc/lhd/lhd.conf > /mnt/tz/tmp/lhd.log 2>&1 < /dev/null &
             lhd_pid=$!
+            lhd_start=$(child_identity "$lhd_pid") || lhd_start=
             # Process survival is only a startup heuristic, not hardware readiness.
             "$B" sleep 20
-            if kill -0 "$lhd_pid" 2>/dev/null; then
+            if child_alive "$lhd_pid" "$lhd_start"; then
                 if [ ! -x /oem/r800dev/gpsbridge ]; then
                     wait "$lhd_pid" 2>/dev/null || :
-                    lhd_pid=
+                    lhd_pid=; lhd_start=
                 else
                     # Preserve the existing donor ownership recovery behavior.
                     # Do not start the GNSS engine if it fails.
@@ -275,16 +291,18 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
                     elif "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss; then
                         "$B" chroot /mnt/tz $TZE /usr/bin/gpsd -c /etc/gps-manager/brcm/gpsd.xml > /dev/null 2>&1 < /dev/null &
                         gpsd_pid=$!
+                        gpsd_start=$(child_identity "$gpsd_pid") || gpsd_start=
                         "$B" sleep 5
-                        if kill -0 "$lhd_pid" 2>/dev/null && kill -0 "$gpsd_pid" 2>/dev/null &&
+                        if child_alive "$lhd_pid" "$lhd_start" && child_alive "$gpsd_pid" "$gpsd_start" &&
                             gnss_ipc_directory /oem/r800dev /mnt/tz/opt/usr/r800dev 0; then
                             # Avoid persistent logs containing network location or coordinates.
                             "$B" chroot /mnt/tz $TZE /opt/usr/r800dev/gpsbridge daemon > /dev/null 2>&1 < /dev/null &
                             bridge_pid=$!
+                            bridge_start=$(child_identity "$bridge_pid") || bridge_start=
                             ipc_previous=
-                            while kill -0 "$lhd_pid" 2>/dev/null &&
-                                  kill -0 "$gpsd_pid" 2>/dev/null &&
-                                  kill -0 "$bridge_pid" 2>/dev/null; do
+                            while child_alive "$lhd_pid" "$lhd_start" &&
+                                  child_alive "$gpsd_pid" "$gpsd_start" &&
+                                  child_alive "$bridge_pid" "$bridge_start"; do
                                 ipc_state=unconfirmed
                                 if gnss_socket_metadata /oem/r800dev /mnt/tz/opt/usr/r800dev 0; then
                                     ipc_state=metadata-candidate
@@ -297,8 +315,8 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
                             done
                         fi
                         # Stop GPS workers before the hub. No overlapping restarts.
-                        stop_child "$bridge_pid" || exit 1; bridge_pid=
-                        stop_child "$gpsd_pid" || exit 1; gpsd_pid=
+                        stop_child "$bridge_pid" "$bridge_start" || exit 1; bridge_pid=; bridge_start=
+                        stop_child "$gpsd_pid" "$gpsd_start" || exit 1; gpsd_pid=; gpsd_start=
                         "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss ||
                             k "gnss: donor ownership recovery failed"
                     else
