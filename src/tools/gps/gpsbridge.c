@@ -137,6 +137,7 @@ static int daemon_mode;
 
 #include "gps_abi.h"
 #include "gps_interface_gate.h"
+#include "gps_standalone.h"
 
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
@@ -546,15 +547,25 @@ disconnected:
 	}
 }
 
+static int standalone_configure(void)
+{
+	return gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
+				      GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
+}
+
 int main(int argc, char **argv, char **envp)
 {
-	int secs, dirfd;
+	unsigned int secs = 90;
+	int dirfd;
 	void *lib;
 	const GpsInterface *(*get)(void);
 	int r;
 
 	daemon_mode = argc > 1 && !strcmp(argv[1], "daemon");
-	secs = argc > 1 && !daemon_mode ? atoi(argv[1]) : 90;
+	if (argc > 2 || (argc > 1 && !daemon_mode && !gps_standalone_duration(argv[1], &secs))) {
+		printf("usage: gpsbridge [1..3600|daemon]\n");
+		return 1;
+	}
 	if (daemon_mode && (GPS_PEER_UID == (unsigned int)-1 || GPS_PEER_GID == (unsigned int)-1)) {
 		printf("GPS daemon blocked: verified Android UID/GID required\n");
 		return 1;
@@ -593,20 +604,13 @@ int main(int argc, char **argv, char **envp)
 		inject_now();
 		exit(serve(dirfd));
 	}
-	aid();
-	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE, GPS_POSITION_RECURRENCE_PERIODIC,
-				   1000, 0, 0);
-	printf("set_position_mode %d\n", r);
-	r = gps->start();
-	printf("start %d (running %d s)\n", r, secs);
+	const struct gps_standalone_ops ops = {
+		aid, standalone_configure, gps->start, sleep, gps->stop, gps->cleanup
+	};
+	r = gps_standalone_run(&ops, secs);
+	printf("standalone result %d\n", r);
 	fflush(0);
-	sleep(secs);
-	r = gps->stop();
-	printf("stop %d\n", r);
-	fflush(0);
-	sleep(2);
-	exit(0);
-	return 0;
+	return r == GPS_RUN_OK ? 0 : 1;
 }
 
 #ifndef R800_GPS_BRIDGE_HOST_TEST
