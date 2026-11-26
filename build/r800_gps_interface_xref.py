@@ -7,7 +7,7 @@ import struct
 
 from r800_gps_interface_table import discover, parse_elf, symbolic_code_targets, LIMIT
 
-from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow
+from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow, leaf_analyzer
 
 MAX_RANGE = 65536
 MAX_REFS = 4096
@@ -118,7 +118,7 @@ def thumb_pic_clues(raw, off, start, size, relocations, tables, direct):
     return clues
 
 
-def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False):
+def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=()):
     discovery = discover(raw, symbolic=symbolic)
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
     tables = {r["table_va"]: r for r in discovery["candidates"]}
@@ -165,6 +165,25 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False):
                 indirect[slot] = value
     if len(indirect) > MAX_REFS:
         raise ValueError("Indirect reference budget exceeded")
+    ranges = tuple(ranges)
+    callee_ranges = tuple(callee_ranges)
+    if callee_ranges and (not assume_aapcs or len(callee_ranges) > 16):
+        raise ValueError("Explicit callee ranges require AAPCS mode; maximum 16")
+    leaves = {}
+    spans = [(start, start + size) for _, _, start, size in ranges]
+    for isa, start, size in callee_ranges:
+        align = 4 if isa == "arm" else 2
+        if (isa not in ("arm", "thumb") or type(start) is not int or type(size) is not int
+                or not 0 <= start < 2**32 or not 0 < size <= 4096
+                or start % align or size % align or start + size > 2**32
+                or any(start < b and a < start + size for a, b in spans)):
+            raise ValueError("Invalid or overlapping callee range")
+        _, flags = mapping(start, size)
+        if not flags & 1 or flags & 2:
+            raise ValueError("Callee range not executable and nonwritable")
+        leaves[(start, isa)] = size
+        spans.append((start, start + size))
+    leaf = leaf_analyzer(raw, mapping, relocations, tables, direct, leaves) if leaves else None
     code = []
     seen = set()
     for role, isa, start, size in ranges:
@@ -232,8 +251,8 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False):
         code.append({"role_assumption": role, "isa_assumption": isa, "start_va": start,
                      "size": size, "get_extension_entry_matches": matches,
                      "literal_load_clues": refs,
-                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping)
-                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping),
+                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf)
+                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf),
                      "pic_clues": arm_pic_clues(raw, off, start, size, relocations, tables, direct)
                      if isa == "arm" else thumb_pic_clues(raw, off, start, size, relocations, tables, direct)})
         if sum(len(r["literal_load_clues"]) + len(r["pic_clues"])
@@ -258,6 +277,14 @@ def parse_range(value):
         raise argparse.ArgumentTypeError("Expected ROLE:ISA:VA:SIZE") from exc
 
 
+def parse_callee(value):
+    try:
+        isa, start, size = value.split(":")
+        return isa, int(start, 0), int(size, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Expected ISA:VA:SIZE") from exc
+
+
 def main():
     from r800_android_userspace_preflight import read_regular
     parser = argparse.ArgumentParser(description=__doc__)
@@ -265,9 +292,10 @@ def main():
     parser.add_argument("--range", action="append", type=parse_range, default=[])
     parser.add_argument("--symbolic", action="store_true")
     parser.add_argument("--assume-aapcs", action="store_true", help="Opt in to opaque direct call summaries")
+    parser.add_argument("--callee", action="append", type=parse_callee, default=[])
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs)
+        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs, callee_ranges=args.callee)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
