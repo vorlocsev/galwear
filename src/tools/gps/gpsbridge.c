@@ -511,16 +511,25 @@ int main(int argc, char **argv, char **envp)
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE, GPS_POSITION_RECURRENCE_PERIODIC,
 				   1000, 0, 0);
 	printf("set_position_mode %d\n", r);
+	if (r != 0) {
+		gps->cleanup();
+		return 1;
+	}
 	r = gps->start();
 	printf("start %d (running %d s)\n", r, secs);
 	fflush(0);
+	if (r != 0) {
+		gps->cleanup();
+		return 1;
+	}
 	sleep(secs);
 	r = gps->stop();
 	printf("stop %d\n", r);
 	fflush(0);
-	sleep(2);
-	exit(0);
-	return 0;
+	if (r == 0)
+		sleep(2);
+	gps->cleanup();
+	return r == 0 ? 0 : 1;
 }
 
 /* glibc ARM _start: argc/argv from the stack, rtld_fini in r0 */
