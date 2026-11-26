@@ -14,6 +14,9 @@ from r800_gps_donor_snapshot import pinned_directory
 WRAPPER = b'''#!/bin/sh
 set -eu
 D=${0%/*}
+if [ -n "${LD_DEBUG_OUTPUT:-}" ]; then
+    export LD_DEBUG_OUTPUT="$LD_DEBUG_OUTPUT.linker"
+fi
 exec "$D/loader" --inhibit-cache --glibc-hwcaps-mask "" --library-path "$D/lib" "$D/../tools/ld.lld" "$@"
 '''
 
