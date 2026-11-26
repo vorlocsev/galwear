@@ -436,6 +436,82 @@ class MappingSymbolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "file-backed"):
             self.analyze(bytes(raw))
 
+class LiteralPoolTests(unittest.TestCase):
+    def analyze(self, raw):
+        return target.audit(raw, auto_callees=True, callee_depth=2, static_symbols=True,
+                            mapping_symbols=True, literal_pools=True)
+
+    def arm_fixture(self, branch=0xea000001, literal=0xe59f0004):
+        raw = bytearray(mapping_fixture([(b"$a", 0x1100), (b"$d", 0x1108), (b"$a.1", 0x1110)]))
+        # Data at 0x1108 resembles BL; only the real literal is relocated.
+        struct.pack_into("<7I", raw, 0x100, literal, branch, 0xeb00002c, 0x2100,
+                         0xe1a01000, 0xe12fff1e, 0xe320f000)
+        struct.pack_into("<I", raw, 0x20c, 32)
+        struct.pack_into("<II", raw, 0x418, 0x110c, 23)
+        return bytes(raw)
+
+    def test_arm_pool_skipped_and_literal_loaded(self):
+        r = self.analyze(self.arm_fixture())
+        self.assertEqual(r["factory_symbol"]["mapping_symbol_coverage"], "CODE_AND_DATA_METADATA_ONLY")
+        self.assertEqual(r["auto_callee_candidates"], [])
+        flow = r["code_ranges"][0]["pic_flow"]
+        self.assertEqual(flow["boundaries"], [])
+        self.assertEqual(flow["events"], [{"address": 0x1100, "register": "r0", "slot_va": 0x110c,
+                                           "table_va": 0x2100, "kind": "RELOCATED_LITERAL_LOAD"}])
+
+    def test_arm_branch_or_fallthrough_into_data(self):
+        for branch in (0xea000000, 0xe320f000, 0x1a000001):
+            flow = self.analyze(self.arm_fixture(branch))["code_ranges"][0]["pic_flow"]
+            self.assertEqual(flow["events"], [])
+            self.assertEqual(flow["boundaries"][0]["reason"], "edge_into_data_or_noninstruction")
+
+    def test_literal_must_be_inside_marked_data(self):
+        flow = self.analyze(self.arm_fixture(literal=0xe59f0078))["code_ranges"][0]["pic_flow"]
+        self.assertEqual(flow["events"], [])
+        self.assertEqual(flow["boundaries"][0]["reason"], "literal_outside_marked_data")
+
+    def thumb_fixture(self, branch=0xe003, resume=0x4770):
+        raw = bytearray(mapping_fixture([(b"$t", 0x1100), (b"$d", 0x1104), (b"$t.1", 0x110c), (b"$a", 0x111c)]))
+        struct.pack_into("<I", raw, 0x4d4, 0x1101)
+        struct.pack_into("<4H", raw, 0x100, 0x4801, branch, 0xbf08, 0xf000)
+        struct.pack_into("<I", raw, 0x108, 0x2100)
+        struct.pack_into("<8H", raw, 0x10c, resume, *([0xbf00] * 7))
+        struct.pack_into("<I", raw, 0x20c, 32)
+        struct.pack_into("<II", raw, 0x418, 0x1108, 23)
+        return bytes(raw)
+
+    def test_thumb_data_is_not_it_or_wide_instruction(self):
+        flow = self.analyze(self.thumb_fixture())["code_ranges"][0]["pic_flow"]
+        self.assertEqual(flow["boundaries"], [])
+        self.assertEqual(flow["events"][0]["slot_va"], 0x1108)
+        self.assertEqual(flow["events"][0]["kind"], "RELOCATED_LITERAL_LOAD")
+
+    def test_thumb_branch_into_data_or_wide_tail(self):
+        for raw in (self.thumb_fixture(branch=0xe001), self.thumb_fixture(branch=0xe004, resume=0xf240),
+                    self.thumb_fixture(branch=0xbf00)):
+            flow = self.analyze(raw)["code_ranges"][0]["pic_flow"]
+            self.assertEqual(flow["events"], [])
+            self.assertTrue(flow["boundaries"])
+
+    def test_callee_data_pool_keeps_return_summary(self):
+        raw = bytearray(mapping_fixture([(b"$a", 0x1100), (b"$d", 0x11c4), (b"$a.1", 0x11c8)]))
+        struct.pack_into("<3I", raw, 0x1c0, 0xea000000, 0xeb000005, 0xe12fff1e)
+        report = self.analyze(bytes(raw))
+        self.assertEqual(len(report["auto_callee_candidates"]), 1)
+        flow = report["code_ranges"][0]["pic_flow"]
+        self.assertEqual(flow["boundaries"], [])
+        self.assertEqual(flow["events"][0]["table_va"], 0x2100)
+
+    def test_strict_mode_and_misaligned_data_unchanged(self):
+        with self.assertRaises(ValueError):
+            target.audit(self.arm_fixture(), auto_callees=True, static_symbols=True, mapping_symbols=True)
+        with self.assertRaises(ValueError):
+            target.audit(self.arm_fixture(), literal_pools=True)
+        with self.assertRaises(ValueError):
+            self.analyze(mapping_fixture([(b"$a", 0x1100), (b"$d", 0x1109), (b"$a.1", 0x1110)]))
+        with self.assertRaises(ValueError):
+            self.analyze(mapping_fixture([(b"$a", 0x1100), (b"$t", 0x1110)]))
+
 
 if __name__ == "__main__":
     unittest.main()
