@@ -136,6 +136,27 @@ class BridgeIntegration(unittest.TestCase):
         self.assertNotIn("MOCK_CLEANUP\n",evidence)
         self.assertNotIn("MOCK_STOP\n",evidence)
 
+    def test_late_data_dropped_during_stop_and_idle(self):
+        cwd,proc,log=self.launch("late-data")
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+            s.settimeout(5); s.connect(str(cwd/"gps.sock"))
+            with s.makefile("rb") as lines:
+                s.sendall(b"START\n")
+                self.assertEqual(lines.readline(),b"STATUS 1\n")
+                self.assertTrue(lines.readline().startswith(b"FIX "))
+                self.assertTrue(lines.readline().startswith(b"NMEA "))
+                s.sendall(b"STOP\n")
+                self.assertEqual(lines.readline(),b"STATUS 2\n")
+                s.sendall(b"TIME 123 0 100\nSTART\n")
+                self.assertEqual(lines.readline(),b"STATUS 1\n")
+                self.assertTrue(lines.readline().startswith(b"FIX "))
+                self.assertTrue(lines.readline().startswith(b"NMEA "))
+                s.sendall(b"STOP\n")
+                self.assertEqual(lines.readline(),b"STATUS 2\n")
+        self.assertIn("MOCK_LATE_DATA\n",log.read_text())
+        self.assertFalse((cwd/"gps.last").exists())
+        self.assertIsNone(proc.poll())
+
     def test_sigterm_idle_cleans_up(self):
         cwd,proc,log=self.launch("normal")
         proc.terminate()
