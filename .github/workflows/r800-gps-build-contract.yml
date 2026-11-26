@@ -9,6 +9,9 @@ on:
       - src/tools/gps/build.sh
       - tests/test_r800_gps_build.py
       - build/r800_gps_link_gate.py
+      - build/r800_gps_glibc_qemu.sh
+      - tests/r800_glibc_probe.c
+      - tests/r800_glibc_probe_plugin.c
       - build/r800_gps_donor_snapshot.py
       - build/r800_gps_publish.py
       - build/r800_gps_provenance.py
@@ -85,6 +88,28 @@ jobs:
         run: |
           sh -n src/tools/gps/build.sh
           python3 -m py_compile build/r800_gps_pic_flow.py tests/test_r800_gps_pic_flow.py build/r800_gps_factory_xref.py tests/test_r800_gps_factory_xref.py build/r800_gps_interface_xref.py tests/test_r800_gps_interface_xref.py build/r800_gps_interface_table.py tests/test_r800_gps_interface_table.py build/r800_gps_xtra_nested_calls.py tests/test_r800_gps_xtra_nested_calls.py build/r800_gps_xtra_calls.py tests/test_r800_gps_xtra_calls.py build/r800_gps_xtra_dataflow.py tests/test_r800_gps_xtra_dataflow.py build/r800_gps_xtra_cfg.py tests/test_r800_gps_xtra_cfg.py build/r800_gps_xtra_disasm.py tests/test_r800_gps_xtra_disasm.py build/r800_gps_export_audit.py tests/test_r800_gps_export_audit.py build/r800_gps_xtra_matrix.py tests/test_r800_gps_xtra_matrix.py build/r800_gps_repeatability.py build/r800_gps_provenance.py build/r800_gps_publish.py build/r800_gps_donor_snapshot.py tests/test_r800_gps_build.py build/r800_android_userspace_preflight.py tests/test_android_userspace_preflight.py
+      - name: ARM32 glibc probe compile-only smoke
+        run: |
+          set -eu
+          export LC_ALL=C
+          sh -n build/r800_gps_glibc_qemu.sh
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          clang --version
+          for source in tests/r800_glibc_probe.c tests/r800_glibc_probe_plugin.c; do
+            output="$tmp/$(basename "$source").o"
+            clang --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -Wall -Wextra -Werror -c "$source" -o "$output"
+            readelf -h "$output" > "$output.header"
+            grep -Eq 'Class:[[:space:]]*ELF32' "$output.header"
+            grep -Eq 'Data:.*little endian' "$output.header"
+            grep -Eq 'Type:[[:space:]]*REL' "$output.header"
+            grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$output.header"
+            grep -Eq 'Flags:.*Version5 EABI' "$output.header"
+          done
+          echo "ARM32_PROBE_COMPILE_ONLY=PASS"
+          echo "QEMU_EXECUTED=false"
+          echo "safe_to_flash=false"
+
       - name: Synthetic builder regression tests
         run: python3 -m unittest discover -s tests -p test_r800_gps_build.py -v
 
