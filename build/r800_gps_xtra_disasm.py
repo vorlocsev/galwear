@@ -59,12 +59,12 @@ def immediate_value(value):
     return int(value, 16 if value.lstrip("-").startswith("0x") else 10)
 
 
-def trace_prefix(lines, entry):
+def trace_prefix(lines, entry, *, initial=None, state_out=None):
     """Track only an uninterrupted, supported prefix under an r0 entry hypothesis."""
-    regs = {"r0": ("argument", 0, None)}
+    regs = {"r0": ("argument", 0, None)} if initial is None else dict(initial[0])
     events = []
-    sp = 0
-    slots = {}
+    sp = 0 if initial is None else initial[1]
+    slots = {} if initial is None else dict(initial[2])
     previous = None
     reason = "end_of_function"
 
@@ -209,6 +209,8 @@ def trace_prefix(lines, entry):
             break
         if len(events) > 4096:
             raise ValueError("Register trace exceeds limit")
+    if state_out is not None and reason == "end_of_function":
+        state_out.append((regs, sp, slots))
     return {"entry_argument_assumption": "r0", "events": events,
             "stop_reason": reason, "stack_delta_at_stop": sp,
             "full_control_flow_analyzed": False}
