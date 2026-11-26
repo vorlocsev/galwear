@@ -386,3 +386,70 @@ class NestedLeafTests(unittest.TestCase):
             self.assertTrue(resolve(0x1000, 'arm', {0: ('constant', i)})['accepted'])
         self.assertFalse(resolve(0x1000, 'arm', {0: ('constant', 32)})['accepted'])
         self.assertTrue(resolve(0x1000, 'arm', {0: ('constant', 0)})['accepted'])
+
+
+class WideThumbTests(unittest.TestCase):
+    def test_branch_encodings(self):
+        from r800_gps_pic_flow import thumb_branch
+        for a, b, va, result in ((0xf000, 0xb806, 0, (16, False)),
+                                  (0xf000, 0x8004, 4, (16, True)),
+                                  (0xf7ff, 0xbff6, 16, (0, False)),
+                                  (0xf47f, 0xaff4, 20, (0, True)),
+                                  (0xf000, 0xf806, 0, None),
+                                  (0xf000, 0xe806, 0, None),
+                                  (0xf380, 0x8000, 0, None)):
+            with self.subTest(a=a, b=b):
+                self.assertEqual(thumb_branch(a, b, 4, va), result)
+
+    def test_wide_branch_skips_unreachable(self):
+        r = ThumbFlowTests().run_flow([0xf000, 0xb801, 0xbe00, 0x4770])
+        self.assertEqual(r['boundaries'], [])
+        self.assertEqual(r['reached_instructions'], 2)
+
+    def test_conditional_wide_branch_merges(self):
+        for fallthrough, expected in ((0xbf00, 1), (0x4610, 0)):
+            r = ThumbFlowTests().run_flow([0xf640, 0x70ee, 0xf2c0, 0,
+                                          0xf000, 0x8001, fallthrough, 0x4478, 0x4770])
+            self.assertEqual(r['boundaries'], [])
+            self.assertEqual(len(r['events']), expected)
+
+    def test_backward_wide_branch(self):
+        r = ThumbFlowTests().run_flow([0xbf00, 0xf7ff, 0xbffd])
+        self.assertTrue(r['converged'])
+        self.assertEqual(r['back_edge_count'], 1)
+        self.assertEqual(r['boundaries'], [])
+
+    def test_wide_branch_tail_and_outside(self):
+        for words in ([0xf000, 0xb801, 0xf240, 0, 0x4770], [0xf000, 0xb840, 0x4770]):
+            r = ThumbFlowTests().run_flow(words)
+            self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+            self.assertEqual(r['events'], [])
+
+    def literal_report(self, words, data):
+        raw = bytearray(pic_image(0x2100))
+        struct.pack_into('<' + 'H'*len(words), raw, 0x100, *words)
+        # Fixture's original relocated literal is at 0x1180. Add one at 0x1108.
+        struct.pack_into('<I', raw, 0x20c, 32)
+        struct.pack_into('<II', raw, 0x418, 0x1108, 23)
+        return audit(bytes(raw), [('factory', 'thumb', 0x1100, 2*len(words))],
+                     data_by_range={(0x1100, 'thumb'): data})['code_ranges'][0]
+
+    def test_wide_literal_positive_and_negative(self):
+        # Positive: PC=0x1104, slot=0x1108. Negative: PC=0x1110, same slot.
+        for words, reg in (([0xf8df, 0x8004, 0xe002, 0xbf00, 0x2100, 0, 0x4770], 'r8'),
+                           ([0xe004, 0xbf00, 0xbf00, 0xbf00, 0x2100, 0, 0xf85f, 0x9008, 0x4770], 'r9')):
+            with self.subTest(reg=reg):
+                r = self.literal_report(words, [(0x1108, 0x110c)])
+                self.assertEqual(r['pic_flow']['boundaries'], [])
+                self.assertEqual(r['pic_flow']['events'][0]['register'], reg)
+                self.assertEqual(r['pic_flow']['events'][0]['slot_va'], 0x1108)
+                self.assertEqual(r['literal_load_clues'][0]['register'], reg)
+
+    def test_wide_literal_alignment_and_registers(self):
+        from r800_gps_pic_flow import thumb_literal
+        self.assertEqual(thumb_literal(0xf8df, 0x8004, 4, 0x1102), (8, 0x1108))
+        for reg in (13, 14, 15):
+            self.assertIsNone(thumb_literal(0xf8df, reg << 12, 4, 0x1100))
+        r = self.literal_report([0xf8df, 0x8005, 0xe002, 0xbf00, 0x2100, 0, 0x4770], [(0x1108, 0x110c)])
+        self.assertEqual(r['pic_flow']['events'], [])
+        self.assertEqual(r['pic_flow']['boundaries'][0]['reason'], 'literal_outside_marked_data')
