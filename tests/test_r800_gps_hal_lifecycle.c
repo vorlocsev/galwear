@@ -6,6 +6,10 @@
 static char test_path[108];
 #define SOCK_PATH test_path
 #define R800_GPS_HOST_TEST 1
+/* Legacy fixture explicitly exercises v1 unless another mode is requested. */
+#if !defined(R800_GPS_IPC_V2) && !defined(R800_GPS_TEST_SOURCE_DEFAULT)
+#define R800_GPS_IPC_V2 0
+#endif
 #include "../src/hal/gps_r800.c"
 struct launch { void (*fn)(void *); void *arg; };
 static void *run_thread(void *arg)

@@ -2,7 +2,7 @@
 # Compile legacy Android ARM32 HAL candidates; never load or execute them.
 # Usage: sh build/r800_build_hals.sh <Android NDK r27c> <new-output-dir>
 set -eu
-GPS_IPC_V2=${R800_GPS_IPC_V2-0}
+GPS_IPC_V2=${R800_GPS_IPC_V2-1}
 case "$GPS_IPC_V2" in 0|1) ;; *) echo "invalid R800_GPS_IPC_V2 (expected 0 or 1)" >&2; exit 2;; esac
 [ "$#" -eq 2 ] || { echo "usage: $0 <NDK r27c> <new-output-dir>" >&2; exit 2; }
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

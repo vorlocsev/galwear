@@ -38,7 +38,7 @@
 #include "gps_v2_control.h"
 
 #ifndef R800_GPS_IPC_V2
-#define R800_GPS_IPC_V2 0
+#define R800_GPS_IPC_V2 1
 #endif
 #if R800_GPS_IPC_V2 != 0 && R800_GPS_IPC_V2 != 1
 #error Invalid R800_GPS_IPC_V2

@@ -35,6 +35,13 @@ for mode in 0 1; do
     sha256sum "$module"
     echo "GPS_ANDROID_API28_ARM32_IPC_$mode=PASS"
 done
+mkdir "$TMP/default"
+"$CC" -std=gnu11 -O2 -g0 -Wall -Wextra -Werror -fPIC -shared \
+    -Wl,--no-undefined -march=armv7-a -mfpu=neon \
+    -I "$ROOT/src/hal/include" -Wl,-soname,gps.r800.so \
+    -o "$TMP/default/gps.r800.so" "$ROOT/src/hal/gps_r800.c" -llog -ldl -lm
+cmp "$TMP/default/gps.r800.so" "$TMP/1/gps.r800.so"
+echo "GPS_ANDROID_DEFAULT_IPC_V2=PASS"
 if cmp -s "$TMP/0/gps.r800.so" "$TMP/1/gps.r800.so"; then
     echo "IPC modes unexpectedly identical" >&2
     exit 1

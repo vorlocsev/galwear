@@ -25,6 +25,7 @@ class BridgeIntegration(unittest.TestCase):
             ("libbrcm-test.so", ["-fPIC", "-shared", "tests/r800_mock_brcm.c"]),
             ("android-peer", ["tests/test_r800_gps_both_sides.c"]),
             ("android-peer-v2", ["-DR800_GPS_IPC_V2=1", "tests/test_r800_gps_both_sides.c"]),
+            ("android-peer-default", ["-DR800_GPS_TEST_SOURCE_DEFAULT=1", "tests/test_r800_gps_both_sides.c"]),
         ):
             subprocess.run(flags + args + ["-o", str(cls.bin/name)],
                            cwd=ROOT, check=True, timeout=30)
@@ -77,6 +78,15 @@ class BridgeIntegration(unittest.TestCase):
         self.assertEqual(evidence.count("MOCK_START\n"),2)
         self.assertEqual(evidence.count("MOCK_STOP\n"),2)
         self.assertEqual(evidence.count("MOCK_ASYNC_DATA\n"),2)
+        self.assertIsNone(proc.poll())
+
+    def test_default_build_uses_v2(self):
+        cwd,proc,log=self.launch("async-data")
+        run=subprocess.run([str(self.bin/"android-peer-default")],cwd=cwd,
+                           capture_output=True,text=True,timeout=25)
+        self.assertEqual(run.returncode,0,run.stdout+run.stderr+log.read_text())
+        self.assertIn("GPS_BOTH_SIDES=PASS",run.stdout)
+        self.assertEqual(log.read_text().count("MOCK_ASYNC_DATA\n"),2)
         self.assertIsNone(proc.poll())
 
     def test_v2_async_data_and_reconnect(self):

@@ -57,8 +57,9 @@ jobs:
           sh -n build/r800_build_hals.sh
           sh -n build/r800_gps_hal_ndk_checks.sh
           rc=0
-          R800_GPS_IPC_V2=2 sh build/r800_build_hals.sh || rc=$?
+          R800_GPS_IPC_V2=2 sh build/r800_build_hals.sh > "$RUNNER_TEMP/gps-invalid.txt" 2>&1 || rc=$?
           test "$rc" -eq 2
+          grep -Fq "invalid R800_GPS_IPC_V2" "$RUNNER_TEMP/gps-invalid.txt"
       - name: Install pinned Android NDK r27c
         run: |
           set -eu
