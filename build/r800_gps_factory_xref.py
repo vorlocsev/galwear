@@ -193,7 +193,70 @@ def factory_range(raw):
     return checked_range(mapping, index, value, size, info, other, section, "SYSV", None)
 
 
-def automatic_callees(raw, factory, depth):
+def static_function_spans(raw, mapping, dynamic_keys):
+    """Optional section-backed local functions; exact dynsym duplicates are ignored."""
+    shoff, = struct.unpack_from("<I", raw, 32)
+    entsize, count, names = struct.unpack_from("<HHH", raw, 46)
+    if not shoff and not count and not names:
+        return []
+    if not shoff or entsize != 40 or not 1 <= count <= 4096 or names >= count or shoff + count * 40 > len(raw):
+        raise ValueError("Invalid or extended ELF section header table")
+    sections = [struct.unpack_from("<10I", raw, shoff + 40*i) for i in range(count)]
+    if any(sections[0]):
+        raise ValueError("Invalid null section header")
+    symtabs = [s for s in sections if s[1] == 2]
+    if not symtabs:
+        return []
+    if len(symtabs) != 1:
+        raise ValueError("Multiple static symbol tables")
+    _, _, _, _, off, size, link, local_end, _, entry = symtabs[0]
+    if entry != 16 or size % 16 or not 1 <= size // 16 <= 65536 or off + size > len(raw) or not 0 < link < count:
+        raise ValueError("Invalid static symbol table")
+    if not 1 <= local_end <= size // 16 or any(raw[off:off+16]):
+        raise ValueError("Invalid static symbol partition or null symbol")
+    _, typ, _, _, so, ss, *_ = sections[link]
+    if typ != 3 or not 1 <= ss <= MAX_STRINGS or so + ss > len(raw) or raw[so] or raw[so+ss-1]:
+        raise ValueError("Invalid static string table")
+    strings = raw[so:so+ss]
+    spans = []
+    for i in range(1, size // 16):
+        name, value, extent, info, other, section = struct.unpack_from("<IIIBBH", raw, off+16*i)
+        if (info >> 4 == 0) != (i < local_end):
+            raise ValueError("Invalid static symbol binding partition")
+        if info & 15 not in (2, 10) or not value or not 0 < section < 0xff00:
+            continue
+        if section >= count or name >= ss:
+            raise ValueError("Static function section or name out of bounds")
+        stop = strings.find(b"\0", name, min(ss, name+4096))
+        if stop < 0:
+            raise ValueError("Invalid static function name")
+        label = strings[name:stop]
+        key = (value, extent, info, other, section, label)
+        if key in dynamic_keys:
+            continue
+        start, isa = value & ~1, "thumb" if value & 1 else "arm"
+        align = 2 if isa == "thumb" else 4
+        end = start + max(extent, 1)
+        _, typ, flags, addr, fileoff, length, *_ = sections[section]
+        row = None
+        if (info == 2 and other & 3 == 0 and label and 0 < extent <= 4096
+                and start % align == 0 and extent % align == 0 and end <= 2**32
+                and typ == 1 and flags & 7 == 6 and addr <= start and end <= addr + length
+                and fileoff + length <= len(raw)):
+            try:
+                mapped, pf = mapping(start, extent)
+                if mapped == fileoff + start - addr and pf & 1 and not pf & 2:
+                    row = {"symbol_index": i, "symbol_name": label.decode("utf-8", "replace"),
+                           "isa": isa, "start_va": start, "size": extent, "symbol_source": "SHT_SYMTAB",
+                           "section_index": section, "version_index": None,
+                           "symbol_version": None, "version_hidden": False}
+            except ValueError:
+                pass
+        spans.append((start, end, i, row))
+    return spans
+
+
+def automatic_callees(raw, factory, depth, *, static_symbols=False):
     """Find nonpreemptible dynamic function ranges at direct call candidates."""
     from r800_gps_pic_flow import arm_call, thumb_call
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
@@ -223,6 +286,7 @@ def automatic_callees(raw, factory, depth):
         raise ValueError("Version metadata without DT_VERSYM")
     off, _ = mapping(one(6), count * 16)
     spans = []
+    dynamic_keys = set()
     for i in range(1, count):
         name, value, size, info, other, section = struct.unpack_from("<IIIBBH", raw, off + i * 16)
         if info & 15 not in (2, 10) or not 0 < section < 0xff00 or not value:
@@ -251,7 +315,13 @@ def automatic_callees(raw, factory, depth):
                        "isa": isa, "start_va": start, "size": size,
                        "version_index": version_index, "symbol_version": definitions.get(version_index),
                        "version_hidden": hidden}
+        if static_symbols and name < len(strings):
+            stop = strings.find(b"\0", name, min(len(strings), name + 256))
+            if stop >= 0:
+                dynamic_keys.add((value, size, info, other, section, strings[name:stop]))
         spans.append((start, end, i, row))
+    if static_symbols:
+        spans.extend(static_function_spans(raw, mapping, dynamic_keys))
     spans.sort(key=lambda s: (s[0], s[1], s[2]))
     candidates = {}
     previous_end = 0
@@ -295,16 +365,18 @@ def automatic_callees(raw, factory, depth):
     return list(selected.values())
 
 
-def audit(raw, *, auto_callees=False, callee_depth=1):
+def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False):
     symbol = factory_range(raw)
     if type(callee_depth) is not int or not 1 <= callee_depth <= 4 or (callee_depth != 1 and not auto_callees):
         raise ValueError("Callee depth requires automatic mode and must be between 1 and 4")
-    callees = automatic_callees(raw, symbol, callee_depth) if auto_callees else []
+    if static_symbols and not auto_callees:
+        raise ValueError("Static symbol mode requires automatic callee mode")
+    callees = automatic_callees(raw, symbol, callee_depth, static_symbols=static_symbols) if auto_callees else []
     report = xref(raw, [("factory", symbol["isa"], symbol["start_va"], symbol["size"])],
                   assume_aapcs=auto_callees, callee_ranges=[(r["isa"], r["start_va"], r["size"]) for r in callees],
                   callee_depth=callee_depth if callees else 1)
     report.update(auto_callee_mode=auto_callees, auto_callee_candidates=callees,
-                  requested_callee_depth=callee_depth, callee_discovery_complete=False)
+                  requested_callee_depth=callee_depth, static_symbol_mode=static_symbols, callee_discovery_complete=False)
     report.update(schema="galwear-r800-gps-factory-xref-v1", factory_symbol=symbol,
                   symbol_range_from_metadata=True, function_boundaries_verified=False,
                   factory_signature_verified=False)
@@ -317,9 +389,10 @@ def main():
     parser.add_argument("--library", required=True, type=Path)
     parser.add_argument("--auto-callees", action="store_true", help="Discover bounded direct-call symbol candidates")
     parser.add_argument("--callee-depth", type=int, default=1)
+    parser.add_argument("--static-symbols", action="store_true", help="Include section-backed local function symbols")
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth)
+        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth, static_symbols=args.static_symbols)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc),
                   "selected_abi": None, "safe_to_flash": False}
