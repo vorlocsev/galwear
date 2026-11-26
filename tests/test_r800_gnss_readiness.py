@@ -108,6 +108,14 @@ class ReadinessTests(unittest.TestCase):
             self.assertIn("tizen_preflight",report["blockers"])
             self.assertFalse(report["safe_to_flash"])
 
+    def test_qemu_requires_explicit_complete_inputs(self):
+        with patch.object(sys,"argv",["readiness","--donor-qemu"]), \
+             patch.object(r,"git_state",return_value=("a"*40,True)), \
+             patch.object(r,"run_donor") as launch, patch("builtins.print") as output:
+            self.assertEqual(r.main(),2)
+            launch.assert_not_called()
+            self.assertEqual(json.loads(output.call_args.args[0])["decision"],"REJECT_EVIDENCE")
+
     def test_hold_even_when_static_passes(self):
         report=r.summarize("a"*40,True,[r.outcome("link","STATIC_PASS")])
         self.assertFalse(report["safe_to_flash"])
