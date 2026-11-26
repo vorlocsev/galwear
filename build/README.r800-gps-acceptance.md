@@ -64,3 +64,16 @@ It exits 0 for CONSISTENCY_PASS and 2 for REVIEW_REQUIRED.
 Consistency checks are not independent attestation of test execution:
 a fabricated bundle with recomputed hashes may still pass. No vendor
 ABI, hardware readiness, signature or permission to flash is established.
+
+
+## CI evidence
+
+The R800 GPS builder contract workflow runs the host-only acceptance matrix
+and then verifies the saved report with `--mode host --check-sources`.
+The artifact `r800-gnss-host-<commit-sha>-<run-attempt>` includes the
+checkout SHA, available report and logs, and verifier output when that step
+runs. Artifacts are retained for 14 days. Failed acceptance runs also
+attempt artifact upload; an absent evidence directory is an upload error.
+The workflow does not download donor libraries, execute QEMU, or publish a
+flashable image. A missing artifact or unsuccessful workflow is not evidence
+of acceptance. Use the actual workflow run and commit SHA when citing CI.
