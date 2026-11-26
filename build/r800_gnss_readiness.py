@@ -9,6 +9,13 @@ import subprocess
 import sys
 from r800_gnss_ci import check as check_ci
 from r800_gnss_donor_gate import run as run_donor
+from r800_android_userspace_preflight import guest_path, read_regular
+from r800_gnss_ipc_layout import label_evidence, label_review
+from r800_gnss_registration import SERVICE, SEC_SERVICE
+from r800_gnss_policy import requirements
+
+POLICY_PATHS=("/sepolicy","/vendor/etc/selinux/precompiled_sepolicy",
+              "/odm/etc/selinux/precompiled_sepolicy")
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -108,6 +115,55 @@ def donor_gate(sha,image,digest,ndk,output,run_qemu=False):
         return outcome("donor_image_link","ERROR",reason=str(exc))
 
 
+def policy_gate(android, guest, digest, types_path, registration):
+    name="selinux_policy_candidates"
+    if guest is None:
+        return outcome(name,"NOT_TESTED",reason="Offline binary policy inputs absent")
+    if registration.get("status")!="STATIC_PASS":
+        return outcome(name,"BLOCKED",reason="Android registration candidate not confirmed")
+    try:
+        if guest not in POLICY_PATHS:
+            raise ValueError("Unsupported guest policy path")
+        profile=registration.get("detail",{}).get("service_profile")
+        if profile not in ("AOSP_CANDIDATE","SAMSUNG_J4_CANDIDATE"):
+            raise ValueError("Unresolved Android registration profile")
+        samsung=profile=="SAMSUNG_J4_CANDIDATE"
+        types=json.loads(read_regular(types_path,16384))
+        if not isinstance(types,dict):
+            raise ValueError("Expected type candidate JSON object")
+        requirements(types,samsung)
+        labels=label_evidence(android)
+        issues=label_review(labels,SEC_SERVICE if samsung else SERVICE)
+        names={"android.hardware.gnss::IGnss":"gnss_hwservice_type"}
+        if samsung:
+            names["vendor.samsung.hardware.gnss::ISecGnss"]="sec_hwservice_type"
+        for interface,key in names.items():
+            records=[r["context"] for f in labels.values() if f["kind"]=="hwservice_contexts"
+                     for r in f["candidates"] if r["pattern"]==interface]
+            if not records or any(c.split(":")[2:3]!=[types[key]] for c in records):
+                issues.append("HWSERVICE_TYPE_MISMATCH:"+interface)
+        if issues:
+            return outcome(name,"REVIEW_REQUIRED",problems=issues,label_evidence=labels)
+        path=guest_path(android,guest)
+        args=["--policy",path,"--sha256",digest,"--types",types_path]
+        if samsung:
+            args.append("--samsung")
+        gate=static_gate(name,"r800_gnss_policy.py",args,"STATIC_ALLOW_CANDIDATES_ONLY",
+                         bindings={"schema":"r800-gnss-policy-candidates-v1",
+                                   "policy_sha256":digest,"profile":"samsung" if samsung else "aosp",
+                                   "types":types,"effective_labels_verified":False,
+                                   "constraints_verified":False,"domain_transitions_verified":False,
+                                   "policy_loaded_verified":False,"runtime_enforcing_verified":False,
+                                   "selinux_access_verified":False},timeout=600)
+        if label_evidence(android)!=labels or json.loads(read_regular(types_path,16384))!=types:
+            raise ValueError("SELinux label or type inputs changed during audit")
+        gate["guest_policy"]=guest
+        gate["label_evidence"]=labels
+        return gate
+    except (OSError,ValueError,subprocess.SubprocessError) as exc:
+        return outcome(name,"ERROR",reason=str(exc))
+
+
 def summarize(sha, clean, gates):
     all_gates=list(gates)+[outcome(name,"NOT_TESTED",reason="Separate runtime evidence required")
                            for name in RUNTIME if name!="donor_glibc_qemu"]
@@ -139,6 +195,9 @@ def main():
     p.add_argument("--donor-ndk",type=Path)
     p.add_argument("--donor-output",type=Path)
     p.add_argument("--donor-qemu",action="store_true",help="Explicitly execute trusted glibc in isolated QEMU sandbox")
+    p.add_argument("--selinux-policy",choices=POLICY_PATHS,help="Guest binary policy path inside Android root")
+    p.add_argument("--selinux-policy-sha256")
+    p.add_argument("--selinux-types",type=Path)
     p.add_argument("--run-offline",action="store_true")
     p.add_argument("--check-ci",action="store_true",help="Query live exact-head GitHub Actions metadata via gh")
     a=p.parse_args()
@@ -156,6 +215,12 @@ def main():
             raise ValueError("Donor link requires --donor-ndk, --donor-output and image inputs")
         if a.donor_qemu and a.donor_ndk is None:
             raise ValueError("--donor-qemu requires the complete donor link inputs")
+        policy_inputs=(a.selinux_policy,a.selinux_policy_sha256,a.selinux_types)
+        if any(v is not None for v in policy_inputs):
+            if any(v is None for v in policy_inputs) or a.android_root is None:
+                raise ValueError("SELinux audit requires Android root, policy path, SHA-256 and type candidates")
+            if not re.fullmatch(r"[0-9a-f]{64}",a.selinux_policy_sha256):
+                raise ValueError("Expected lowercase policy SHA-256")
         for root in (a.android_root,a.tizen_root):
             if root is not None and (not root.is_dir() or root.resolve()==Path("/")):
                 raise ValueError("Use isolated, prepared offline roots")
@@ -182,6 +247,9 @@ def main():
                static_gate("glibc_link","r800_gps_link_gate.py",
                            ["--binary",a.binary,"--libdir",a.libdir] if a.binary and a.libdir else None,
                            "STATIC_GLIBC_CLOSURE_ONLY")]
+        registration=next(g for g in gates if g["gate"]=="android_registration")
+        gates.append(policy_gate(a.android_root,a.selinux_policy,a.selinux_policy_sha256,
+                                 a.selinux_types,registration))
         donor=donor_gate(sha,a.tizen_image,a.tizen_image_sha256,a.donor_ndk,a.donor_output,a.donor_qemu)
         donor["qemu_requested"]=a.donor_qemu
         gates.append(donor)

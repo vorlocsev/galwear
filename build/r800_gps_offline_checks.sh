@@ -25,6 +25,7 @@ python3 build/r800_run_required_suite.py "test_r800_gps_bridge_integration.py"
 python3 build/r800_run_required_suite.py 'test_r800_gnss_registration.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_ipc_layout.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_policy.py'
+python3 build/r800_run_required_suite.py 'test_r800_gnss_policy_readiness.py'
 python3 build/r800_run_required_suite.py 'test_r800_gps_link_gate.py'
 python3 build/r800_run_required_suite.py 'test_r800_gps_binary_elf.py'
 python3 build/r800_run_required_suite.py 'test_r800_stage_gps_donors.py'
