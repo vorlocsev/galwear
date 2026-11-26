@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
-from r800_tzlite_dac import acl_bits, mode_bits, inode_candidate, canonical_path_candidate, identity_candidates
+from r800_tzlite_dac import acl_bits, mode_bits, inode_candidate, canonical_path_candidate, alias_path_candidate, identity_candidates
 
 GROUPS={1:[(7,0xffffffff)],2:[(6,5001)],4:[(4,0xffffffff)],
         8:[(3,5002)],16:[(5,0xffffffff)],32:[(7,0xffffffff)]}
@@ -45,6 +45,31 @@ class DacTests(unittest.TestCase):
                          "CONDITIONAL_MODE_CANDIDATE")
         del entries["/usr"]
         self.assertEqual(canonical_path_candidate(entries,"/usr/file",4)["status"],"REVIEW_REQUIRED")
+    def test_alias_detour_traversal(self):
+        def item(kind,bits):
+            return {"kind":kind,"dac_candidate":{"permission_bits":bits,
+                    "status":"MODE_ONLY_ACL_ABSENCE_UNVERIFIED"}}
+        entries={"/":item("directory",7),"/usr":item("directory",7),
+                 "/usr/lib":item("directory",7),"/usr/lib/private":item("directory",6),
+                 "/usr/lib/real.so":item("regular",7),"/lib":{"kind":"symlink"},
+                 "/usr/lib/alias.so":{"kind":"symlink"}}
+        trace={"canonical":"/usr/lib/real.so",
+               "directories":["/","/usr","/usr/lib","/usr/lib/private"],
+               "symlinks":[{"path":"/lib","target":"usr/lib"},
+                           {"path":"/usr/lib/alias.so","target":"private/../real.so"}]}
+        self.assertEqual(canonical_path_candidate(entries,"/usr/lib/real.so",4)["status"],
+                         "CONDITIONAL_MODE_CANDIDATE")
+        result=alias_path_candidate(entries,"/lib/alias.so","/usr/lib/real.so",trace,4)
+        self.assertEqual(result["status"],"DENIED_CANDIDATE")
+        self.assertEqual(result["denied_paths"],["/usr/lib/private"])
+        self.assertFalse(result["canonical_path_only"])
+
+    def test_alias_missing_trace(self):
+        for trace in (None,{"canonical":"/different","directories":["/"],"symlinks":[]},
+                      {"canonical":"/usr/file","directories":["/"],"symlinks":[]}):
+            self.assertEqual(alias_path_candidate({},"/alias","/usr/file",trace,4)["status"],
+                             "REVIEW_REQUIRED")
+
     def test_nonroot_identity(self):
         self.assertEqual(identity_candidates({"uid_candidate":5001,"primary_gid_candidate":5002}),(5001,5002))
         for uid in (0,True,None,-1):

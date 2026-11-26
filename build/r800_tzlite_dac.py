@@ -55,11 +55,8 @@ def inode_candidate(record,identity):
     return {"status":"MODE_ONLY_ACL_ABSENCE_UNVERIFIED","permission_bits":bits,"selected_class":selected}
 
 
-def canonical_path_candidate(entries,name,required_bit):
-    records={}
-    p=PurePosixPath(name)
-    for parent in reversed(p.parents):
-        records[str(parent)]=1
+def path_candidate(entries,name,required_bit,directories):
+    records={path:1 for path in directories}
     records[name]=required_bit
     denied=[]
     unknown=[]
@@ -78,20 +75,53 @@ def canonical_path_candidate(entries,name,required_bit):
             else "CONDITIONAL_MODE_CANDIDATE" if conditional else "ACL_CANDIDATE")
     return {"status":status,"requested_bit":required_bit,
             "denied_paths":denied,"unknown_paths":unknown,
-            "mode_only_paths":conditional,"canonical_path_only":True}
+            "mode_only_paths":conditional}
 
 
-def summarize(entries,closure,configs,programs,identity):
+def canonical_path_candidate(entries,name,required_bit):
+    result=path_candidate(entries,name,required_bit,
+                          [str(p) for p in reversed(PurePosixPath(name).parents)])
+    return dict(result,canonical_path_only=True)
+
+
+def alias_path_candidate(entries,alias,canonical,trace,required_bit):
+    if (not isinstance(trace,dict) or trace.get("canonical")!=canonical
+            or not isinstance(trace.get("directories"),list)
+            or not trace["directories"] or trace["directories"][0]!="/"
+            or not isinstance(trace.get("symlinks"),list)):
+        return {"status":"REVIEW_REQUIRED","reason":"Missing or mismatched resolver trace",
+                "requested_bit":required_bit,"canonical_path_only":False}
+    directories=trace["directories"]
+    mandatory={str(p) for p in PurePosixPath(canonical).parents}
+    if not mandatory.issubset(directories) or any(
+            entries.get(link["path"],{}).get("kind")!="symlink"
+            for link in trace["symlinks"]):
+        return {"status":"REVIEW_REQUIRED","reason":"Incomplete resolver trace metadata",
+                "requested_bit":required_bit,"canonical_path_only":False}
+    result=path_candidate(entries,canonical,required_bit,directories)
+    return dict(result,canonical_path_only=False,guest_alias=alias,canonical=canonical,
+                traversed_directories=directories,symlink_count=len(trace["symlinks"]))
+
+
+def summarize(entries,closure,configs,programs,identity,traces):
     files={}
     executable={closure["aliases"].get(p) for p in programs}
     for name in sorted(set(closure["files"])|set(configs)):
         files[name]={"read":canonical_path_candidate(entries,name,4)}
         if name in executable:
             files[name]["execute"]=canonical_path_candidate(entries,name,1)
+    aliases={}
+    interpreters={item.get("interpreter") for item in closure["files"].values()}
+    for alias,canonical in sorted(closure["aliases"].items()):
+        trace=traces.get(alias)
+        aliases[alias]={"read":alias_path_candidate(entries,alias,canonical,trace,4)}
+        if alias in programs or alias in interpreters:
+            aliases[alias]["execute"]=alias_path_candidate(entries,alias,canonical,trace,1)
     return {"status":"CONDITIONAL_DAC_CANDIDATES_ONLY",
             "identity":"location","uid_candidate":identity[0],"primary_gid_candidate":identity[1],
             "supplementary_groups_verified":False,"process_identity_verified":False,
             "capability_bypass_modeled":False,"selinux_access_verified":False,
+            "alias_traversal_scope":"STATIC_RESOLVER_TRACE_ONLY",
             "alias_traversal_verified":False,"runtime_mounts_verified":False,
             "gpsbridge_path_status":"NOT_TESTED_EXTERNAL_PAYLOAD",
-            "effective_access_verified":False,"files":files}
+            "effective_access_verified":False,"files":files,"aliases":aliases}

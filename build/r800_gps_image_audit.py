@@ -26,7 +26,7 @@ class ImageResolver:
     """Resolve bounded guest paths without creating guest symlinks on host."""
     def __init__(self, tool, snapshot, scratch):
         self.tool, self.snapshot, self.scratch = tool, snapshot, scratch
-        self.stats, self.files = {}, {}
+        self.stats, self.files, self.traces = {}, {}, {}
         self.total = 0
 
     def stat_guest(self, guest):
@@ -63,8 +63,14 @@ class ImageResolver:
         pending=deque(guest.split("/")[1:])
         done=[]
         links=0
+        steps=0
+        directories=["/"]
+        symlinks=[]
         entry=None
         while pending:
+            steps+=1
+            if steps>512:
+                raise ValueError("Guest traversal step budget exceeded")
             part=pending.popleft()
             if part in ("","."):
                 continue
@@ -83,6 +89,7 @@ class ImageResolver:
                 if links>40:
                     raise ValueError("Guest symlink loop")
                 target=entry[3]
+                symlinks.append({"path":name,"target":target})
                 if target.startswith("/"):
                     done.clear()
                 pending.extendleft(reversed(target.split("/")))
@@ -91,6 +98,8 @@ class ImageResolver:
                 if pending and entry[1]!="directory":
                     raise ValueError("Guest parent is not directory")
                 done.append(part)
+                if entry[1]=="directory":
+                    directories.append(name)
         canonical="/"+"/".join(done)
         if not canonical.startswith(("/usr/bin/","/bin/","/usr/lib/","/lib/")):
             raise ValueError("Guest ELF outside allowed directories")
@@ -116,6 +125,13 @@ class ImageResolver:
             self.files[canonical]={"inode":inode,"bytes":size,
                                    "sha256":hashlib.sha256(raw).hexdigest()}
             self.total+=size
+        trace={"canonical":canonical,"directories":list(dict.fromkeys(directories)),
+               "symlinks":symlinks}
+        if guest not in self.traces and len(self.traces)>=MAX_STATS:
+            raise ValueError("Guest traversal trace budget exceeded")
+        if guest in self.traces and self.traces[guest]!=trace:
+            raise ValueError("Guest traversal evidence changed")
+        self.traces[guest]=trace
         return target,canonical
 
 

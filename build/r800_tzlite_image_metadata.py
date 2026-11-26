@@ -34,6 +34,10 @@ def inspect_metadata(resolver,files,identity):
         wanted.update(str(p) for p in PurePosixPath(name).parents)
     wanted.update(name for name,item in resolver.stats.items()
                   if item is not None and item[1]=="symlink")
+    # A symlink target may traverse a directory which disappears from
+    # the canonical path (for example private/../lib.so).
+    for trace in resolver.traces.values():
+        wanted.update(trace["directories"])
     if len(wanted)>4096:
         raise ValueError("Metadata inode budget exceeded")
     result={}

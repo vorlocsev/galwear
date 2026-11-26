@@ -97,7 +97,7 @@ def compare(root,image,image_sha,manifest_sha):
                 raise ValueError("Extracted ELF changed or not audited:"+name)
         principal=identity_candidates(candidate["configuration_evidence"]["location_account_candidates"])
         original_metadata=inspect_metadata(resolver,expected_files,principal)
-        dac=summarize(original_metadata["entries"],closure,configs,PROGRAMS,principal)
+        dac=summarize(original_metadata["entries"],closure,configs,PROGRAMS,principal,resolver.traces)
         st=image.lstat()
         if (st.st_dev,st.st_ino,st.st_mode,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=identity:
             raise ValueError("Donor image changed")

@@ -131,6 +131,10 @@ class RealStageTests(unittest.TestCase):
         result=compare(self.output,image,sha,digest)
         self.assertEqual(result["status"],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",result)
         self.assertEqual(result["configuration_count"],4)
+        loader=result["dac_candidates"]["aliases"]["/lib/ld-linux.so.3"]
+        self.assertIn("execute",loader)
+        self.assertEqual(loader["read"]["canonical"],LOADER)
+        self.assertFalse(loader["read"]["canonical_path_only"])
         metadata=result["original_metadata"]
         self.assertEqual(metadata["status"],"ORIGINAL_METADATA_INVENTORY_ONLY")
         self.assertEqual(metadata["entries"]["/usr/bin/lhd"]["mode"],"0o755")
@@ -244,6 +248,25 @@ class RealStageTests(unittest.TestCase):
         self.assertFalse(meta["acl_verified"])
         self.assertFalse(meta["capabilities_verified"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
+    def test_image_alias_detour_dac(self):
+        private=self.root/"usr/lib/private"
+        private.mkdir(mode=0o700)
+        alias=self.root/ALIAS.lstrip("/")
+        alias.unlink()
+        alias.symlink_to("private/../libfixture-real.so")
+        digest=self.candidate_digest()
+        image,sha=self.image_fixture()
+        result=compare(self.output,image,sha,digest)
+        self.assertEqual(result["status"],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",result)
+        dac=result["dac_candidates"]
+        alias_read=dac["aliases"]["/lib/libfixture.so.1"]["read"]
+        self.assertEqual(alias_read["status"],"DENIED_CANDIDATE")
+        self.assertIn("/usr/lib/private",alias_read["denied_paths"])
+        self.assertEqual(dac["files"][PROVIDER]["read"]["status"],"CONDITIONAL_MODE_CANDIDATE")
+        self.assertEqual(result["original_metadata"]["entries"]["/usr/lib/private"]["kind"],"directory")
+        self.assertFalse(dac["alias_traversal_verified"])
+        self.assertFalse(dac["effective_access_verified"])
 
     def test_image_configuration_changed(self):
         digest=self.candidate_digest()
