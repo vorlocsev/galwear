@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -226,6 +227,86 @@ class EvidenceMatrixTests(unittest.TestCase):
                      candidate_sha256='wrong')]
         self.assertTrue(acceptance.evidence_errors(
             rows, self.out, {name: ('donor_build', 'PASS')}, 'expected'))
+
+class SavedReportTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            'r800_gps_verify_report', ROOT / 'build/r800_gps_verify_report.py')
+        self.verifier = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {'r800_gps_acceptance': acceptance}):
+            spec.loader.exec_module(self.verifier)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name)
+
+    def fixture(self, mode):
+        donor, qemu = mode != 'host', mode == 'qemu'
+        candidate = None
+        if donor:
+            path = self.out / 'gpsbridge'
+            path.write_bytes(b'mock candidate')
+            candidate = acceptance.digest(path)
+        rows = []
+        for name, (group, status) in acceptance.expected_checks(donor, qemu).items():
+            row = dict(name=name, group=group, status=status)
+            if name == 'experimental-candidate-integrity':
+                row['candidate_sha256'] = candidate
+            elif status == 'PASS':
+                log = self.out / (name + '.log')
+                log.write_bytes(b'mock log')
+                row.update(exit_code=0, log=log.name, log_sha256=acceptance.digest(log))
+            rows.append(row)
+        return dict(schema=self.verifier.SCHEMA, status='REQUESTED_CHECKS_PASS',
+                    evidence_errors=[], host_inputs_unchanged=True,
+                    input_sha256={'source': '0' * 64}, checks=rows,
+                    experimental_binary_sha256=candidate,
+                    **dict.fromkeys(self.verifier.FLAGS, False))
+
+    def verify(self, report, mode='host', check_sources=False):
+        (self.out / 'report.json').write_text(json.dumps(report))
+        return self.verifier.verify(self.out, mode, check_sources)
+
+    def test_all_modes(self):
+        for mode in ('host', 'donor', 'qemu'):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.verify(self.fixture(mode), mode), [])
+
+    def test_mode_cannot_be_downgraded(self):
+        self.assertTrue(self.verify(self.fixture('host'), 'qemu'))
+        self.assertTrue(self.verify(self.fixture('donor'), 'qemu'))
+
+    def test_candidate_changed(self):
+        report = self.fixture('donor')
+        (self.out / 'gpsbridge').write_bytes(b'changed')
+        self.assertTrue(self.verify(report, 'donor'))
+
+    def test_log_changed(self):
+        report = self.fixture('host')
+        (self.out / report['checks'][0]['log']).write_bytes(b'changed')
+        self.assertTrue(self.verify(report))
+
+    def test_invalid_claims(self):
+        for key, value in [('safe_to_flash', True), ('signed_attestation', True),
+                           ('host_inputs_unchanged', False), ('evidence_errors', ['bad']),
+                           ('input_sha256', {'source': 'bad'}), ('checks', [None])]:
+            with self.subTest(key=key):
+                report = self.fixture('host')
+                report[key] = value
+                self.assertTrue(self.verify(report))
+
+    def test_duplicate_json_key(self):
+        (self.out / 'report.json').write_text('{"schema":"a","schema":"b"}')
+        self.assertTrue(self.verifier.verify(self.out, 'host'))
+
+    def test_source_manifest_comparison(self):
+        report = self.fixture('host')
+        with patch.object(self.verifier, 'inputs', return_value=report['input_sha256']):
+            self.assertEqual(self.verify(report, check_sources=True), [])
+        with patch.object(self.verifier, 'inputs', return_value={'source': '1' * 64}):
+            self.assertTrue(self.verify(report, check_sources=True))
+
+    def test_missing_report(self):
+        self.assertTrue(self.verifier.verify(self.out, 'host'))
 
 if __name__ == '__main__':
     unittest.main()
