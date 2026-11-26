@@ -106,6 +106,7 @@ static int daemon_mode;
 #include "gps_cache.h"
 #include "gps_cache_read.h"
 #include "gps_cache_arm_stat.h"
+#include "gps_lto_file.h"
 static struct gps_cache position_cache = GPS_CACHE_INIT;
 
 static void save_fix(const GpsLocation *l, gps_client_epoch epoch)
@@ -266,20 +267,22 @@ static GpsXtraCallbacks xcbs = {
 	.download_request_cb = xtra_download_cb,
 	.create_thread_cb = 0,
 };
-static char lto_buf[256 * 1024];
-static long lto_read(void *ctx, char *buf, unsigned int size)
-{
-	return read(*(int *)ctx, buf, size);
-}
+static char lto_buf[GPS_LTO_LIMIT];
 static const GpsXtraInterface *xtra;
 
 /* load lto2.dat into the engine (what Tizen's plugin does after downloading it) */
 static void inject_lto(void)
 {
-	int fd, n = 0, r;
+	int n, r;
 	/* Never infer the proprietary callback layout from the extension size. */
 	if (R800_XTRA_ABI == 0)
 		return;
+	n = gps_lto_file(LTO_PATH, lto_buf, sizeof(lto_buf));
+	if (n <= 0) {
+		printf("lto: missing, unsafe, oversized or changed file\n");
+		fflush(0);
+		return;
+	}
 	if (!xtra) {
 		const GpsXtraInterface *candidate = gps->get_extension ? gps->get_extension("gps-xtra") : 0;
 		xcbs.create_thread_cb = cbs.create_thread_cb;
@@ -289,19 +292,6 @@ static void inject_lto(void)
 	}
 	if (!xtra) {
 		printf("lto: no gps-xtra\n");
-		fflush(0);
-		return;
-	}
-	fd = open(LTO_PATH, O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
-	if (fd < 0) {
-		printf("lto: no %s\n", LTO_PATH);
-		fflush(0);
-		return;
-	}
-	n = gps_read_lto(lto_read, &fd, lto_buf, sizeof(lto_buf));
-	close(fd);
-	if (n <= 0) {
-		printf("lto: empty, oversized or unreadable\n");
 		fflush(0);
 		return;
 	}
