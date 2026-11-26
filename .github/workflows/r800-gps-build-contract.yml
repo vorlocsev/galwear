@@ -80,6 +80,8 @@ on:
       - src/tools/gps/gps_frame.h
       - src/tools/gps/gps_lto.h
       - src/tools/gps/gps_output.h
+      - src/tools/gps/gps_client.h
+      - tests/test_r800_gps_client.c
       - build/r800_android_userspace_preflight.py
       - tests/test_android_userspace_preflight.py
   workflow_dispatch:
@@ -253,3 +255,11 @@ jobs:
           echo "MOCK_HAL_COMPILE_ONLY=PASS"
           echo "QEMU_EXECUTED=false"
           echo "safe_to_flash=false"
+      - name: Native GPS socket transport concurrency
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          cc -O2 -Wall -Wextra -Werror -pthread -Isrc/tools/gps tests/test_r800_gps_client.c -o "$tmp/gps-client-test"
+          timeout 15 "$tmp/gps-client-test"
+          echo "ARM32_RUNTIME_VERIFIED=false"
