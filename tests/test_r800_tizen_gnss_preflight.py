@@ -68,5 +68,24 @@ class GnssPreflightTests(unittest.TestCase):
         self.assertIn("DEPENDENCY_CLOSURE_REVIEW",check(self.root)["problems"])
 
 
+    def test_strict_page_review_bound_to_bridge(self):
+        report=check(self.root,strict_pages=True)
+        self.assertEqual(report["status"],"TIZEN_GNSS_STATIC_ONLY")
+        self.assertTrue(report["strict_4k_page_review"])
+        self.assertTrue(report["bridge_library"]["load_review"]["strict_4k_page_review"])
+        self.assertFalse(report["safe_to_flash"])
+        path=self.root/"usr/lib/libbrcm.so"
+        data=bytearray(path.read_bytes())
+        struct.pack_into("<H",data,44,3)
+        struct.pack_into("<8I",data,116,1,0x400,0x1400,0,0,4,6,1)
+        path.write_bytes(data)
+        report=check(self.root,strict_pages=True)
+        self.assertIn("DEPENDENCY_CLOSURE_REVIEW",report["problems"])
+        self.assertIn("BRIDGE_LIBRARY_REJECTED",report["problems"])
+        self.assertTrue(any("shared memory page" in p["reason"] for p in report["closure_problems"]))
+        self.assertFalse(report["hardware_interface_abi_verified"])
+        self.assertFalse(report["safe_to_flash"])
+
+
 if __name__ == "__main__":
     unittest.main()
