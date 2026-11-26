@@ -7,7 +7,7 @@ import struct
 
 from r800_gps_interface_table import discover, parse_elf, symbolic_code_targets, LIMIT
 
-from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow, leaf_analyzer, code_spans, thumb_literal
+from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow, leaf_analyzer, code_spans, thumb_literal, callback_slots
 
 MAX_RANGE = 65536
 MAX_REFS = 4096
@@ -118,7 +118,7 @@ def thumb_pic_clues(raw, off, start, size, relocations, tables, direct):
     return clues
 
 
-def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(), callee_depth=1, data_by_range=None):
+def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(), callee_depth=1, data_by_range=None, callback_calls=False):
     discovery = discover(raw, symbolic=symbolic)
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
     tables = {r["table_va"]: r for r in discovery["candidates"]}
@@ -172,6 +172,9 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
     if callee_ranges and (not assume_aapcs or len(callee_ranges) > 16):
         raise ValueError("Explicit callee ranges require AAPCS mode; maximum 16")
     data_by_range = data_by_range or {}
+    if callback_calls and (not assume_aapcs or not callee_ranges):
+        raise ValueError("Callback mode requires explicit callee ranges and AAPCS mode")
+    callbacks = callback_slots(tables) if callback_calls else {}
     leaves = {}
     spans = [(start, start + size) for _, _, start, size in ranges]
     for isa, start, size in callee_ranges:
@@ -186,7 +189,7 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
             raise ValueError("Callee range not executable and nonwritable")
         leaves[(start, isa)] = size
         spans.append((start, start + size))
-    leaf = leaf_analyzer(raw, mapping, relocations, tables, direct, leaves, max_depth=callee_depth, data_by_range=data_by_range) if leaves else None
+    leaf = leaf_analyzer(raw, mapping, relocations, tables, direct, leaves, max_depth=callee_depth, data_by_range=data_by_range, callbacks=callbacks) if leaves else None
     code = []
     seen = set()
     for role, isa, start, size in ranges:
@@ -258,8 +261,8 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
         code.append({"role_assumption": role, "isa_assumption": isa, "start_va": start,
                      "size": size, "get_extension_entry_matches": matches,
                      "literal_load_clues": refs,
-                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf, data_ranges=data_ranges)
-                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf, data_ranges=data_ranges),
+                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf, data_ranges=data_ranges, callbacks=callbacks)
+                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping, leaf=leaf, data_ranges=data_ranges, callbacks=callbacks),
                      "data_ranges": data_ranges,
                      "pic_clues": [clue for lo, hi in islands for clue in
                                    (arm_pic_clues if isa == "arm" else thumb_pic_clues)(
@@ -272,6 +275,8 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
             "relative_data_references": [relative[k] for k in sorted(relative)],
             "symbolic_data_references": [symbolic_refs[k] for k in sorted(symbolic_refs)],
             "symbolic_mode": symbolic, "got_membership_verified": False,
+            "callback_call_mode": callback_calls, "callback_slot_count": len(callbacks),
+            "callback_identity_verified": False,
             "code_ranges": code, "function_identity_verified": False,
             "instruction_boundaries_verified": False, "control_flow_verified": False,
             "table_identity_verified": False, "selected_abi": None,
@@ -303,9 +308,10 @@ def main():
     parser.add_argument("--assume-aapcs", action="store_true", help="Opt in to opaque direct call summaries")
     parser.add_argument("--callee", action="append", type=parse_callee, default=[])
     parser.add_argument("--callee-depth", type=int, default=1, help="Maximum explicit call depth (1-4)")
+    parser.add_argument("--callback-calls", action="store_true", help="Model relative callback pointers with explicit callee ranges")
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs, callee_ranges=args.callee, callee_depth=args.callee_depth)
+        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs, callee_ranges=args.callee, callee_depth=args.callee_depth, callback_calls=args.callback_calls)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
