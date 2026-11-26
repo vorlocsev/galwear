@@ -262,3 +262,64 @@ class CallFlowTests(unittest.TestCase):
         self.assertEqual(r['boundaries'], [])
         self.assertEqual(len(r['assumed_calls']), 1)
         self.assertEqual(r['events'], [])
+
+
+class LeafFlowTests(unittest.TestCase):
+    def evaluate(self, callee, *, isa='arm', caller=None, ranges=None, enabled=True):
+        raw = bytearray(pic_image(0x2100))
+        if caller is None:
+            caller = [0xe3000070, 0xe3400000, 0xe08f0000, 0xe92d4010,
+                      0xeb00002a if isa == 'arm' else 0xfa00002a,
+                      0xe5901000, 0xe8bd8010]
+        struct.pack_into('<' + 'I'*len(caller), raw, 0x100, *caller)
+        fmt, width = ('I', 4) if isa == 'arm' else ('H', 2)
+        struct.pack_into('<' + fmt*len(callee), raw, 0x1c0, *callee)
+        if ranges is None:
+            ranges = [(isa, 0x11c0, width*len(callee))]
+        return audit(bytes(raw), [('factory', 'arm', 0x1100, 4*len(caller))],
+                     assume_aapcs=enabled, callee_ranges=ranges)['code_ranges'][0]['pic_flow']
+
+    def test_leaf_returns_argument_through_arm_and_thumb(self):
+        for isa, body in (('arm', [0xe12fff1e]), ('thumb', [0x4770])):
+            with self.subTest(isa=isa):
+                r = self.evaluate(body, isa=isa)
+                self.assertEqual(r['boundaries'], [])
+                self.assertEqual(r['events'][0]['table_va'], 0x2100)
+                self.assertEqual(r['assumed_calls'][0]['modeled_return_r0'], ('address', 0x1180))
+                self.assertTrue(r['assumed_calls'][0]['callee_analyzed'])
+                self.assertFalse(r['callee_execution_verified'])
+
+    def test_leaf_conflicting_returns_drop_r0(self):
+        r = self.evaluate([0x0a000000, 0xe3000000, 0xe12fff1e])
+        self.assertEqual(r['boundaries'], [])
+        self.assertIsNone(r['assumed_calls'][0]['modeled_return_r0'])
+        self.assertEqual(r['events'], [])
+
+    def test_leaf_multiple_equal_returns(self):
+        r = self.evaluate([0x0a000000, 0xe12fff1e, 0xe12fff1e])
+        self.assertEqual(r['assumed_calls'][0]['modeled_return_count'], 2)
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
+
+    def test_leaf_private_stack_and_saved_register(self):
+        r = self.evaluate([0xe92d0010, 0xe1a04000, 0xe1a00004, 0xe8bd0010, 0xe12fff1e])
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
+        self.assertEqual(r['boundaries'], [])
+
+    def test_leaf_unknown_loop_nested_or_fallthrough_rejected(self):
+        for body in ([0xffffffff], [0xeafffffe], [0xeb000000, 0xe12fff1e], [0xe320f000], [0xe24dd004, 0xe12fff1e]):
+            with self.subTest(body=body):
+                r = self.evaluate(body)
+                self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+                self.assertEqual(r['events'], [])
+
+    def test_unlisted_leaf_does_not_propagate_return(self):
+        r = self.evaluate([0xe12fff1e], ranges=[])
+        self.assertEqual(r['events'], [])
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+
+    def test_leaf_ranges_validation(self):
+        for ranges in ([('arm', 0x1100, 4)], [('arm', 0x2100, 4)], [('arm', 0x11c0, 4), ('thumb', 0x11c2, 2)]):
+            with self.subTest(ranges=ranges), self.assertRaises(ValueError):
+                self.evaluate([0xe12fff1e], ranges=ranges)
+        with self.assertRaises(ValueError):
+            self.evaluate([0xe12fff1e], enabled=False)
