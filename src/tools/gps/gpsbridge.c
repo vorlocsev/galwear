@@ -434,8 +434,11 @@ static int serve(void)
 					}
 					on = 1;
 				} else if (!strcmp(s, "STOP") && on) {
-					if (session(0) == 0)
-						on = 0;
+					if (session(0) != 0) {
+						fatal = 1;
+						goto disconnected;
+					}
+					on = 0;
 				} else if (!strncmp(s, "TIME ", 5)) {
 					/* TIME <utc_ms> [<elapsedRealtime_ms> <unc_ms>] */
 					struct gps_time_command t;
