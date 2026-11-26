@@ -184,5 +184,46 @@ class TizenDependencyTests(unittest.TestCase):
         self.assertIn("tls_symbol_count",item)
         self.assertIn("relocations",item)
 
+
+    def test_strict_page_policy_for_transitive_provider(self):
+        self.put(self.target,fixture("arm",needed=["libx.so"]))
+        data=fixture("arm")
+        struct.pack_into("<H",data,44,3)
+        struct.pack_into("<8I",data,116,1,0x200,0x1200,0,0,4,6,1)
+        self.put("/usr/lib/libx.so",data)
+        normal=audit(self.root,[self.target])
+        self.assertEqual(normal["problems"],[])
+        self.assertFalse(normal["strict_4k_page_review"])
+        strict=audit(self.root,[self.target],strict_pages=True)
+        self.assertTrue(strict["strict_4k_page_review"])
+        self.assertEqual(strict["status"],"TIZEN_DEPENDENCY_REVIEW_REQUIRED")
+        self.assertTrue(any("shared memory page" in p["reason"] for p in strict["problems"]))
+        self.assertNotIn("/usr/lib/libx.so",strict["files"])
+        self.assertFalse(strict["safe_to_flash"])
+
+    def test_load_geometry_for_exec_and_dyn(self):
+        for etype in (2,3):
+            with self.subTest(etype=etype):
+                data=fixture("arm")
+                struct.pack_into("<H",data,16,etype)
+                self.put(self.target,data)
+                report=audit(self.root,[self.target],strict_pages=True)
+                self.assertEqual(report["problems"],[])
+                self.assertEqual(report["files"][self.target]["load_review"],
+                                 {"nonempty_load_count":1,"strict_4k_page_review":True})
+                struct.pack_into("<I",data,52+28,3)
+                self.put(self.target,data)
+                self.assertTrue(any("PT_LOAD alignment" in p["reason"]
+                                    for p in audit(self.root,[self.target])["problems"]))
+
+    def test_overlapping_bss_rejected_by_default(self):
+        data=fixture("arm")
+        struct.pack_into("<H",data,44,3)
+        struct.pack_into("<8I",data,116,1,0,0x1100,0,0,4,6,1)
+        self.put(self.target,data)
+        report=audit(self.root,[self.target])
+        self.assertTrue(any("Overlapping PT_LOAD" in p["reason"] for p in report["problems"]))
+        self.assertNotIn(self.target,report["files"])
+
 if __name__=="__main__":
     unittest.main()
