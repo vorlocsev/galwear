@@ -138,7 +138,7 @@ def collect(root, ndk, command):
                  "r800_android_userspace_preflight.py",
                  "r800_android_linker_audit.py", "r800_tizen_dependencies.py",
                  "r800_pack_tizen_stage.py", "r800_verify_tizen_stage.py",
-                 "r800_gps_host_elf.py", "r800_gps_host_snapshot.py"):
+                 "r800_gps_host_elf.py", "r800_gps_host_snapshot.py", "r800_gps_host_trace.py"):
         files[name] = root / "build" / name
     fingerprints = {key: fingerprint(path) for key, path in files.items()}
     fingerprints["host_elf"] = host_audit({name: tc / name for name in TOOLS})
@@ -155,7 +155,7 @@ def collect(root, ndk, command):
         "host_isolated": False, "runtime_verified": False} if captured else None)
     return {"schema": "galwear-r800-gps-inputs-v1", "argv": command,
             "inputs": fingerprints,
-            "compiler_contract": "freestanding-snapshot-v4", "xtra_abi": abi,
+            "compiler_contract": "freestanding-snapshot-v5", "xtra_abi": abi,
             "tool_snapshot": TOOLS,
             "source_snapshot": {name: "source" if name == "gpsbridge.c" else name for name in SOURCES},
             "safe_to_flash": False, "signed_attestation": False}
