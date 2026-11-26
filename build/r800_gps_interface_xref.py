@@ -7,7 +7,7 @@ import struct
 
 from r800_gps_interface_table import discover, parse_elf, symbolic_code_targets, LIMIT
 
-from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow, leaf_analyzer, code_spans
+from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow, leaf_analyzer, code_spans, thumb_literal
 
 MAX_RANGE = 65536
 MAX_REFS = 4096
@@ -220,9 +220,10 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
                     width = 4 if word >> 11 in (0b11101, 0b11110, 0b11111) else 2
                     if pos + width > hi - start:
                         raise ValueError("Truncated Thumb instruction candidate")
-                    if width == 2 and word & 0xf800 == 0x4800:
-                        literal = ((va + 4) & ~3) + 4 * (word & 255)
-                        reg = (word >> 8) & 7
+                    tail = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
+                    decoded = thumb_literal(word, tail, width, va)
+                    if decoded is not None:
+                        reg, literal = decoded
                 touched = range(va & ~3, ((va + width - 1) & ~3) + 1, 4)
                 if (literal in direct and reg <= 12
                         and not any(slot in relocations for slot in touched)):
