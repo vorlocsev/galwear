@@ -34,7 +34,7 @@ sleep 60 & lhd_pid=$!
 lhd_start=$(child_identity "$lhd_pid")
 child_alive "$lhd_pid" "$lhd_start"
 stop_child "$lhd_pid" "$lhd_start"
-! kill -0 "$lhd_pid" 2>/dev/null
+if kill -0 "$lhd_pid" 2>/dev/null; then exit 1; fi
 lhd_pid=
 """)
 
@@ -42,8 +42,8 @@ lhd_pid=
         self.run_case("""
 sleep 60 & lhd_pid=$!
 lhd_start=$(child_identity "$lhd_pid")
-! child_alive "$lhd_pid" "$((lhd_start+1))"
-! stop_child "$lhd_pid" "$((lhd_start+1))"
+if child_alive "$lhd_pid" "$((lhd_start+1))"; then exit 1; fi
+if stop_child "$lhd_pid" "$((lhd_start+1))"; then exit 1; fi
 child_alive "$lhd_pid" "$lhd_start"
 """)
 
@@ -51,7 +51,7 @@ child_alive "$lhd_pid" "$lhd_start"
         self.run_case("""
 sleep 60 & lhd_pid=$!
 lhd_start=$(child_identity "$lhd_pid")
-! stop_child "$lhd_pid" ""
+if stop_child "$lhd_pid" ""; then exit 1; fi
 child_alive "$lhd_pid" "$lhd_start"
 """)
 
@@ -61,7 +61,7 @@ sleep 60 & gpsd_pid=$!
 gpsd_start=$(child_identity "$gpsd_pid")
 kill -TERM "$gpsd_pid"
 wait "$gpsd_pid" 2>/dev/null || :
-! child_alive "$gpsd_pid" "$gpsd_start"
+if child_alive "$gpsd_pid" "$gpsd_start"; then exit 1; fi
 stop_child "$gpsd_pid" "$gpsd_start"
 gpsd_pid=
 """)
@@ -74,9 +74,9 @@ sleep 60 & bridge_pid=$!; bridge_start=$(child_identity "$bridge_pid")
 lp=$lhd_pid; gp=$gpsd_pid; bp=$bridge_pid
 stop_stack
 [ -z "$lhd_pid$gpsd_pid$bridge_pid$lhd_start$gpsd_start$bridge_start" ]
-! kill -0 "$lp" 2>/dev/null
-! kill -0 "$gp" 2>/dev/null
-! kill -0 "$bp" 2>/dev/null
+if kill -0 "$lp" 2>/dev/null; then exit 1; fi
+if kill -0 "$gp" 2>/dev/null; then exit 1; fi
+if kill -0 "$bp" 2>/dev/null; then exit 1; fi
 """)
 
     def test_uncertain_child_blocks_stack_restart(self):
@@ -84,17 +84,17 @@ stop_stack
 sleep 60 & lhd_pid=$!; lhd_start=$(child_identity "$lhd_pid")
 sleep 60 & bridge_pid=$!; bridge_start=$(child_identity "$bridge_pid")
 bridge_start=$((bridge_start+1))
-! stop_stack
+if stop_stack; then exit 1; fi
 [ -z "$lhd_pid" ]
 [ -n "$bridge_pid" ]
 kill -0 "$bridge_pid"
 """)
 
     def test_supervisor_not_its_own_child(self):
-        self.run_case('! child_identity "$supervisor_pid"\n')
+        self.run_case('if child_identity "$supervisor_pid"; then exit 1; fi\n')
 
     def test_invalid_pid(self):
-        self.run_case('! child_identity 0\n! child_identity -1\n! child_identity bogus\n')
+        self.run_case('for pid in 0 -1 bogus; do if child_identity "$pid"; then exit 1; fi; done\n')
 
 
 if __name__=="__main__":
