@@ -514,7 +514,6 @@ class ThumbITTests(unittest.TestCase):
         self.assertEqual(r['events'][0]['table_va'], 0x2100)
         self.assertEqual(r['events'][0]['address'], 0x110a)
 
-
 class FlagFlowTests(unittest.TestCase):
     def test_compare_unsigned_and_signed_overflow(self):
         from r800_gps_pic_flow import compare_flags, condition_value
