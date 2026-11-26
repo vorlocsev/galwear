@@ -17,9 +17,7 @@ DENIED = {7, 8, 9, 35, 36, 37, 0x6000000f, 0x60000010, 0x60000011,
           0x60000012, 0x6fffe000, 0x6fffe001, 0x6fffe003}
 
 
-def audit(raw, address, layout):
-    if layout not in LAYOUTS or type(address) is not int or not 0 <= address <= 0xffffffff or address % 4:
-        raise ValueError("Invalid table address or layout")
+def parse_elf(raw):
     if len(raw) < 52 or len(raw) > LIMIT or raw[:7] != b"\x7fELF\x01\x01\x01":
         raise ValueError("Expected bounded little-endian ELF32")
     etype, machine, version = struct.unpack_from("<HHI", raw, 16)
@@ -97,6 +95,12 @@ def audit(raw, address, layout):
             if not any(start <= target and 4 <= ms - (target - start) for start, _, _, ms, _ in loads):
                 raise ValueError("Relocation outside load memory")
             relocations[target] = (typ, sym)
+    return mapping, relocations
+
+
+def inspect_table(raw, address, layout, mapping, relocations, digest):
+    if layout not in LAYOUTS or type(address) is not int or not 0 <= address <= 0xffffffff or address % 4:
+        raise ValueError("Invalid table address or layout")
     fields = LAYOUTS[layout]
     required = 4 * (1 + len(fields))
     off, pf = mapping(address, required)
@@ -124,10 +128,59 @@ def audit(raw, address, layout):
             row["status"] = "NULL_WORD"
         entries.append(row)
     return {"schema": "galwear-r800-gps-interface-table-v1", "status": "STATIC_TABLE_CLUES_ONLY",
-            "sha256": hashlib.sha256(raw).hexdigest(), "layout_assumption": layout,
+            "sha256": digest, "layout_assumption": layout,
             "table_va": address, "declared_size": declared, "entries": entries,
             "table_identity_verified": False, "relocations_applied": False,
             "instruction_targets_verified": False, "callback_layout_verified": False,
+            "selected_abi": None, "runtime_verified": False, "safe_to_flash": False}
+
+
+MAX_CANDIDATES = 256
+
+
+def audit(raw, address, layout):
+    mapping, relocations = parse_elf(raw)
+    return inspect_table(raw, address, layout, mapping, relocations,
+                         hashlib.sha256(raw).hexdigest())
+
+
+def discover(raw):
+    """Strict heuristic: exact known size, every slot has a relative code pointer."""
+    mapping, relocations = parse_elf(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    candidates = []
+    relative = {slot for slot, reloc in relocations.items() if reloc == (23, 0)}
+    for slot in sorted(relative):
+        address = slot - 4
+        if address < 0 or address in relocations:
+            continue
+        try:
+            off, flags = mapping(address, 4)
+        except ValueError:
+            continue
+        if not flags & 4 or flags & 1:
+            continue
+        declared, = struct.unpack_from("<I", raw, off)
+        for layout, fields in LAYOUTS.items():
+            if declared != 4 * (1 + len(fields)):
+                continue
+            if not all(address + 4 * i in relative for i in range(1, len(fields) + 1)):
+                continue
+            try:
+                row = inspect_table(raw, address, layout, mapping, relocations, digest)
+            except ValueError:
+                continue
+            if not all(e["status"] == "RELATIVE_EXECUTABLE_CANDIDATE" for e in row["entries"]):
+                continue
+            if len(candidates) >= MAX_CANDIDATES:
+                raise ValueError("Interface candidate budget exceeded")
+            candidates.append(row)
+    return {"schema": "galwear-r800-gps-interface-discovery-v1",
+            "status": "STATIC_CANDIDATES_ONLY", "sha256": digest,
+            "candidate_count": len(candidates), "candidates": candidates,
+            "relative_slots_examined": len(relative),
+            "exact_size_all_relative_code_pointers_only": True,
+            "discovery_complete": False, "table_identity_verified": False,
             "selected_abi": None, "runtime_verified": False, "safe_to_flash": False}
 
 
@@ -135,15 +188,20 @@ def main():
     from r800_android_userspace_preflight import read_regular
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--library", type=Path, required=True)
-    parser.add_argument("--table-va", type=lambda s: int(s, 0), required=True)
-    parser.add_argument("--layout", choices=LAYOUTS, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--table-va", type=lambda s: int(s, 0))
+    mode.add_argument("--discover", action="store_true")
+    parser.add_argument("--layout", choices=LAYOUTS)
     args = parser.parse_args()
+    if args.discover == (args.layout is not None):
+        parser.error("--layout is required only with --table-va")
     try:
-        report = audit(read_regular(args.library, LIMIT), args.table_va, args.layout)
+        raw = read_regular(args.library, LIMIT)
+        report = discover(raw) if args.discover else audit(raw, args.table_va, args.layout)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report["status"] == "STATIC_TABLE_CLUES_ONLY" else 2
+    return 0 if report["status"] in ("STATIC_TABLE_CLUES_ONLY", "STATIC_CANDIDATES_ONLY") else 2
 
 
 if __name__ == "__main__":
