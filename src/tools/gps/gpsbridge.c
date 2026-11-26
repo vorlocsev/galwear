@@ -69,6 +69,7 @@ int bind(int, const void *, unsigned int);
 int listen(int, int);
 int accept(int, void *, unsigned int *);
 long send(int, const void *, size_t, int);
+long recv(int, void *, size_t, int);
 int shutdown(int, int);
 int close(int);
 long read(int, void *, size_t);
@@ -139,6 +140,7 @@ static int daemon_mode;
 #include "gps_interface_gate.h"
 #include "gps_standalone.h"
 #include "gps_daemon.h"
+#include "gps_shutdown.h"
 
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
@@ -446,7 +448,7 @@ static int serve(int dirfd)
 	unsigned int previous_mask;
 	if (GPS_PEER_UID == (unsigned int)-1 || GPS_PEER_GID == (unsigned int)-1)
 		return 1;
-	ls = socket(AF_UNIX, SOCK_STREAM, 0);
+	ls = socket(AF_UNIX, SOCK_STREAM | O_NONBLOCK, 0);
 	const char *p = SOCK_PATH;
 
 	for (i = 0; i < 108; ++i) a.path[i] = 0;
@@ -478,8 +480,14 @@ static int serve(int dirfd)
 		char buf[256];
 		struct gps_frame frame = {{0}, 0};
 		int on = 0, fatal = 0;
+		int ready = gps_wait_readable(ls);
+		if (ready <= 0) { close(ls); return ready < 0 ? 1 : 0; }
 		int c = accept(ls, 0, 0);
-		if (c < 0) { close(ls); return 1; }
+		if (c < 0) {
+			if (gps_shutdown_pending()) { close(ls); return 0; }
+			if (IPC_ERRNO == EINTR || IPC_ERRNO == 11) continue;
+			close(ls); return 1;
+		}
 		if (!peer_allowed(c)) { close(c); continue; }
 		pthread_mutex_lock(&mtx);
 		client = c;
@@ -487,10 +495,13 @@ static int serve(int dirfd)
 		printf("client connected\n");
 		fflush(0);
 		for (;;) {
-			long n = read(c, buf, sizeof(buf));
-			if (n <= 0)
-				break;
+			int ready = gps_wait_readable(c);
+			if (ready <= 0) { fatal = ready < 0; break; }
+			long n = recv(c, buf, sizeof(buf), MSG_DONTWAIT);
+			if (n < 0 && (IPC_ERRNO == EINTR || IPC_ERRNO == 11)) continue;
+			if (n <= 0) break;
 			for (long j = 0; j < n; j++) {
+				if (gps_shutdown_pending()) goto disconnected;
 				int state = gps_frame_byte(&frame, (unsigned char)buf[j]);
 				char *s = frame.line;
 				if (state < 0)
@@ -540,6 +551,7 @@ disconnected:
 			close(ls);
 			return 1;
 		}
+		if (gps_shutdown_pending()) { close(ls); return 0; }
 		printf("client gone\n");
 		fflush(0);
 	}
@@ -574,6 +586,10 @@ int main(int argc, char **argv, char **envp)
 		printf("GPS bridge blocked: lock or socket ownership uncertain\n");
 		return 1;
 	}
+	if (daemon_mode && gps_shutdown_install() != 0) {
+		printf("GPS daemon blocked: signal handler installation failed\n");
+		return 1;
+	}
 	lib = dlopen(GPS_BRIDGE_LIB, RTLD_NOW);
 
 	(void)envp;
@@ -603,9 +619,14 @@ int main(int argc, char **argv, char **envp)
 			aid, standalone_configure, gps->start, gps->stop,
 			daemon_cleanup, daemon_reinit
 		};
-		inject_now();
-		r = serve(dirfd);
+		r = 0;
+		if (!gps_shutdown_pending()) {
+			inject_now();
+			r = serve(dirfd);
+		}
 		if (gps_daemon_close(&daemon_state, &daemon_ops))
+			r = 1;
+		if (!r && gps_ipc_recover(dirfd, SOCK_PATH) != 0)
 			r = 1;
 		return r;
 	}
