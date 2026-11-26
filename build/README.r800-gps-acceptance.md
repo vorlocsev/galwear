@@ -7,8 +7,10 @@ python3 build/r800_gps_acceptance.py --out /tmp/r800-gnss-host-report
 ```
 
 Choose a new output directory outside the checkout for each invocation.
-The host phase runs five Python suites, seven native C builds and executions,
+The host phase runs six Python suites, seven native C builds and executions,
 three ARM32 XTRA object builds and sixteen ARM32 synthetic HAL links.
+The acceptance orchestration regression suite mocks subprocesses; it is not
+independent evidence of native builds, ARM execution or GNSS functionality.
 Earlier ELF/provenance regression suites remain separate CI steps.
 No ARM executable or donor library is executed in the host phase.
 
@@ -28,8 +30,8 @@ executables; they do not prove execution of the separately saved candidate.
 No hardware devices or proprietary GNSS HAL are tested.
 
 The report records PASS, FAIL, BLOCKED or NOT_TESTED for each phase, plus
-host source SHA-256, log hashes and the candidate hash if the build and
-static re-audit pass. REQUESTED_CHECKS_PASS is not a release gate or a
+requested source SHA-256, log hashes and the candidate hash if the build,
+static re-audit and final candidate integrity check pass. REQUESTED_CHECKS_PASS is not a release gate or a
 signature. Missing optional phases remain NOT_TESTED. Failed requested
 phases make the runner exit nonzero. A host-only report cannot establish
 vendor ABI compatibility, hardware readiness, independent reproducibility,
