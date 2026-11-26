@@ -54,6 +54,14 @@ def validate_dtb(raw):
     return nodes
 
 
+def validate_kernel_image(kernel):
+    """Distinguish format failure from partition overflow; both are fatal."""
+    if len(kernel) < 64 or kernel[56:60] != b"ARM\x64":
+        raise ValueError("Expected uncompressed ARM64 Linux Image")
+    if len(kernel) > PARTITION:
+        raise ValueError(f"Kernel exceeds partition budget: {len(kernel)} > {PARTITION} bytes")
+
+
 def component_evidence(dtb, kernel=None):
     """Check actual compiled components without creating an NZIT package."""
     nodes = validate_dtb(dtb)
@@ -62,8 +70,7 @@ def component_evidence(dtb, kernel=None):
               "dtb_nodes": len(nodes), "template_verified": False,
               "bootloader_verified": False, "safe_to_flash": False}
     if kernel is not None:
-        if not 64 <= len(kernel) <= PARTITION or kernel[56:60] != b"ARM\x64":
-            raise ValueError("Expected uncompressed ARM64 Linux Image")
+        validate_kernel_image(kernel)
         aligned = (len(kernel) + HEADER - 1) & ~(HEADER - 1)
         minimum = HEADER + aligned + DT_OFFSET + DT_SIZE + SIG
         if minimum > PARTITION:
@@ -78,8 +85,7 @@ def component_evidence(dtb, kernel=None):
 
 def build(kernel, dtb, template):
     # ARM64 boot protocol magic is at offset 56 in the uncompressed Image.
-    if not 64 <= len(kernel) <= PARTITION or kernel[56:60] != b"ARM\x64":
-        raise ValueError("Expected uncompressed ARM64 Linux Image")
+    validate_kernel_image(kernel)
     validate_dtb(dtb)
     table, signature, align, ramdisk, identities = inspect_template(template)
     table = table[:DT_OFFSET] + dtb + table[DT_OFFSET + DT_SIZE:]
