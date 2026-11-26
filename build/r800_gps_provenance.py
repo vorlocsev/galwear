@@ -32,7 +32,8 @@ def collect(root, ndk, command):
     for name in ("r800_gps_provenance.py", "r800_gps_donor_snapshot.py",
                  "r800_gps_publish.py", "r800_gps_link_gate.py",
                  "r800_android_userspace_preflight.py",
-                 "r800_android_linker_audit.py", "r800_tizen_dependencies.py"):
+                 "r800_android_linker_audit.py", "r800_tizen_dependencies.py",
+                 "r800_pack_tizen_stage.py", "r800_verify_tizen_stage.py"):
         files[name] = root / "build" / name
     return {"schema": "galwear-r800-gps-inputs-v1", "argv": command,
             "inputs": {key: fingerprint(path) for key, path in files.items()},
