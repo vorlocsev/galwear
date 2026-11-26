@@ -513,3 +513,67 @@ class ThumbITTests(unittest.TestCase):
         self.assertEqual(r['boundaries'], [])
         self.assertEqual(r['events'][0]['table_va'], 0x2100)
         self.assertEqual(r['events'][0]['address'], 0x110a)
+
+
+class FlagFlowTests(unittest.TestCase):
+    def test_compare_unsigned_and_signed_overflow(self):
+        from r800_gps_pic_flow import compare_flags, condition_value
+        s = {}
+        compare_flags(s, 0x80000000, 1)
+        self.assertEqual(s, {'N': False, 'Z': False, 'C': True, 'V': True})
+        self.assertTrue(condition_value(s, 3) is False)  # CC
+        self.assertTrue(condition_value(s, 11))  # LT
+        compare_flags(s, 0x7fffffff, 0xffffffff)
+        self.assertEqual(s, {'N': True, 'Z': False, 'C': False, 'V': True})
+        self.assertTrue(condition_value(s, 12))  # GT
+
+    def test_partial_flags_and_test_carry(self):
+        from r800_gps_pic_flow import compare_flags, condition_value, arm_compare
+        s = {'C': True, 'V': True, 0: ('constant', 0)}
+        self.assertTrue(arm_compare(s, 0xe3100001))
+        self.assertEqual({k: s[k] for k in 'NZCV'}, {'N': False, 'Z': True, 'C': True, 'V': True})
+        self.assertTrue(arm_compare(s, 0xe3100102))  # TST r0, #0x80000000
+        self.assertTrue(s['C'])
+        compare_flags(s, None, 1, test=True)
+        self.assertNotIn('Z', s)
+        self.assertIsNone(condition_value(s, 0))
+        self.assertFalse(condition_value({'Z': True}, 8))  # HI impossible
+
+    def test_arm_known_branch_skips_bad_path(self):
+        r = run([0xe3000000, 0xe3500000, 0x0a000000, 0xffffffff, 0xe12fff1e])
+        self.assertEqual(r['boundaries'], [])
+        self.assertEqual(r['reached_instructions'], 4)
+        r = run([0xe3000000, 0xe3500000, 0x1a000040, 0xe12fff1e])
+        self.assertEqual(r['boundaries'], [])
+
+    def test_unknown_compare_clears_previous_flags(self):
+        r = run([0xe3000000, 0xe3500000, 0xe3510000, 0x1a000040, 0xe12fff1e])
+        self.assertEqual(r['boundaries'][0]['reason'], 'external_branch')
+
+    def test_thumb_known_narrow_and_wide_branch(self):
+        for words in ([0xf240, 0, 0x2800, 0xd000, 0xbe00, 0x4770],
+                      [0xf240, 0, 0x2800, 0xf000, 0x8001, 0xbe00, 0x4770]):
+            r = ThumbFlowTests().run_flow(words)
+            self.assertEqual(r['boundaries'], [])
+            self.assertEqual(r['reached_instructions'], 4)
+
+    def test_known_it_condition_selects_lane(self):
+        for cmp in (0x2800, 0x2801):
+            r = ThumbITTests().evaluate([0xf240, 0, cmp, 0xbf0c, 0xf240, 7, 0xf240, 9, 0x4770])
+            self.assertEqual(r['leaf_summary']['r0'], ('constant', 7 if cmp == 0x2800 else 9))
+
+    def test_loop_weakens_flags_and_revisits_branch(self):
+        # Initially Z=1; the taken loop body compares against 1 and returns to B.EQ.
+        r = run([0xe3000000, 0xe3500000, 0x0a000000, 0xffffffff, 0xe3500001, 0xeafffffb])
+        self.assertTrue(r['converged'])
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+        self.assertEqual(r['events'], [])
+
+    def test_call_summary_drops_flags(self):
+        from r800_gps_pic_flow import assumed_call
+        state = {'sp': 0, 'Z': True, 'C': True, 4: ('constant', 7)}
+        leaf = lambda *args: {'accepted': True, 'preserved_registers': [4], 'r0': None,
+                              'return_count': 1, 'nested_depth': 0}
+        self.assertIsNotNone(assumed_call(state, (0x2000, 'arm', 'BL'), 0x1100, 0x1100, 0x1200,
+                                          lambda *args: (0, 5), leaf))
+        self.assertEqual(state, {'sp': 0, 4: ('constant', 7)})
