@@ -33,7 +33,7 @@
 #endif
 #include "gps_wire.h"
 #include "gps_nmea.h"
-#include "../tools/gps/gps_frame.h"
+#include "gps_epoch_frame.h"
 
 #ifdef R800_GPS_HOST_TEST
 #define LOGI(...) ((void)0)
@@ -353,7 +353,7 @@ static void handle_line(char *l)
 static void reader(void *arg)
 {
 	char buf[256];
-	struct gps_frame frame = {{0}, 0};
+	struct gps_epoch_frame stream = {0};
     unsigned long seen_epoch = 0;
 	(void)arg;
 
@@ -399,19 +399,26 @@ static void reader(void *arg)
             sock = fd;
 			sock_failed = 0;
             seen_epoch = session_epoch;
-			if (want_on)
-				send_line("START\n");
+            int replay_failed = want_on && send_line("START\n") != 0;
 			pthread_mutex_unlock(&lock);
-			frame.used = 0;
+            gps_epoch_reset(&stream, seen_epoch);
 			reset_sv();
+            if (replay_failed)
+                goto disconnected;
 		}
 		ssize_t n = read(fd, buf, sizeof(buf));
 		if (n < 0 && errno == EINTR)
 			continue;
 		if (n <= 0)
 			goto disconnected;
+        pthread_mutex_lock(&lock);
+        unsigned long batch_epoch = session_epoch;
+        int valid_socket = running && sock == fd && !sock_failed;
+        pthread_mutex_unlock(&lock);
+        if (!valid_socket)
+            goto disconnected;
 		for (ssize_t i = 0; i < n; ++i) {
-			int state = gps_frame_byte(&frame, (unsigned char)buf[i]);
+			int state = gps_epoch_byte(&stream, batch_epoch, (unsigned char)buf[i]);
 			if (state < 0)
 				goto disconnected;
 			if (state == 1) {
@@ -419,15 +426,16 @@ static void reader(void *arg)
                 unsigned long epoch;
                 pthread_mutex_lock(&lock);
                 epoch = session_epoch;
-                deliver = running && (want_on || !strncmp(frame.line,"STATUS ",7));
+                deliver = running && sock == fd && !sock_failed && epoch == batch_epoch &&
+                          (want_on || !strncmp(stream.frame.line,"STATUS ",7));
                 pthread_mutex_unlock(&lock);
                 if (seen_epoch != epoch) {
                     reset_sv();
                     seen_epoch = epoch;
                 }
                 if (deliver)
-                    handle_line(frame.line);
-				frame.used = 0;
+                    handle_line(stream.frame.line);
+                stream.frame.used = 0;
 			}
 		}
 		continue;
@@ -440,7 +448,8 @@ disconnected:
 		}
 		close(fd);
 		pthread_mutex_unlock(&lock);
-		frame.used = 0;
+        gps_epoch_reset(&stream, 0);
+        reset_sv();
 		retry_wait(1);
 	}
     pthread_mutex_lock(&lock);
