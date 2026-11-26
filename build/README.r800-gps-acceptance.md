@@ -42,3 +42,25 @@ rows and invalid PASS logs populate evidence_errors and force REVIEW_REQUIRED.
 These checks validate local consistency only, not authenticity or a signature. A host-only report cannot establish
 vendor ABI compatibility, hardware readiness, independent reproducibility,
 or safety to flash. Preserve the logs and report together.
+
+
+## Saved evidence verification
+
+From a trusted checkout, verify the saved evidence directory without rebuilding
+or executing the GPS Bridge:
+
+```sh
+python3 build/r800_gps_verify_report.py /tmp/r800-gnss-host-report --mode host
+python3 build/r800_gps_verify_report.py /tmp/r800-gnss-build-report --mode donor --check-sources
+```
+
+Use `--mode qemu` if QEMU was requested. The expected mode must be
+chosen independently of the saved report; do not downgrade a failed
+requested phase to a host-only claim. The verifier checks the complete
+successful matrix, status, non-release flags, log digests and saved
+candidate digest. `--check-sources` additionally requires the exact source
+manifest of the current checkout (older manifests can differ).
+It exits 0 for CONSISTENCY_PASS and 2 for REVIEW_REQUIRED.
+Consistency checks are not independent attestation of test execution:
+a fabricated bundle with recomputed hashes may still pass. No vendor
+ABI, hardware readiness, signature or permission to flash is established.
