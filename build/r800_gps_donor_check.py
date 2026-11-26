@@ -7,12 +7,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import struct
 import tempfile
 
 from r800_extract_ext4 import extract
 from r800_gps_link_gate import DONORS, audit, elf
 from r800_stage_gps_donors import read_source
 from r800_gnss_readiness import ROOT, git_state
+from r800_qemu_probe_log import valid_log
 
 
 def verify_extraction(report, libdir, expected_sha):
@@ -31,6 +33,8 @@ def verify_extraction(report, libdir, expected_sha):
     hashes = {}
     for name in DONORS:
         item = files["tizen/"+name]
+        if not isinstance(item, dict):
+            raise ValueError("Invalid extraction record: "+name)
         raw = read_source(libdir/name)
         digest = hashlib.sha256(raw).hexdigest()
         if (item.get("status") != "EXTRACTED" or item.get("sha256") != digest
@@ -44,6 +48,15 @@ def unique_marker(log, expected):
     key = expected.partition("=")[0]
     return [line for line in log.splitlines()
             if line.partition("=")[0].strip() == key] == [expected]
+
+
+def qemu_evidence_matches(log, hashes):
+    # Bind the actual runtime snapshot's reported input hashes, not just
+    # the exit code or the synthetic success markers.
+    lines = [line for line in log.splitlines()
+             if line.startswith("DONOR_SHA256")]
+    expected = {"DONOR_SHA256 "+name+" "+digest for name,digest in hashes.items()}
+    return len(lines)==len(expected) and set(lines)==expected and valid_log(log)
 
 
 def execute_step(command, workdir, log_path, seconds):
@@ -75,24 +88,29 @@ def run(image, expected_sha, ndk, out, run_qemu=False):
               "gates":{}, "donor_authenticity_verified":False,
               "gnss_runtime_verified":False, "safe_to_flash":False}
     gates = report["gates"]
+    for gate in ("extraction","elf","link","qemu"):
+        gates[gate] = {"status":"NOT_TESTED"}
     try:
         with tempfile.TemporaryDirectory(prefix="r800-donor-", dir=out) as scratch:
             work = Path(scratch)
             dest = work/"extracted"
+            gates["extraction"]["status"]="FAILED"
             extracted = extract(image, dest, "gps-glibc", expected_sha)
             libdir = dest/"tizen"
             hashes = verify_extraction(extracted, libdir, expected_sha)
             gates["extraction"] = {"status":"PASS", "donor_sha256":hashes,
                                    "detail":extracted}
+            gates["elf"]["status"]="FAILED"
             for name in DONORS:
                 if elf(read_source(libdir/name))["soname"] != name:
                     raise ValueError("Unexpected donor SONAME: "+name)
+            gates["elf"]["status"]="STATIC_PASS"
             binary = work/"gpsbridge"
             # Explicitly disable daemon credentials and XTRA for this static-only build.
-            env = dict(os.environ)
             command = ["env","R800_XTRA_ABI=0","R800_GPS_PEER_UID=-1",
                        "R800_GPS_PEER_GID=-1","sh",str(ROOT/"src/tools/gps/build.sh"),
                        str(ndk),str(libdir),str(binary)]
+            gates["link"]["status"]="FAILED"
             evidence, _ = execute_step(command, ROOT, out/"link.log", 300)
             gates["link"] = dict(evidence, status="FAILED")
             if evidence["exit_code"]:
@@ -106,16 +124,17 @@ def run(image, expected_sha, ndk, out, run_qemu=False):
                     or static.get("safe_to_flash") is not False):
                 raise ValueError("Static closure not confirmed")
             gates["link"]["status"] = "STATIC_PASS"
-            gates["qemu"] = {"status":"NOT_TESTED"}
             if run_qemu:
+                gates["qemu"]["status"]="FAILED"
                 evidence, log = execute_step(
                     ["sh",str(ROOT/"build/r800_gps_glibc_qemu.sh"),str(ndk),str(libdir)],
                     ROOT,out/"qemu.log",300)
                 gates["qemu"] = dict(evidence,status="FAILED")
-                if evidence["exit_code"] or not all(unique_marker(log,m) for m in (
+                if (evidence["exit_code"] or not qemu_evidence_matches(log,hashes)
+                        or not all(unique_marker(log,m) for m in (
                     "GLIBC_2_24=PASS","PTHREAD_TLS=PASS","DLOPEN_DLSYM=PASS",
                     "R800_GLIBC_QEMU_PROBE=PASS","QEMU_USER_ONLY=PASS",
-                    "GNSS_RUNTIME_VERIFIED=false","safe_to_flash=false")):
+                    "GNSS_RUNTIME_VERIFIED=false","safe_to_flash=false"))):
                     raise ValueError("QEMU probe not confirmed; inspect qemu.log")
                 gates["qemu"]["status"]="PASS"
             if verify_extraction(extracted,libdir,expected_sha)!=hashes:
@@ -123,7 +142,7 @@ def run(image, expected_sha, ndk, out, run_qemu=False):
             if git_state()!=(source_sha,True):
                 raise ValueError("Source checkout changed")
         report["status"]="DONOR_GLIBC_PROBE_ONLY" if run_qemu else "STATIC_DONOR_LINK_ONLY"
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, struct.error, subprocess.SubprocessError) as exc:
         report["reason"]=str(exc)
     (out/"report.json").write_text(json.dumps(report,indent=2,sort_keys=True)+"\n")
     return report
