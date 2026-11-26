@@ -634,11 +634,11 @@ class AluFlowTests(unittest.TestCase):
 
     def test_reject_unsupported_encodings(self):
         from r800_gps_pic_flow import arm_alu, thumb_alu
-        for word in (0xe0902111, 0xe090f001, 0xe0802001, 0x00902001, 0xe3b10101, 0xe0102091):
+        for word in (0xe0902f11, 0xe090f001, 0xe0802001, 0x00902001, 0xe3b10101, 0xe0102091):
             s = {0: ('constant', 1)}
             self.assertFalse(arm_alu(s, word))
             self.assertEqual(s, {0: ('constant', 1)})
-        for word, width in ((0x4248, 2), (0x4348, 2), (0x2001, 4)):
+        for word, width in ((0x4500, 2), (0x4480, 2), (0x2001, 4)):
             self.assertFalse(thumb_alu({}, word, width))
 
     def test_alu_flags_drive_branch_and_it(self):
@@ -683,7 +683,7 @@ class ShiftFlowTests(unittest.TestCase):
             self.assertTrue(s['V'])
         self.assertTrue(arm_alu(s, 0xe0902101))  # ADDS r2,r0,r1,LSL #2
         self.assertEqual(s[2], ('constant', 0x80000001))
-        self.assertFalse(arm_alu(s, 0xe1b01210))  # register-controlled A32 shift not modeled
+        self.assertFalse(arm_alu(s, 0xe1b01f10))  # PC-controlled shift rejected
 
     def test_thumb_immediate_and_register_shifts(self):
         from r800_gps_pic_flow import thumb_alu
@@ -736,3 +736,73 @@ class ShiftFlowTests(unittest.TestCase):
         self.assertEqual(r['boundaries'], [])
         r = ThumbITTests().evaluate([0xf240, 1, 0x07c0, 0x0040, 0xbf2c, 0xf240, 7, 0xf240, 9, 0x4770])
         self.assertEqual(r['leaf_summary']['r0'], ('constant', 7))
+
+class ExtendedAluTests(unittest.TestCase):
+    def test_arm_register_shift_low_byte(self):
+        from r800_gps_pic_flow import arm_alu
+        for amount, value, carry in ((1, 2, True), (32, 0, True), (33, 0, False), (256, 0x80000001, False)):
+            s = {0: ('constant', 0x80000001), 1: ('constant', amount), 'C': False, 'V': True}
+            self.assertTrue(arm_alu(s, 0xe1b02110))
+            self.assertEqual(s[2], ('constant', value))
+            self.assertEqual((s['C'], s['V']), (carry, True))
+
+    def test_arm_bic_mvn_rsb(self):
+        from r800_gps_pic_flow import arm_alu
+        for word, value in ((0xe1d02001, 2), (0xe1f02001, 0xfffffffe), (0xe0702001, 0xfffffffe)):
+            s = {0: ('constant', 3), 1: ('constant', 1), 'C': True, 'V': True}
+            self.assertTrue(arm_alu(s, word))
+            self.assertEqual(s[2], ('constant', value))
+            self.assertEqual(s['C'], word != 0xe0702001)
+
+    def test_multiply_flag_setting_and_preserving(self):
+        from r800_gps_pic_flow import arm_alu, thumb_alu, thumb_wide_alu
+        for decode, dest, sets in ((lambda s: arm_alu(s, 0xe0120190), 2, True),
+                                   (lambda s: arm_alu(s, 0xe0020190), 2, False),
+                                   (lambda s: thumb_alu(s, 0x4348, 2), 0, True),
+                                   (lambda s: thumb_wide_alu(s, 0xfb00, 0xf201, 4), 2, False)):
+            s = {0: ('constant', 0x80000000), 1: ('constant', 2), 'N': True, 'Z': False, 'C': True, 'V': True}
+            self.assertTrue(decode(s))
+            self.assertEqual(s[dest], ('constant', 0))
+            self.assertEqual((s['N'], s['Z'], s['C'], s['V']), (not sets, sets, True, True))
+
+    def test_thumb_narrow_bic_mvn_rsb(self):
+        from r800_gps_pic_flow import thumb_alu
+        for word, result in ((0x4388, 2), (0x43c8, 0xfffffffe), (0x4248, 0xffffffff)):
+            s = {0: ('constant', 3), 1: ('constant', 1), 'C': True, 'V': True}
+            self.assertTrue(thumb_alu(s, word, 2))
+            self.assertEqual(s[0], ('constant', result))
+
+    def test_thumb_wide_register_alu(self):
+        from r800_gps_pic_flow import thumb_wide_alu
+        for a, b, result in ((0xea10, 0x0281, 4), (0xea30, 0x0201, 6), (0xea7f, 0x0201, 0xfffffffe),
+                              (0xebd0, 0x0201, 0xfffffffa), (0xeb10, 0x0201, 8), (0xeb50, 0x0201, 9),
+                              (0xeb70, 0x0201, 6), (0xebb0, 0x0201, 6), (0xea50, 0x0201, 7),
+                              (0xea90, 0x0201, 6), (0xea5f, 0x0201, 1)):
+            with self.subTest(a=a, b=b):
+                s = {0: ('constant', 7), 1: ('constant', 1), 'C': True}
+                self.assertTrue(thumb_wide_alu(s, a, b, 4))
+                self.assertEqual(s[2], ('constant', result))
+
+    def test_unknown_operands_and_register_shift(self):
+        from r800_gps_pic_flow import arm_alu, thumb_wide_alu
+        s = {0: ('constant', 1), 2: ('constant', 9), 'C': True, 'V': True, 'Z': True}
+        self.assertTrue(arm_alu(s, 0xe1b02110))
+        self.assertEqual(s, {0: ('constant', 1), 'V': True})
+        s.update({'C': True, 'Z': True, 2: ('constant', 7)})
+        self.assertTrue(thumb_wide_alu(s, 0xfb00, 0xf201, 4))
+        self.assertNotIn(2, s)
+        self.assertTrue(s['C'] and s['Z'] and s['V'])
+
+    def test_unsupported_encodings_are_not_consumed(self):
+        from r800_gps_pic_flow import arm_alu, thumb_wide_alu
+        for word in (0xe1b02f10, 0xe0120f90, 0xe0121190, 0xe012019f):
+            self.assertFalse(arm_alu({}, word))
+        for a, b in ((0xea10, 0x0f01), (0xea1d, 0x0201), (0xea70, 0x0201), (0xea00, 0x0201),
+                     (0xfb00, 0x0201), (0xfb00, 0xf20f)):
+            self.assertFalse(thumb_wide_alu({}, a, b, 4))
+
+    def test_wide_alu_drives_it_and_pic(self):
+        r = ThumbITTests().evaluate([0x2001, 0x2101, 0xebb0, 0x0001, 0xbf0c, 0xf240, 7, 0xf240, 9, 0x4770])
+        self.assertEqual(r['leaf_summary']['r0'], ('constant', 7))
+        r = ThumbFlowTests().run_flow([0xf640, 0x70f1, 0x2101, 0xeb10, 0x0001, 0x4478, 0x4770])
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
