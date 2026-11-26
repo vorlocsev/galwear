@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from r800_gnss_ci import check as check_ci
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -85,6 +86,17 @@ def offline_gate(enabled, sha, clean):
         return outcome("offline_regression","ERROR",reason=str(exc))
 
 
+def ci_gate(enabled, sha):
+    if not enabled:
+        return outcome("exact_head_ci","NOT_TESTED",reason="Live GitHub metadata check not requested")
+    try:
+        detail=check_ci(sha)
+        return outcome("exact_head_ci","PASS" if detail["status"]=="CI_METADATA_PASS"
+                       else "REVIEW_REQUIRED",detail=detail)
+    except (OSError,ValueError,subprocess.SubprocessError) as exc:
+        return outcome("exact_head_ci","ERROR",reason=str(exc))
+
+
 def summarize(sha, clean, gates):
     all_gates=list(gates)+[outcome(name,"NOT_TESTED",reason="Separate runtime evidence required")
                            for name in RUNTIME]
@@ -92,7 +104,9 @@ def summarize(sha, clean, gates):
             "decision":"HOLD_RUNTIME_UNVERIFIED","gates":all_gates,
             "blockers":[g["gate"] for g in all_gates
                         if g["status"] not in ("PASS","STATIC_PASS")],
-            "ci_verified":False,"daemon_build_authorized":False,"safe_to_flash":False}
+            "ci_verified":any(g["gate"]=="exact_head_ci" and g["status"]=="PASS"
+                              for g in gates),
+            "ci_logs_verified":False,"daemon_build_authorized":False,"safe_to_flash":False}
 
 
 def main():
@@ -102,6 +116,7 @@ def main():
     p.add_argument("--tizen-image",type=Path)
     p.add_argument("--tizen-image-sha256")
     p.add_argument("--run-offline",action="store_true")
+    p.add_argument("--check-ci",action="store_true",help="Query live exact-head GitHub Actions metadata via gh")
     a=p.parse_args()
     try:
         sha,clean=git_state()
@@ -116,7 +131,7 @@ def main():
         for root in (a.android_root,a.tizen_root):
             if root is not None and (not root.is_dir() or root.resolve()==Path("/")):
                 raise ValueError("Use isolated, prepared offline roots")
-        gates=[offline_gate(a.run_offline,sha,clean),
+        gates=[offline_gate(a.run_offline,sha,clean),ci_gate(a.check_ci,sha),
                static_gate("android_registration","r800_gnss_registration.py",
                            ["--root",a.android_root] if a.android_root else None,
                            "STATIC_GNSS_CONTRACT_ONLY"),
