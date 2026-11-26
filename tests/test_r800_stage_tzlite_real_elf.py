@@ -130,6 +130,12 @@ class RealStageTests(unittest.TestCase):
         result=compare(self.output,image,sha,digest)
         self.assertEqual(result["status"],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",result)
         self.assertEqual(result["configuration_count"],4)
+        metadata=result["original_metadata"]
+        self.assertEqual(metadata["status"],"ORIGINAL_METADATA_INVENTORY_ONLY")
+        self.assertEqual(metadata["entries"]["/usr/bin/lhd"]["mode"],"0o755")
+        self.assertEqual(metadata["entries"]["/lib"]["kind"],"symlink")
+        self.assertEqual(metadata["entries"]["/usr/bin"]["kind"],"directory")
+        self.assertFalse(metadata["ownership_restored"])
         self.assertGreaterEqual(result["elf_count"],24)
         self.assertEqual(result["image_sha256"],sha)
         self.assertEqual(result["manifest_sha256"],digest)
@@ -153,6 +159,28 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual(result["detail"]["image_sha256"],sha)
         self.assertFalse(result["detail"]["runtime_verified"])
         self.assertFalse(result["detail"]["safe_to_flash"])
+
+    def test_original_metadata_not_restored(self):
+        path=self.root/"usr/bin/lhd"
+        path.chmod(0o4755)
+        digest=self.candidate_digest()
+        image,_=self.image_fixture()
+        # Write only this disposable test image to set distinctive numeric owners.
+        subprocess.run(["debugfs","-w","-R","set_inode_field /usr/bin/lhd uid 12345",str(image)],
+                       check=True,timeout=30,capture_output=True)
+        subprocess.run(["debugfs","-w","-R","set_inode_field /usr/bin/lhd gid 23456",str(image)],
+                       check=True,timeout=30,capture_output=True)
+        sha=hashlib.sha256(image.read_bytes()).hexdigest()
+        result=compare(self.output,image,sha,digest)
+        self.assertEqual(result["status"],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",result)
+        meta=result["original_metadata"]
+        record=meta["entries"]["/usr/bin/lhd"]
+        self.assertEqual((record["uid"],record["gid"],record["mode"]),(12345,23456,"0o4755"))
+        self.assertIn("SPECIAL_PRIVILEGE_MODE:/usr/bin/lhd",meta["review_candidates"])
+        self.assertEqual((self.output/"usr/bin/lhd").stat().st_mode&0o7777,0o755)
+        self.assertFalse(result["original_ownership_verified"])
+        self.assertFalse(meta["effective_access_verified"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 
     def test_image_configuration_changed(self):
         digest=self.candidate_digest()
