@@ -85,9 +85,9 @@ typedef int gps_client_mutex_t[8];
 #define GPS_CLIENT_MUTEX_INIT {0}
 #include "gps_client.h"
 static struct gps_client connection = GPS_CLIENT_INIT;
-static void out(const char *line, int len)
+static void out(gps_client_epoch epoch, const char *line, int len)
 {
-	gps_client_send(&connection, line, len);
+	gps_client_send(&connection, epoch, line, len);
 }
 static int daemon_mode;
 
@@ -132,15 +132,18 @@ done:
 
 static void location_cb(GpsLocation *l)
 {
+	gps_client_epoch epoch = gps_client_ticket(&connection, 0);
 	char b[200];
 	int n;
+	if (daemon_mode && !epoch)
+		return;
 	if (!l || l->size < sizeof(*l) || !gps_valid_seed(l->latitude, l->longitude, l->timestamp))
 		return;
 	n = snprintf(b, sizeof(b), "FIX %u %.8f %.8f %.2f %.3f %.2f %.2f %lld\n",
 			 l->flags, l->latitude, l->longitude, l->altitude, (double)l->speed,
 			 (double)l->bearing, (double)l->accuracy, l->timestamp);
 	if (n > 0 && n < (int)sizeof(b))
-		out(b, n);
+		out(epoch, b, n);
 	save_fix(l);
 	if (daemon_mode)
 		return;
@@ -151,10 +154,11 @@ static void location_cb(GpsLocation *l)
 }
 static void status_cb(GpsStatus *s)
 {
+	gps_client_epoch epoch = gps_client_ticket(&connection, 1);
 	char b[32];
-	if (!s || s->size < sizeof(*s))
+	if ((daemon_mode && !epoch) || !s || s->size < sizeof(*s))
 		return;
-	out(b, snprintf(b, sizeof(b), "STATUS %u\n", s->status));
+	out(epoch, b, snprintf(b, sizeof(b), "STATUS %u\n", s->status));
 	if (daemon_mode)
 		return;
 	printf("STATUS %u\n", s->status);
@@ -166,14 +170,17 @@ static void sv_status_cb(void *sv)
 }
 static void nmea_cb(GpsUtcTime t, const char *nmea, int len)
 {
+	gps_client_epoch epoch = gps_client_ticket(&connection, 0);
 	char b[300];
 	int n;
+	if (daemon_mode && !epoch)
+		return;
 	len = gps_nmea_length(nmea, len);
 	if (len <= 0 || t < 0 || t > GPS_UTC_MAX)
 		return;
 	n = snprintf(b, sizeof(b), "NMEA %lld %.*s\n", t, len, nmea);
 	if (n > 0 && n < (int)sizeof(b))
-		out(b, n);
+		out(epoch, b, n);
 	if (!daemon_mode) {
 		printf("NMEA %.*s\n", len, nmea);
 		fflush(0);
@@ -351,11 +358,26 @@ static void aid(void)
 	inject_last();
 }
 
+/* Enable wire callbacks immediately before start: HAL may call back
+ * synchronously. End the epoch before retrying or cleaning up. */
+static int daemon_start(void)
+{
+	int r;
+	if (!gps_client_begin(&connection))
+		return -1;
+	r = gps->start();
+	if (r != 0)
+		gps_client_end(&connection);
+	return r;
+}
+
 static int session(int on)
 {
 	int r;
 	if (!on) {
+		gps_client_stopping(&connection);
 		r = gps->stop();
+		gps_client_end(&connection);
 		printf("session stop -> %d\n", r);
 		fflush(0);
 		return r;
@@ -364,7 +386,7 @@ static int session(int on)
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				   GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
 	if (r == 0)
-		r = gps->start();
+		r = daemon_start();
 	if (r != 0) {
 		/* gpsd restarted under us: reconnect the client library and retry */
 		printf("start failed, re-init\n");
@@ -382,7 +404,7 @@ static int session(int on)
 		r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				       GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
 		if (r == 0)
-			r = gps->start();
+			r = daemon_start();
 	}
 	printf("session %s -> %d\n", on ? "start" : "stop", r);
 	fflush(0);
