@@ -13,6 +13,7 @@ LIMIT = 256 * 1024**2
 HEADERS = ("gps_abi.h", "gps_command.h", "gps_frame.h", "gps_lto.h", "gps_output.h")
 SOURCES = ("gpsbridge.c", *HEADERS)
 SOURCE_LIMIT = 4 * 1024**2
+TOOLS = {"clang": "clang", "ld.lld": "lld", "llvm-readelf": "readelf"}
 
 
 def source_snapshot(root, staging, record, *, create=False):
@@ -48,6 +49,32 @@ def source_snapshot(root, staging, record, *, create=False):
                 raise ValueError("Unexpected source snapshot entries")
 
 
+def tool_snapshot(ndk, staging, record, *, create=False):
+    """Copy selected NDK tool bytes; host libraries remain outside this boundary."""
+    tc = ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin"
+    dest = staging / "tools"
+    if create:
+        dest.mkdir(mode=0o700)
+    with pinned_directory(dest) as (snapshot, _):
+        for name, key in TOOLS.items():
+            source = (tc / name).resolve(strict=True)
+            expected = record["inputs"][key]
+            raw = read_regular(source, LIMIT)
+            if str(source) != expected["resolved"] or hashlib.sha256(raw).hexdigest() != expected["sha256"]:
+                raise ValueError("NDK tool changed: " + name)
+            target = snapshot / name
+            if create:
+                with target.open("xb") as stream:
+                    stream.write(raw)
+                target.chmod(0o500)
+            if (stat.S_IMODE(target.lstat().st_mode) != 0o500
+                    or target.lstat().st_nlink != 1
+                    or hashlib.sha256(read_regular(target, LIMIT)).hexdigest() != expected["sha256"]):
+                raise ValueError("Tool snapshot changed: " + name)
+        if {p.name for p in snapshot.iterdir()} != set(TOOLS):
+            raise ValueError("Unexpected tool snapshot entries")
+
+
 def validate_command(root, ndk, command):
     """Match the exact supported freestanding compiler contract."""
     tc = ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -63,12 +90,12 @@ def validate_command(root, ndk, command):
         raise ValueError("Unexpected compiler output path")
     staging = output.parent
     for abi in (0, 1, 2):
-        expected = [str(tc / "clang"), "--target=armv7a-linux-gnueabi",
+        expected = [str(staging / "tools/clang"), "--target=armv7a-linux-gnueabi",
                     "-mfloat-abi=softfp", "-mfpu=vfpv3-d16",
                     "-DR800_XTRA_ABI=" + str(abi),
                     "--no-default-config", "-nostdinc", "-O2", "-fno-pic", "-no-pie",
                     "-fno-stack-protector", "-fno-builtin", "-ffreestanding",
-                    "-nostdlib", "-fuse-ld=lld",
+                    "-nostdlib", "-fuse-ld=lld", "--ld-path=" + str(staging / "tools/ld.lld"),
                     "-Wl,--hash-style=sysv", "-Wl,-z,noexecstack", "-Wl,-z,now",
                     "-Wl,--no-undefined", "-Wl,--dynamic-linker=/lib/ld-linux.so.3",
                     "-Wl,-e,_start", "-o", str(output),
@@ -108,7 +135,8 @@ def collect(root, ndk, command):
         files[name] = root / "build" / name
     return {"schema": "galwear-r800-gps-inputs-v1", "argv": command,
             "inputs": {key: fingerprint(path) for key, path in files.items()},
-            "compiler_contract": "freestanding-snapshot-v2", "xtra_abi": abi,
+            "compiler_contract": "freestanding-snapshot-v3", "xtra_abi": abi,
+            "tool_snapshot": TOOLS,
             "source_snapshot": {name: "source" if name == "gpsbridge.c" else name for name in SOURCES},
             "safe_to_flash": False, "signed_attestation": False}
 
@@ -126,12 +154,14 @@ def main():
         staging = Path(args.command[args.command.index("-o") + 1]).parent
         if args.mode == "capture":
             source_snapshot(args.root, staging, record, create=True)
+            tool_snapshot(args.ndk, staging, record, create=True)
             with args.record.open("x", encoding="utf-8") as stream:
                 json.dump(record, stream, sort_keys=True)
         else:
             if json.loads(read_regular(args.record, 1024**2)) != record:
                 raise ValueError("Build inputs or compiler arguments changed")
             source_snapshot(args.root, staging, record)
+            tool_snapshot(args.ndk, staging, record)
     except (OSError, ValueError) as exc:
         parser.exit(2, "Provenance rejected: " + str(exc) + "\n")
 
