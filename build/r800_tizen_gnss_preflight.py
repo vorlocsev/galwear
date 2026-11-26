@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import stat
+import struct
 
 from r800_gps_link_gate import elf
 from r800_broadcom_export import assess, EXPORT
@@ -42,14 +43,44 @@ def metadata(root, guest):
     return {"status":"PRESENT","kind":kind,"mode":oct(stat.S_IMODE(st.st_mode))}
 
 
+def closure_review(closure):
+    """Conservative GNSS-only gate over the generic dependency inventory."""
+    problems = []
+    if closure["problems"]:
+        problems.append("DEPENDENCY_CLOSURE_REVIEW")
+    for path, item in sorted(closure["files"].items()):
+        flags = item["arm_flags"]
+        if flags & 0xff000000 != 0x05000000 or flags & 0x400:
+            problems.append("DEPENDENCY_ARM_ABI_REVIEW:"+path)
+        if not item["has_dynamic"] or item["dynamic_symbol_count"] is None:
+            problems.append("DEPENDENCY_SYMBOL_INVENTORY_REVIEW:"+path)
+    symbols = closure["symbol_candidates"]
+    if symbols["limit_exceeded"]:
+        problems.append("DEPENDENCY_SYMBOL_BUDGET_EXCEEDED")
+    for target in TARGETS:
+        item = symbols["targets"].get(target)
+        if item is None:
+            problems.append("DEPENDENCY_TARGET_SCOPE_MISSING:"+target)
+            continue
+        if item["inventory_incomplete"] or item["incomplete"]:
+            problems.append("DEPENDENCY_SYMBOL_SCOPE_INCOMPLETE:"+target)
+        if item["missing_strong"]:
+            problems.append("DEPENDENCY_STRONG_IMPORT_REVIEW:"+target)
+        if item["ambiguous"]:
+            problems.append("DEPENDENCY_AMBIGUOUS_IMPORT_REVIEW:"+target)
+    if closure["relocation_review_objects"]:
+        problems.append("DEPENDENCY_RELOCATION_REVIEW")
+    # These are only candidate scopes. Runtime dynamic resolution, plugins,
+    # exact ABI layout and hardware behavior remain separate.
+    return problems
+
+
 def check(root):
     root = Path(root).resolve(strict=True)
     if not root.is_dir() or root == Path("/"):
         raise ValueError("Expected isolated offline donor directory")
     closure = audit(root, TARGETS)
-    problems = []
-    if closure["problems"]:
-        problems.append("DEPENDENCY_CLOSURE_REVIEW")
+    problems = closure_review(closure)
     library = {"status":"NOT_VERIFIED"}
     try:
         path, canonical = resolve_guest(root, BRIDGE_LIBRARY)
@@ -60,7 +91,7 @@ def check(root):
         library = assess(raw, elf(raw))
         if library["problems"]:
             problems.append("BRIDGE_EXPORT_NOT_CONFIRMED")
-    except (OSError,ValueError) as exc:
+    except (OSError,ValueError,struct.error) as exc:
         library = {"status":"REJECTED","reason":str(exc)}
         problems.append("BRIDGE_LIBRARY_REJECTED")
     directories = {p:metadata(root,p) for p in DIRECTORIES}
@@ -77,6 +108,7 @@ def check(root):
             problems.append("OPTIONAL_FILE_PATH_REVIEW:"+p)
     return {"status":"TIZEN_GNSS_REVIEW_REQUIRED" if problems else "TIZEN_GNSS_STATIC_ONLY",
             "problems":problems,"closure_status":closure["status"],"bridge_library":library,
+            "dependency_evidence":closure,
             "directories":directories,"socket_path":SOCKET,"socket_metadata":socket,
             "optional_metadata":optional,"runtime_mounts_verified":False,
             "socket_permissions_verified":False,"bridge_protocol_verified":False,
