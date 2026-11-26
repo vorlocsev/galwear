@@ -81,6 +81,8 @@ class HostTraceTests(unittest.TestCase):
         roles = {"donor-"+name: "llvm-readelf" for name in DONORS}
         roles.update({"compile":"clang", "compile.linker":"ld.lld", "result":"llvm-readelf"})
         for pid, (role, tool) in enumerate(roles.items(), 200):
+            if role == "compile.linker":
+                pid = 999
             (self.logs/f"{role}.{pid}").write_bytes(self.log(tool, pid))
         (self.logs/"compile.999").write_bytes(self.log("ld.lld", 999, shell=True))
 
@@ -93,6 +95,13 @@ class HostTraceTests(unittest.TestCase):
         self.assertFalse(evidence["safe_to_flash"])
         next(self.logs.glob("compile.linker.*")).unlink()
         with self.assertRaisesRegex(ValueError, "Missing captured"):
+            summarize(self.stage, self.report)
+
+    def test_linker_wrapper_exec_pid_must_match(self):
+        self.complete_logs()
+        (self.logs/"compile.999").unlink()
+        (self.logs/"compile.998").write_bytes(self.log("ld.lld", 998, shell=True))
+        with self.assertRaisesRegex(ValueError, "wrapper and exec process IDs differ"):
             summarize(self.stage, self.report)
 
     def test_extra_and_pid_mismatched_logs(self):
