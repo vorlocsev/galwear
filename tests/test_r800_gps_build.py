@@ -33,6 +33,7 @@ if kind == 'broken':
 CLANG = '''#!/usr/bin/env python3
 import os, sys
 from pathlib import Path
+assert not any(k in os.environ for k in ('CPATH', 'LIBRARY_PATH', 'CCC_OVERRIDE_OPTIONS'))
 Path(os.environ['TEST_MARKER']).touch()
 output = Path(sys.argv[sys.argv.index('-o') + 1])
 value = 'bridge'
@@ -157,6 +158,29 @@ class BuildContract(unittest.TestCase):
         self.assertEqual(evidence[0]['inputs']['xtra_abi'], 0)
         for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h'):
             self.assertIn(name, evidence[0]['inputs']['inputs'])
+
+    def test_compiler_environment_is_filtered(self):
+        with mock.patch.dict(os.environ, {"CPATH": "/foreign", "LIBRARY_PATH": "/foreign",
+                                          "CCC_OVERRIDE_OPTIONS": "+-O0"}):
+            result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_compiler_argument_contract(self):
+        from r800_gps_provenance import validate_command
+        result = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = next(json.loads(line) for line in result.stdout.splitlines()
+                        if line.startswith('{"audit_sha256":'))
+        argv = evidence["inputs"]["argv"]
+        self.assertEqual(validate_command(self.root, self.ndk, argv), 0)
+        for args in (argv + ["-I/tmp/foreign"],
+                     argv + ["@/tmp/response"],
+                     [x for x in argv if x != "-nostdinc"],
+                     ["-DR800_XTRA_ABI=3" if x == "-DR800_XTRA_ABI=0" else x for x in argv],
+                     ["-O3" if x == "-O2" else x for x in argv],
+                     ["/tmp/libc.so.6" if x.endswith("/libs/libc.so.6") else x for x in argv]):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                validate_command(self.root, self.ndk, args)
 
     def test_missing_header_blocks_compiler(self):
         (self.script.parent / 'gps_frame.h').unlink()
