@@ -122,7 +122,7 @@ class BuildContract(unittest.TestCase):
         self.script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, self.script)
         (self.script.parent / 'gpsbridge.c').write_text('/* synthetic fixture */')
-        for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h', 'gps_client.h', 'gps_cache.h', 'gps_cache_read.h', 'gps_cache_arm_stat.h', 'gps_lto_file.h'):
+        for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h', 'gps_client.h', 'gps_cache.h', 'gps_cache_read.h', 'gps_cache_arm_stat.h', 'gps_lto_file.h', 'gps_xtra.h'):
             (self.script.parent / name).write_text('/* synthetic header */')
         self.ndk = self.root / 'ndk'
         tc = self.ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
@@ -185,7 +185,7 @@ class BuildContract(unittest.TestCase):
         self.assertIsNone(evidence[0]['inputs']['inputs']['host_snapshot'])
         self.assertEqual(evidence[0]['inputs']['tool_snapshot'],
                          {'clang': 'clang', 'ld.lld': 'lld', 'llvm-readelf': 'readelf'})
-        for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h', 'gps_client.h', 'gps_cache.h', 'gps_cache_read.h', 'gps_cache_arm_stat.h', 'gps_lto_file.h'):
+        for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h', 'gps_client.h', 'gps_cache.h', 'gps_cache_read.h', 'gps_cache_arm_stat.h', 'gps_lto_file.h', 'gps_xtra.h'):
             self.assertIn(name, evidence[0]['inputs']['inputs'])
 
     def test_compiler_environment_is_filtered(self):
