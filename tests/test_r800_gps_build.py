@@ -38,6 +38,14 @@ if mode == 'reject':
     sys.exit(2)
 if mode == 'mutate':
     (Path(sys.argv[sys.argv.index('--libdir') + 1]) / 'libc.so.6').write_text('changed')
+if mode == 'source-mutate':
+    (out.parent / 'donor/libc.so.6').write_text('changed')
+if mode == 'source-replace':
+    source = out.parent / 'donor'
+    source.rename(out.parent / 'old-donor')
+    source.mkdir()
+    for item in (out.parent / 'old-donor').iterdir():
+        (source / item.name).write_bytes(item.read_bytes())
 if mode == 'directory':
     out.mkdir()
 if mode == 'symlink':
@@ -64,6 +72,9 @@ class BuildContract(unittest.TestCase):
             path.write_text(body)
             path.chmod(0o755)
         (self.root / 'build').mkdir()
+        for name in ('r800_gps_donor_snapshot.py', 'r800_android_userspace_preflight.py'):
+            shutil.copyfile(SCRIPT.parents[3] / 'build' / name,
+                            self.root / 'build' / name)
         (self.root / 'build/r800_gps_link_gate.py').write_text(GATE)
         self.libs = self.root / 'donor'
         self.libs.mkdir()
@@ -115,6 +126,34 @@ class BuildContract(unittest.TestCase):
         p.symlink_to(self.libs / LIBS[1])
         self.assertNotEqual(self.run_build().returncode, 0)
         self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
+
+    def test_empty_donor(self):
+        self.reject_donor('')
+
+    def test_oversized_donor(self):
+        with (self.libs / LIBS[0]).open('wb') as stream:
+            stream.truncate(64 * 1024**2 + 1)
+        self.assertNotEqual(self.run_build().returncode, 0)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
+
+    def test_fifo_donor(self):
+        p = self.libs / LIBS[0]
+        p.unlink()
+        os.mkfifo(p)
+        self.assertNotEqual(self.run_build().returncode, 0)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
+
+    def test_source_mutation_after_link(self):
+        self.assertNotEqual(self.run_build('source-mutate').returncode, 0)
+        self.assertTrue(self.marker.exists())
+        self.assertFalse(self.out.exists())
+
+    def test_source_directory_replaced_after_link(self):
+        self.assertNotEqual(self.run_build('source-replace').returncode, 0)
+        self.assertTrue(self.marker.exists())
         self.assertFalse(self.out.exists())
 
     def test_gate_failure(self):
