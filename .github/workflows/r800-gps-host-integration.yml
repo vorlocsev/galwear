@@ -1,0 +1,50 @@
+name: R800 GPS host integration
+on:
+  push:
+    branches:
+      - development/r800-gps-integrated-20261125
+    paths:
+      - 'src/hal/**'
+      - 'src/tools/gps/**'
+      - 'tests/**'
+      - 'build/r800_gps*'
+      - '.github/workflows/r800-gps-host-integration.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: r800-gps-host-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  host:
+    if: github.repository == 'vorlocsev/galwear'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record exact source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "SOURCE_SHA=$GITHUB_SHA"
+          cc --version
+          clang --version
+      - name: Core regression
+        run: sh build/r800_gps_core_checks.sh
+      - name: Native HAL and both endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONDONTWRITEBYTECODE=1
+          temp=$(mktemp -d)
+          trap 'rm -rf "$temp"' EXIT
+          for test in lifecycle peer v2; do
+            cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
+              -fsanitize=undefined -fno-sanitize-recover=all \
+              "tests/test_r800_gps_hal_${test}.c" -o "$temp/$test"
+            timeout 60s "$temp/$test"
+          done
+          python3 build/r800_run_required_suite.py 'test_r800_gps_bridge_integration.py'
+          echo 'HOST_ENDPOINTS=PASS'
+          echo 'DONOR_LINK_VERIFIED=false'
+          echo 'GNSS_RUNTIME_VERIFIED=false'
+          echo 'safe_to_flash=false'
