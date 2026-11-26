@@ -24,6 +24,7 @@ class BridgeIntegration(unittest.TestCase):
             ("gpsbridge", ["-DR800_GPS_BRIDGE_HOST_TEST", "src/tools/gps/gpsbridge.c", "-ldl"]),
             ("libbrcm-test.so", ["-fPIC", "-shared", "tests/r800_mock_brcm.c"]),
             ("android-peer", ["tests/test_r800_gps_both_sides.c"]),
+            ("android-peer-v2", ["-DR800_GPS_IPC_V2=1", "tests/test_r800_gps_both_sides.c"]),
         ):
             subprocess.run(flags + args + ["-o", str(cls.bin/name)],
                            cwd=ROOT, check=True, timeout=30)
@@ -64,6 +65,35 @@ class BridgeIntegration(unittest.TestCase):
         self.assertEqual(evidence.count("MOCK_STOP\n"),2)
         self.assertIn("MOCK_LOC\n",evidence)
         self.assertIn("unc 50 -> 0",evidence)
+        self.assertIsNone(proc.poll())
+
+    def test_both_real_sources_v2_async(self):
+        cwd,proc,log=self.launch("async-data")
+        run=subprocess.run([str(self.bin/"android-peer-v2")],cwd=cwd,
+                           capture_output=True,text=True,timeout=25)
+        self.assertEqual(run.returncode,0,run.stdout+run.stderr+log.read_text())
+        self.assertIn("GPS_BOTH_SIDES=PASS",run.stdout)
+        evidence=log.read_text()
+        self.assertEqual(evidence.count("MOCK_START\n"),2)
+        self.assertEqual(evidence.count("MOCK_STOP\n"),2)
+        self.assertEqual(evidence.count("MOCK_ASYNC_DATA\n"),2)
+        self.assertIsNone(proc.poll())
+
+    def test_v2_async_data_and_reconnect(self):
+        cwd,proc,log=self.launch("async-data")
+        for _ in range(2):
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+                s.settimeout(5); s.connect(str(cwd/"gps.sock"))
+                with s.makefile("rb") as lines:
+                    s.sendall(b"HELLO 2\nSTART 1\n")
+                    self.assertEqual(lines.readline(),b"READY 2\n")
+                    self.assertEqual(lines.readline(),b"ACK START 1\n")
+                    s.sendall(b"LOC 52 5 0.25\n")
+                    self.assertTrue(lines.readline().startswith(b"DATA 1 FIX "))
+                    self.assertTrue(lines.readline().startswith(b"DATA 1 NMEA "))
+                    s.sendall(b"STOP 1\n")
+                    self.assertEqual(lines.readline(),b"ACK STOP 1\n")
+        self.assertEqual(log.read_text().count("MOCK_ASYNC_DATA\n"),2)
         self.assertIsNone(proc.poll())
 
     def test_existing_file_preserved(self):
