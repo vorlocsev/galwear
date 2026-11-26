@@ -197,21 +197,30 @@ def automatic_callees(raw, factory, depth):
     """Find nonpreemptible dynamic function ranges at direct call candidates."""
     from r800_gps_pic_flow import arm_call, thumb_call
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
-    if 4 not in tags or any(t in tags for t in (0x6ffffef5, 0x6ffffff0, 0x6ffffffc,
-                                               0x6ffffffd, 0x6ffffffe, 0x6fffffff)):
-        raise ValueError("Automatic callee mode requires unversioned SYSV symbols")
+    from r800_android_linker_audit import inspect
 
     def one(tag):
         if len(tags.get(tag, [])) != 1:
             raise ValueError("Missing or duplicate callee symbol tag")
         return tags[tag][0]
 
-    off, _ = mapping(one(4), 8)
-    _, count = struct.unpack_from("<II", raw, off)
-    if not 1 <= count <= MAX_SYMBOLS or one(11) != 16 or not 1 <= one(10) <= MAX_STRINGS:
+    if not 1 <= one(10) <= MAX_STRINGS or one(11) != 16:
         raise ValueError("Invalid callee symbol inventory")
+    inventory = inspect(raw)
+    count = inventory["dynamic_symbol_count"]
+    if type(count) is not int or not 1 <= count <= MAX_SYMBOLS:
+        raise ValueError("Invalid callee symbol count")
     off, _ = mapping(one(5), one(10))
     strings = raw[off:off + one(10)]
+    if strings[0] != 0:
+        raise ValueError("Invalid callee string table")
+    versions = None
+    definitions = {v["index"]: v["version"] for v in inventory["version_definitions"] if not v["base"]}
+    if 0x6ffffff0 in tags:
+        off, _ = mapping(one(0x6ffffff0), count * 2)
+        versions = struct.unpack_from(f"<{count}H", raw, off)
+    elif any(t in tags for t in (0x6ffffffc, 0x6ffffffd, 0x6ffffffe, 0x6fffffff)):
+        raise ValueError("Version metadata without DT_VERSYM")
     off, _ = mapping(one(6), count * 16)
     spans = []
     for i in range(1, count):
@@ -225,8 +234,13 @@ def automatic_callees(raw, factory, depth):
         end = start + max(size, 1)
         eligible = (info & 15 == 2 and (info >> 4 == 0 or info >> 4 in (1, 2) and other & 3 in (1, 2, 3))
                     and 0 < size <= 4096 and start % align == 0 and size % align == 0 and end <= 2**32)
+        raw_version = versions[i] if versions is not None else (0 if info >> 4 == 0 else 1)
+        version_index = raw_version & 0x7fff
+        hidden = bool(raw_version & 0x8000)
+        version_ok = ((version_index == 0 and not hidden) if info >> 4 == 0 else
+                      (version_index == 1 and not hidden or version_index >= 2 and version_index in definitions))
         row = None
-        if eligible:
+        if eligible and version_ok:
             stop = strings.find(b"\0", name, min(len(strings), name + 4096)) if name < len(strings) else -1
             try:
                 _, flags = mapping(start, size)
@@ -234,7 +248,9 @@ def automatic_callees(raw, factory, depth):
                 flags = 0
             if stop > name and flags & 1 and not flags & 2:
                 row = {"symbol_index": i, "symbol_name": strings[name:stop].decode("utf-8", "replace"),
-                       "isa": isa, "start_va": start, "size": size}
+                       "isa": isa, "start_va": start, "size": size,
+                       "version_index": version_index, "symbol_version": definitions.get(version_index),
+                       "version_hidden": hidden}
         spans.append((start, end, i, row))
     spans.sort(key=lambda s: (s[0], s[1], s[2]))
     candidates = {}
