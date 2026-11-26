@@ -48,10 +48,16 @@ def record(stdout, binary):
             or inputs["safe_to_flash"] is not False
             or inputs["signed_attestation"] is not False):
         raise ValueError("Invalid input evidence scope")
-    return {"binary_sha256": digest, "donor_sha256": obj["donor_sha256"],
+    result = {"binary_sha256": digest, "donor_sha256": obj["donor_sha256"],
             "input_fingerprints": inputs["inputs"],
             "compiler_argv": normalize_argv(inputs["argv"]),
             "tizen_archive": obj.get("tizen_archive")}
+    if inputs["inputs"].get("host_snapshot") is not None:
+        trace = obj.get("host_trace")
+        if not isinstance(trace, dict) or trace.get("status") != "HOST_LOADER_DIAGNOSTICS_MATCH" or trace.get("host_isolated") is not False or trace.get("safe_to_flash") is not False or trace.get("runtime_verified") is not False:
+            raise ValueError("Missing or invalid captured host trace evidence")
+        result["host_trace"] = trace
+    return result
 
 
 def compare(builder, ndk, donor, abi, timeout=300):
