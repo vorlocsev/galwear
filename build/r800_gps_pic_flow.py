@@ -150,6 +150,73 @@ def thumb_literal(a, b, width, va):
     return None
 
 
+FLAG_KEYS = ("N", "Z", "C", "V")
+
+
+def condition_value(state, cond):
+    if cond == 14:
+        return True
+    if not 0 <= cond < 14:
+        return None
+    outcomes = set()
+    for bits in range(16):
+        n, z, c, v = (bool(bits & (1 << i)) for i in range(4))
+        if any(k in state and state[k] != bit for k, bit in zip(FLAG_KEYS, (n, z, c, v))):
+            continue
+        base = (z, c, n, v, c and not z, n == v, not z and n == v)[cond // 2]
+        outcomes.add(base != bool(cond & 1))
+    return outcomes.pop() if len(outcomes) == 1 else None
+
+
+def constant(state, reg):
+    fact = state.get(reg)
+    return fact[1] if fact and fact[0] == "constant" else None
+
+
+def compare_flags(state, lhs, rhs, *, test=False, carry=None):
+    for key in (("N", "Z") if test else FLAG_KEYS):
+        state.pop(key, None)
+    if test and carry is not None:
+        state["C"] = carry
+    if lhs is None or rhs is None:
+        return
+    result = (lhs & rhs) if test else (lhs - rhs) & 0xffffffff
+    state.update(N=bool(result & 0x80000000), Z=result == 0)
+    if not test:
+        state.update(C=lhs >= rhs, V=bool((lhs ^ rhs) & (lhs ^ result) & 0x80000000))
+
+
+def arm_compare(state, word):
+    reg_form = word & 0xfff0fff0
+    imm_form = word & 0xfff0f000
+    rn = (word >> 16) & 15
+    if rn > 12:
+        return False
+    if reg_form in (0xe1500000, 0xe1100000) and word & 15 <= 12:
+        compare_flags(state, constant(state, rn), constant(state, word & 15), test=reg_form == 0xe1100000)
+        return True
+    if imm_form in (0xe3500000, 0xe3100000):
+        imm, shift = word & 255, 2 * ((word >> 8) & 15)
+        rhs = ((imm >> shift) | (imm << (32 - shift))) & 0xffffffff
+        compare_flags(state, constant(state, rn), rhs, test=imm_form == 0xe3100000,
+                      carry=bool(rhs & 0x80000000) if shift else None)
+        return True
+    return False
+
+
+def thumb_compare(state, a, width):
+    if width != 2:
+        return False
+    if a & 0xf800 == 0x2800:
+        compare_flags(state, constant(state, (a >> 8) & 7), a & 255)
+        return True
+    if a & 0xffc0 in (0x4280, 0x4200):
+        compare_flags(state, constant(state, a & 7), constant(state, (a >> 3) & 7),
+                      test=a & 0xffc0 == 0x4200)
+        return True
+    return False
+
+
 def assumed_call(state, call, va, start, end, mapping, leaf=None):
     target, isa, kind = call
     align = 4 if isa == "arm" else 2
@@ -173,7 +240,7 @@ def assumed_call(state, call, va, start, end, mapping, leaf=None):
             if not summary["accepted"]:
                 return None
             for key in list(state):
-                if type(key) is int and key not in summary["preserved_registers"]:
+                if key in FLAG_KEYS or (type(key) is int and key not in summary["preserved_registers"]):
                     state.pop(key)
             if summary["r0"] is not None:
                 state[0] = summary["r0"]
@@ -347,11 +414,13 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
             if delta & 0x800000:
                 delta -= 1 << 24
             target = va + 8 + 4 * delta
-            if not start <= target < end:
-                boundary("external_branch")
-            else:
-                enqueue(target, state)
-            if cond != 14:
+            decision = condition_value(state, cond)
+            if decision is not False:
+                if not start <= target < end:
+                    boundary("external_branch")
+                else:
+                    enqueue(target, state)
+            if decision is not True:
                 enqueue(va + 4, state)
             continue
         if word == 0xe12fff1e:  # BX LR, candidate return only
@@ -364,7 +433,9 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
             boundary("conditional_or_unknown_instruction")
             continue
         stack = arm_stack(word)
-        if stack is not None:
+        if arm_compare(state, word):
+            pass
+        elif stack is not None:
             if not stack_transfer(state, *stack):
                 boundary("invalid_stack_access")
                 continue
@@ -479,12 +550,14 @@ def thumb_it_blocks(nodes, relocations):
     return blocks, body, errors
 
 
-def transfer_it(state, steps):
-    # Flags are unknown but unchanged by the accepted subset. Keep the two
-    # correlated predicate outcomes separate until the block exits.
+def transfer_it(state, steps, decision=None):
+    # Flags are unchanged by the accepted subset. Keep the two correlated
+    # predicate outcomes separate until the block exits.
     lanes = [dict(state), dict(state)]
     for va, then, op in steps:
         it_register_transfer(lanes[0 if then else 1], va, *op)
+    if decision is not None:
+        return lanes[0 if decision else 1]
     return {k: v for k, v in lanes[0].items() if lanes[1].get(k) == v}
 
 
@@ -535,7 +608,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
             continue
         if va in blocks:
             target, steps = blocks[va]
-            enqueue(target, transfer_it(state, steps))
+            enqueue(target, transfer_it(state, steps, condition_value(state, (a >> 4) & 15)))
             continue
         call = thumb_call(a, b, width, va) if assume_aapcs else None
         if call is not None:
@@ -549,11 +622,14 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
         branch = thumb_branch(a, b, width, va)
         if branch is not None:
             target, conditional = branch
-            if target not in flow.nodes:
-                boundary("invalid_branch")
-            else:
-                enqueue(target, state)
-            if conditional:
+            cond = ((a >> (8 if width == 2 else 6)) & 15) if conditional else 14
+            decision = condition_value(state, cond)
+            if decision is not False:
+                if target not in flow.nodes:
+                    boundary("invalid_branch")
+                else:
+                    enqueue(target, state)
+            if decision is not True:
                 enqueue(va + width, state)
             continue
         if a == 0x4770 and width == 2:
@@ -563,7 +639,9 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
                 flow.record_return(state)
             continue
         stack = thumb_stack(a, b, width)
-        if stack is not None:
+        if thumb_compare(state, a, width):
+            pass
+        elif stack is not None:
             if not stack_transfer(state, *stack):
                 boundary("invalid_stack_access")
                 continue
