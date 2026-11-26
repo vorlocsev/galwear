@@ -37,6 +37,11 @@ int main(void)
     assert(gps_epoch_byte(&f,5,0)==-1);
     gps_epoch_reset(&f,6);
     assert(gps_epoch_byte(&f,6,0)==-1);
+    gps_epoch_reset(&f,7);
+    assert(feed(&f,7,"X")==0);
+    for (unsigned int i=1; i<GPS_FRAME_CAPACITY-2; ++i)
+        assert(gps_epoch_byte(&f,8,'X')==0);
+    assert(gps_epoch_byte(&f,8,'X')==-1);
     puts("GPS_EPOCH_FRAME=PASS");
     return 0;
 }
