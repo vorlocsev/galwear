@@ -37,6 +37,20 @@ class TzliteReadinessTests(unittest.TestCase):
         self.assertEqual(gate["detail"]["manifest_sha256"],self.digest)
         self.assertTrue(r.tzlite_recheck(gate,self.root,self.digest)["recheck_passed"])
 
+    def test_missing_manifest_detail_fails_closed(self):
+        with patch.object(r,"static_gate",return_value=r.outcome(
+                "tzlite_manifest_integrity","STATIC_PASS")):
+            gate=self.gate()
+        self.assertEqual(gate["status"],"REVIEW_REQUIRED")
+        self.assertIn("MISSING_MANIFEST_DETAIL",gate["problems"])
+
+    def test_recheck_requires_report_digest(self):
+        first=self.gate()
+        self.assertEqual(first["status"],"STATIC_PASS")
+        for digest in (None,"invalid",True):
+            with patch.object(r,"tzlite_integrity_gate",return_value=dict(first,report_sha256=digest)):
+                self.assertEqual(r.tzlite_recheck(first,self.root,self.digest)["status"],"REVIEW_REQUIRED")
+
     def test_missing_digest(self):
         self.assertEqual(r.tzlite_integrity_gate(self.root,None)["status"],"NOT_TESTED")
 

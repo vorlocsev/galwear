@@ -72,6 +72,15 @@ class ImageBindingReadinessTests(unittest.TestCase):
                         {"alias_count":"2"}):
             self.assertEqual(self.gate(changes)["status"],"REVIEW_REQUIRED")
 
+    def test_missing_binding_detail_fails_closed(self):
+        for detail in (None,[],True):
+            with patch.object(r,"static_gate",return_value=r.outcome(
+                    "tzlite_image_binding","STATIC_PASS",detail=detail)):
+                gate=r.tzlite_image_gate(Path("candidate"),Path("image"),
+                    self.image_digest,self.manifest_digest,self.prerequisites)
+            self.assertEqual(gate["status"],"REVIEW_REQUIRED")
+            self.assertIn("MISSING_IMAGE_BINDING_DETAIL",gate["problems"])
+
     def test_failed_process(self):
         self.assertEqual(self.gate(code=2)["status"],"REVIEW_REQUIRED")
 
@@ -95,7 +104,8 @@ class ImageBindingReadinessTests(unittest.TestCase):
                     if name=="tzlite_image_binding":
                         self.assertEqual(kwargs["bindings"]["image_sha256"],self.image_digest)
                         self.assertEqual(kwargs["bindings"]["manifest_sha256"],self.manifest_digest)
-                        return r.outcome(name,"STATIC_PASS")
+                        return r.outcome(name,"STATIC_PASS",detail=dict(self.detail),
+                                         report_sha256="e"*64)
                     return r.outcome(name,"STATIC_PASS" if name in
                                      ("tzlite_known_components","tizen_image_closure") else "NOT_TESTED")
                 def recheck(first,*args):

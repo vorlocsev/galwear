@@ -78,7 +78,9 @@ def tzlite_integrity_gate(root, digest):
                                "donor_authenticity_verified":False,
                                "runtime_verified":False},timeout=600)
     if gate["status"]=="STATIC_PASS":
-        detail=gate["detail"]
+        detail=gate.get("detail")
+        if not isinstance(detail,dict):
+            return outcome(name,"REVIEW_REQUIRED",problems=["MISSING_MANIFEST_DETAIL"])
         for key in ("entries","total_bytes"):
             if type(detail.get(key)) is not int or detail[key]<1:
                 return outcome(name,"REVIEW_REQUIRED",problems=["INVALID_MANIFEST_COUNT:"+key])
@@ -89,7 +91,10 @@ def tzlite_recheck(first, root, digest):
     if first["status"]!="STATIC_PASS":
         return first
     after=tzlite_integrity_gate(root,digest)
-    if after["status"]!="STATIC_PASS" or after["detail"]!=first["detail"]:
+    if (after["status"]!="STATIC_PASS" or not isinstance(first.get("detail"),dict)
+            or after.get("detail")!=first["detail"]
+            or not isinstance(after.get("report_sha256"),str)
+            or not re.fullmatch(r"[0-9a-f]{64}",after["report_sha256"])):
         return outcome(first["gate"],"REVIEW_REQUIRED",
                        problems=["TZLITE_INTEGRITY_RECHECK_FAILED"],before=first,after=after)
     return dict(first,recheck_report_sha256=after["report_sha256"],recheck_passed=True)
@@ -113,7 +118,9 @@ def tzlite_image_gate(root, image, image_digest, manifest_digest, gates):
                                "donor_authenticity_verified":False,"original_ownership_verified":False,
                                "runtime_verified":False},timeout=600)
     if gate["status"]=="STATIC_PASS":
-        detail=gate["detail"]
+        detail=gate.get("detail")
+        if not isinstance(detail,dict):
+            return outcome(name,"REVIEW_REQUIRED",problems=["MISSING_IMAGE_BINDING_DETAIL"])
         for key,minimum in (("elf_count",1),("alias_count",0)):
             if type(detail.get(key)) is not int or detail[key]<minimum:
                 return outcome(name,"REVIEW_REQUIRED",problems=["INVALID_IMAGE_BINDING_COUNT:"+key])
