@@ -36,6 +36,7 @@ __attribute__((used)) static int main_probe(int argc,char **argv,char **envp)
     if (mark("GLIBC_2_24=PASS")) return 16;
     if (tls != 17) return 11;
     tls = 91;
+    if (tls != 91) return 11;
     if (mark("MAIN_TLS=PASS")) return 16;
     if (pthread_create(&thread,0,worker,&result)) return 12;
     if (pthread_join(thread,0) || !result || tls != 91) return 13;
