@@ -274,10 +274,14 @@ def alu_flags(state, op, rd, lhs, rhs, carry=None):
     if not arithmetic and carry is not None:
         state["C"] = carry
     state.pop(rd, None)
-    if rhs is None or (op != "mov" and lhs is None):
+    if rhs is None or (op not in ("mov", "mvn") and lhs is None):
         return
     if op == "mov":
         result = rhs
+    elif op == "mvn":
+        result = (~rhs) & 0xffffffff
+    elif op == "bic":
+        result = lhs & ~rhs
     elif op == "add":
         result = (lhs + rhs) & 0xffffffff
         state.update(C=lhs + rhs > 0xffffffff, V=bool(~(lhs ^ rhs) & (lhs ^ result) & 0x80000000))
@@ -305,13 +309,31 @@ def alu_flags(state, op, rd, lhs, rhs, carry=None):
     state.update(N=bool(result & 0x80000000), Z=result == 0)
 
 
+def multiply(state, rd, lhs, rhs, setflags):
+    state.pop(rd, None)
+    if setflags:
+        state.pop("N", None)
+        state.pop("Z", None)
+    if lhs is not None and rhs is not None:
+        result = (lhs * rhs) & 0xffffffff
+        state[rd] = ("constant", result)
+        if setflags:
+            state.update(N=bool(result & 0x80000000), Z=result == 0)
+
+
 def arm_alu(state, word):
-    # A32 unconditional data processing, S=1; immediate or immediate-shifted register.
+    if word & 0xffe0f0f0 == 0xe0000090:
+        rd, rs, rm = (word >> 16) & 15, (word >> 8) & 15, word & 15
+        if max(rd, rs, rm) > 12:
+            return False
+        multiply(state, rd, constant(state, rm), constant(state, rs), bool(word & (1 << 20)))
+        return True
+    # A32 unconditional data processing, S=1; immediate or shifted register.
     if word & 0xfc100000 != 0xe0100000:
         return False
-    op = {0: "and", 1: "eor", 2: "sub", 4: "add", 5: "adc", 6: "sbc", 12: "orr", 13: "mov"}.get((word >> 21) & 15)
+    op = {0: "and", 1: "eor", 2: "sub", 3: "rsb", 4: "add", 5: "adc", 6: "sbc", 12: "orr", 13: "mov", 14: "bic", 15: "mvn"}.get((word >> 21) & 15)
     rn, rd = (word >> 16) & 15, (word >> 12) & 15
-    if op is None or rd > 12 or rn > 12 or (op == "mov" and rn != 0):
+    if op is None or rd > 12 or rn > 12 or (op in ("mov", "mvn") and rn != 0):
         return False
     carry = None
     shifted = False
@@ -324,10 +346,19 @@ def arm_alu(state, word):
         kind, amount = immediate_shift(("lsl", "lsr", "asr", "ror")[(word >> 5) & 3], (word >> 7) & 31)
         rhs, carry = shift_with_carry(constant(state, word & 15), kind, amount, state.get("C"))
         shifted = True
+    elif word & 0x90 == 0x10 and word & 15 <= 12 and (word >> 8) & 15 <= 12:
+        kind = ("lsl", "lsr", "asr", "ror")[(word >> 5) & 3]
+        amount = constant(state, (word >> 8) & 15)
+        rhs, carry = shift_with_carry(constant(state, word & 15), kind,
+                                      None if amount is None else amount & 255, state.get("C"))
+        shifted = True
     else:
         return False
-    alu_flags(state, op, rd, constant(state, rn), rhs, carry)
-    if shifted and op in ("mov", "and", "orr", "eor") and carry is None:
+    lhs = constant(state, rn)
+    if op == "rsb":
+        op, lhs, rhs = "sub", rhs, lhs
+    alu_flags(state, op, rd, lhs, rhs, carry)
+    if shifted and op in ("mov", "mvn", "and", "orr", "eor", "bic") and carry is None:
         state.pop("C", None)
     return True
 
@@ -353,12 +384,50 @@ def thumb_alu(state, a, width):
         rd = a & 7
         amount = constant(state, (a >> 3) & 7)
         shifted_mov(state, rd, constant(state, rd), kind, None if amount is None else amount & 255)
-    elif a & 0xffc0 in (0x4000, 0x4040, 0x4140, 0x4180, 0x4300):
-        op = {0x4000: "and", 0x4040: "eor", 0x4140: "adc", 0x4180: "sbc", 0x4300: "orr"}[a & 0xffc0]
+    elif a & 0xffc0 == 0x4240:
+        alu_flags(state, "sub", a & 7, 0, constant(state, (a >> 3) & 7))
+    elif a & 0xffc0 == 0x43c0:
+        alu_flags(state, "mvn", a & 7, None, constant(state, (a >> 3) & 7))
+    elif a & 0xffc0 == 0x4340:
+        multiply(state, a & 7, constant(state, a & 7), constant(state, (a >> 3) & 7), True)
+    elif a & 0xffc0 in (0x4000, 0x4040, 0x4140, 0x4180, 0x4300, 0x4380):
+        op = {0x4000: "and", 0x4040: "eor", 0x4140: "adc", 0x4180: "sbc", 0x4300: "orr", 0x4380: "bic"}[a & 0xffc0]
         rd = a & 7
         alu_flags(state, op, rd, constant(state, rd), constant(state, (a >> 3) & 7))
     else:
         return False
+    return True
+
+
+def thumb_wide_alu(state, a, b, width):
+    if width != 4:
+        return False
+    rn, rd, rm = a & 15, (b >> 8) & 15, b & 15
+    if a & 0xfff0 == 0xfb00 and b & 0xf0f0 == 0xf000:
+        if max(rn, rd, rm) > 12:
+            return False
+        multiply(state, rd, constant(state, rn), constant(state, rm), False)
+        return True
+    # T32 data processing (shifted register), S=1 only.
+    if a & 0xfe10 != 0xea10 or b & 0x8000 or max(rd, rm) > 12:
+        return False
+    op = {0: "and", 1: "bic", 2: "orr", 4: "eor", 8: "add", 10: "adc",
+          11: "sbc", 13: "sub", 14: "rsb"}.get((a >> 5) & 15)
+    if rn == 15 and (a >> 5) & 15 in (2, 3):
+        op = "mov" if (a >> 5) & 15 == 2 else "mvn"
+    elif rn > 12:
+        return False
+    if op is None:
+        return False
+    amount = ((b >> 12) & 7) * 4 + ((b >> 6) & 3)
+    kind, amount = immediate_shift(("lsl", "lsr", "asr", "ror")[(b >> 4) & 3], amount)
+    rhs, carry = shift_with_carry(constant(state, rm), kind, amount, state.get("C"))
+    lhs = constant(state, rn)
+    if op == "rsb":
+        op, lhs, rhs = "sub", rhs, lhs
+    alu_flags(state, op, rd, lhs, rhs, carry)
+    if op in ("mov", "mvn", "and", "orr", "eor", "bic") and carry is None:
+        state.pop("C", None)
     return True
 
 
@@ -784,7 +853,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
                 flow.record_return(state)
             continue
         stack = thumb_stack(a, b, width)
-        if thumb_compare(state, a, width) or thumb_alu(state, a, width):
+        if thumb_compare(state, a, width) or thumb_alu(state, a, width) or thumb_wide_alu(state, a, b, width):
             pass
         elif stack is not None:
             if not stack_transfer(state, *stack):
