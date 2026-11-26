@@ -684,6 +684,37 @@ class SymbolicCallbackTests(unittest.TestCase):
                     self.assertFalse(report["callback_identity_verified"])
                     self.assertFalse(report["safe_to_flash"])
 
+    def test_conflicting_rel_and_plt_callback_relocations(self):
+        for got in (False, True):
+            slot = 0x2140 if got else 0x2104
+            for conflicting_info in (0x202, 0x215, 0x316, 23):
+                with self.subTest(got=got, info=conflicting_info):
+                    raw = self.fixture(got=got)
+                    # DT_JMPREL points to a separate REL record for the same slot.
+                    struct.pack_into("<8I", raw, 0x240,
+                                     2, 8, 20, 17, 23, 0x2220, 0, 0)
+                    struct.pack_into("<II", raw, 0x420, slot, conflicting_info)
+                    with self.assertRaisesRegex(ValueError, "ambiguous relocation"):
+                        self.analyze(raw)
+
+    def test_overlapping_rel_and_plt_tables(self):
+        for got in (False, True):
+            with self.subTest(got=got):
+                raw = self.fixture(got=got)
+                struct.pack_into("<8I", raw, 0x240,
+                                 2, 8, 20, 17, 23, 0x2208, 0, 0)
+                with self.assertRaisesRegex(ValueError, "Overlapping relocation tables"):
+                    self.analyze(raw)
+
+    def test_symbolic_callback_ambiguous_function_spans(self):
+        for got in (False, True):
+            for value, size in ((0x11c0, 12), (0x11c4, 4), (0x11c4, 0),
+                                (0x11bc, 8), (0x11c1, 2)):
+                with self.subTest(got=got, value=value, size=size):
+                    raw = self.fixture(got=got, second_value=value, second_size=size)
+                    with self.assertRaisesRegex(ValueError, "No eligible"):
+                        self.analyze(raw)
+
     def test_symbolic_thumb_callback(self):
         raw = self.fixture(thumb=True)
         struct.pack_into("<I", raw, 0x404, 0x302)
