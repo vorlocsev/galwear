@@ -13,6 +13,7 @@ from r800_tzlite_audit import check, MOUNTPOINTS, REQUIRED_TREES
 from r800_tizen_gnss_preflight import CONFIGS, CONFIG_LIMIT, metadata
 from r800_tizen_dependencies import resolve_guest, MAX_FILE, MAX_TOTAL
 from r800_android_userspace_preflight import read_regular
+from r800_tzlite_manifest import inventory as tree_inventory, verify as verify_manifest, MANIFEST
 
 
 def guest_destination(root, name):
@@ -122,13 +123,18 @@ def stage(root,output):
             raise ValueError("Staged configuration differs from source")
         if check(root)!=before:
             raise ValueError("Donor audit changed during staging")
-        result={"schema":"r800-tzlite-static-stage-v1",
+        result={"schema":"r800-tzlite-static-stage-v2",
+                "tree":tree_inventory(candidate),
                 "status":"TZLITE_STATIC_CANDIDATE_ONLY","files":inventory,
                 "aliases":closure["aliases"],"source_and_stage_audited":True,
                 "full_configuration_copied":False,"plugins_complete":False,
                 "ownership_preserved":False,"runtime_verified":False,
                 "safe_to_flash":False}
-        (candidate/"tzlite-static-evidence.json").write_text(json.dumps(result,indent=2,sort_keys=True))
+        manifest=candidate/MANIFEST
+        manifest.write_text(json.dumps(result,indent=2,sort_keys=True))
+        manifest.chmod(0o600)
+        digest=hashlib.sha256(manifest.read_bytes()).hexdigest()
+        verify_manifest(candidate,digest)
         publish(candidate,output)
     return result
 

@@ -12,6 +12,7 @@ import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
 import r800_tzlite_audit as audit
 import r800_stage_tzlite as stage
+import r800_tzlite_manifest as manifest
 
 PROVIDER="/usr/lib/libfixture-real.so"
 ALIAS="/usr/lib/libfixture.so.1"
@@ -106,6 +107,8 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual((self.output/"lib/libfixture.so.1").resolve(),
                          self.output/PROVIDER.lstrip("/"))
         self.assertEqual(audit.check(self.output)["status"],"TZLITE_KNOWN_STATIC_CANDIDATES_ONLY")
+        digest=hashlib.sha256((self.output/manifest.MANIFEST).read_bytes()).hexdigest()
+        self.assertEqual(manifest.verify(self.output,digest)["status"],"STATIC_TREE_INTEGRITY_ONLY")
 
     def test_missing_real_dependency(self):
         (self.root/PROVIDER.lstrip("/")).unlink()
