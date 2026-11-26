@@ -138,6 +138,7 @@ static int daemon_mode;
 #include "gps_abi.h"
 #include "gps_interface_gate.h"
 #include "gps_standalone.h"
+#include "gps_daemon.h"
 
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
@@ -403,31 +404,28 @@ static void aid(void)
 	inject_last();
 }
 
+static enum gps_daemon_state daemon_state = GPS_DAEMON_READY;
+
+static int standalone_configure(void);
+
+static void daemon_cleanup(void)
+{
+	xtra = 0;
+	gps->cleanup();
+}
+
+static int daemon_reinit(void)
+{
+	printf("configuration failed, re-init\n");
+	fflush(0);
+	return gps->init(&cbs);
+}
+
+static struct gps_daemon_ops daemon_ops;
+
 static int session(int on)
 {
-	int r;
-	if (!on)
-		return gps->stop();
-	aid();
-	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
-				   GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-	if (r == 0)
-		r = gps->start();
-	if (r != 0) {
-		/* gpsd restarted under us: reconnect the client library and retry */
-		printf("start failed, re-init\n");
-		fflush(0);
-		xtra = 0;
-		gps->cleanup();
-		r = gps->init(&cbs);
-		if (r != 0)
-			return r;
-		aid();
-		r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
-				       GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-		if (r == 0)
-			r = gps->start();
-	}
+	int r = gps_daemon_session(&daemon_state, &daemon_ops, on);
 	printf("session %s -> %d\n", on ? "start" : "stop", r);
 	fflush(0);
 	return r;
@@ -601,8 +599,15 @@ int main(int argc, char **argv, char **envp)
 	if (r != 0)
 		return 1;
 	if (daemon_mode) {
+		daemon_ops = (struct gps_daemon_ops){
+			aid, standalone_configure, gps->start, gps->stop,
+			daemon_cleanup, daemon_reinit
+		};
 		inject_now();
-		exit(serve(dirfd));
+		r = serve(dirfd);
+		if (gps_daemon_close(&daemon_state, &daemon_ops))
+			r = 1;
+		return r;
 	}
 	const struct gps_standalone_ops ops = {
 		aid, standalone_configure, gps->start, sleep, gps->stop, gps->cleanup
