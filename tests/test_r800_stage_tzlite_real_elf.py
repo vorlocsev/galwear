@@ -284,7 +284,7 @@ class RealStageTests(unittest.TestCase):
         plugin=self.root/"usr/lib/sensor/extra.so"
         shutil.copyfile(self.root/audit.PLUGINS[0].lstrip("/"),plugin)
         image,sha=self.image_fixture()
-        result=inspect_image(image,sha,audit_plugins=True)
+        result=inspect_image(image,sha,extended_manifest=True)
         report=result["extra_plugin_audit"]
         self.assertEqual(report["status"],"STATIC_EXTRA_PLUGIN_CLOSURE_ONLY",report["problems"])
         self.assertEqual(report["candidate_count"],1)
@@ -292,6 +292,11 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual(report["candidates"][path]["sha256"],hashlib.sha256(plugin.read_bytes()).hexdigest())
         self.assertIn("libfixture.so.1",report["dependency_evidence"]["files"][path]["needed"])
         self.assertFalse(report["dlopen_verified"])
+        extended=result["extended_manifest"]
+        self.assertEqual(extended["files"][path]["category"],"AUDITED_ELF")
+        self.assertEqual(extended["files"]["/etc/passwd"]["category"],"KNOWN_CONFIG")
+        self.assertEqual(extended["image_sha256"],sha)
+        self.assertFalse(extended["staging_authorized"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 
     def test_extra_plugin_bad_elf(self):

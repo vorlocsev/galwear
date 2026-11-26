@@ -157,7 +157,7 @@ def inspect_snapshot(resolver):
             "runtime_verified":False,"safe_to_flash":False}
 
 
-def inspect_image(image,sha,*,audit_plugins=False):
+def inspect_image(image,sha,*,audit_plugins=False,extended_manifest=False):
     if not re.fullmatch(r"[0-9a-f]{64}",sha):
         raise ValueError("Expected lowercase image SHA-256")
     tool=shutil.which("debugfs")
@@ -173,12 +173,17 @@ def inspect_image(image,sha,*,audit_plugins=False):
             raise ValueError("Snapshot digest mismatch")
         resolver=ImageResolver(tool,snapshot,scratch)
         report=inspect_snapshot(resolver)
-        if audit_plugins:
+        if audit_plugins or extended_manifest:
             from r800_tzlite_extra_plugins import check
             report["extra_plugin_audit"]=check(resolver,report)
             if report["extra_plugin_audit"]["problems"]:
                 report["problems"]=sorted(set(report["problems"]+["EXTRA_PLUGIN_CLOSURE_REVIEW"]))
                 report["status"]="LEGACY_SCOPE_REVIEW_REQUIRED"
+        if extended_manifest:
+            from r800_tzlite_extended_manifest import build
+            plugin_report=report["extra_plugin_audit"]
+            scope={k:v for k,v in report.items() if k!="extra_plugin_audit"}
+            report["extended_manifest"]=build(sha,scope,plugin_report)
         st=image.lstat()
         if (st.st_dev,st.st_ino,st.st_mode,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=identity:
             raise ValueError("Donor image changed")
@@ -192,9 +197,11 @@ def main():
     p.add_argument("--image",required=True,type=Path)
     p.add_argument("--sha256",required=True)
     p.add_argument("--audit-plugins",action="store_true")
+    p.add_argument("--extended-manifest",action="store_true")
     a=p.parse_args()
     try:
-        report=inspect_image(a.image,a.sha256,audit_plugins=a.audit_plugins)
+        report=inspect_image(a.image,a.sha256,audit_plugins=a.audit_plugins,
+                             extended_manifest=a.extended_manifest)
     except (OSError,ValueError,subprocess.SubprocessError,RecursionError) as exc:
         report={"schema":"r800-tzlite-legacy-image-scope-v1","status":"LEGACY_SCOPE_REVIEW_REQUIRED",
                 "problems":[str(exc)],"safe_to_flash":False}
