@@ -19,9 +19,14 @@ def stage(root, output, targets=TARGETS):
         raise ValueError("Output already exists")
     if output.resolve().is_relative_to(root):
         raise ValueError("Output must be outside donor tree")
-    report = audit(root, targets)
+    # Staging is deliberately stricter than exploratory dependency inventory.
+    # Reject an unsafe layout before creating any temporary output tree.
+    report = audit(root, targets, strict_pages=True)
     if report["problems"]:
-        raise ValueError("Unresolved Tizen dependency closure")
+        raise ValueError("Unresolved Tizen dependency closure: " +
+                         str(report["problems"][0]["reason"]))
+    if report.get("strict_4k_page_review") is not True:
+        raise ValueError("Strict PT_LOAD review required for staging")
     with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
         tree = Path(tmp)/"tizen-elf"
         tree.mkdir()
@@ -38,6 +43,8 @@ def stage(root, output, targets=TARGETS):
                 raise ValueError("Donor alias changed")
             data = read_regular(source, MAX_FILE)
             expected = report["files"][canonical]
+            if expected.get("load_review", {}).get("strict_4k_page_review") is not True:
+                raise ValueError("Missing strict PT_LOAD evidence for " + canonical)
             sha = hashlib.sha256(data).hexdigest()
             if len(data) != expected["bytes"] or sha != expected["sha256"]:
                 raise ValueError("Donor ELF changed")
@@ -50,8 +57,10 @@ def stage(root, output, targets=TARGETS):
             with dest.open("xb") as out:
                 out.write(data)
             dest.chmod(mode)
-            inventory[guest] = {"source":canonical,"bytes":len(data),"sha256":sha,"mode":oct(mode)}
+            inventory[guest] = {"source":canonical,"bytes":len(data),"sha256":sha,"mode":oct(mode),
+                                "load_review":expected["load_review"]}
         result = {"status":"TIZEN_ELF_SUBSET_ONLY","files":inventory,
+                  "strict_4k_page_review":True,
                   "version_records_checked":report["version_records_checked"],
                   "configuration_complete":False,"plugins_complete":False,
                   "ownership_preserved":False,"runtime_verified":False,
