@@ -9,9 +9,9 @@ trap 'exit 1' HUP INT TERM
 export PYTHONDONTWRITEBYTECODE=1
 cc --version
 clang --version
-for test in frame command lto output wire nmea ipc; do
+for test in frame command lto output wire nmea ipc interface; do
     standard=c11
-    [ "$test" != ipc ] || standard=gnu11
+    case "$test" in ipc|interface) standard=gnu11;; esac
     cc -std="$standard" -O2 -Wall -Wextra -Werror -UNDEBUG \
         -fsanitize=undefined -fno-sanitize-recover=all \
         "tests/test_r800_gps_$test.c" -o "$TMP/test-$test"
