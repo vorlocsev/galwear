@@ -39,9 +39,12 @@ set -- "$TMP/tools/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu
 PROVENANCE=$ROOT/build/r800_gps_provenance.py
 python3 "$PROVENANCE" capture "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
 python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
+if [ "$HOST_MODE" = 1 ]; then mkdir -m 700 "$TMP/host-trace"; fi
 run_tool() {
+    label=$1
+    shift
     if [ "$HOST_MODE" = 1 ]; then
-        env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC "$TMP/host/loader" --inhibit-cache --glibc-hwcaps-mask "" --library-path "$TMP/host/lib" "$@"
+        env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC LD_DEBUG=files,libs LD_DEBUG_OUTPUT="$TMP/host-trace/$label" "$TMP/host/loader" --inhibit-cache --glibc-hwcaps-mask "" --library-path "$TMP/host/lib" "$@"
     else
         "$@"
     fi
@@ -55,19 +58,19 @@ run_tool() {
     export LC_ALL=C TZ=UTC
     # Donor checks and link use captured NDK executables only.
     for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
-        run_tool "$TMP/tools/llvm-readelf" -h "$TMP/libs/$lib" > "$TMP/donor-elf.txt"
+        run_tool "donor-$lib" "$TMP/tools/llvm-readelf" -h "$TMP/libs/$lib" > "$TMP/donor-elf.txt"
         grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*$' "$TMP/donor-elf.txt"
         grep -Eq 'Data:.*little endian' "$TMP/donor-elf.txt"
         grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$TMP/donor-elf.txt"
         grep -Eq 'Type:[[:space:]]*DYN([[:space:]]|$)' "$TMP/donor-elf.txt"
     done
-    run_tool "$@"
+    run_tool compile "$@"
 )
 python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
 (
     unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
     export LC_ALL=C TZ=UTC
-    run_tool "$TMP/tools/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
+    run_tool result "$TMP/tools/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
 )
 grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
