@@ -25,6 +25,14 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(r["stock_policy"])
         self.assertFalse(r["safe_to_flash"])
 
+    def test_missing_or_duplicate_bionic_diagnostics(self):
+        for marker in bionic.markers(PROVIDER):
+            for replacement in (b"", marker+b"\n"+marker):
+                with self.subTest(marker=marker,replacement=replacement):
+                    mutated=LOG.replace(marker,replacement)
+                    with self.assertRaisesRegex(ValueError,"Missing or duplicate Bionic diagnostics"):
+                        a.inspect_console(mutated,PATHS)
+
     def test_missing_or_duplicate_marker(self):
         for m in a.MARKERS:
             for v in (LOG.replace(m, b""), LOG.replace(m, m+b"\n"+m)):
