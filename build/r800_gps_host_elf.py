@@ -13,6 +13,7 @@ from r800_android_userspace_preflight import read_regular
 LIMIT = 256 * 1024**2
 MAX_TOTAL = 1024 * 1024**2
 MAX_OBJECTS = 128
+MAX_EDGES = 4096
 DEFAULT_DIRS = ("/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu",
                 "/lib64", "/usr/lib64", "/lib", "/usr/lib")
 TOOLS = ("clang", "ld.lld", "llvm-readelf")
@@ -108,7 +109,7 @@ def audit(tools, *, directories=DEFAULT_DIRS, loader=LOADER):
         raise ValueError("Expected bounded absolute host library directories")
     queue = deque((str(name), Path(path)) for name, path in sorted(tools.items()))
     objects, bindings, problems = {}, {}, []
-    total = 0
+    total = edges = 0
     while queue:
         label, path = queue.popleft()
         try:
@@ -131,6 +132,9 @@ def audit(tools, *, directories=DEFAULT_DIRS, loader=LOADER):
             if info["interpreter"]:
                 queue.append((LOADER, Path(loader)))
             for name in info["needed"]:
+                edges += 1
+                if edges > MAX_EDGES:
+                    raise ValueError("Host dependency edge budget exceeded")
                 candidates = {}
                 for directory in dirs:
                     try:
