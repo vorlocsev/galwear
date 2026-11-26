@@ -17,7 +17,7 @@ D=${0%/*}
 if [ -n "${LD_DEBUG_OUTPUT:-}" ]; then
     export LD_DEBUG_OUTPUT="$LD_DEBUG_OUTPUT.linker"
 fi
-exec "$D/loader" --inhibit-cache --glibc-hwcaps-mask "" --library-path "$D/lib" "$D/../tools/ld.lld" "$@"
+exec "$D/loader" --inhibit-cache --glibc-hwcaps-mask "" --library-path "$D/lib" "${D%/*}/tools/ld.lld" "$@"
 '''
 
 
