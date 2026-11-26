@@ -121,8 +121,20 @@ class BridgeIntegration(unittest.TestCase):
         self.assertEqual(proc.wait(timeout=5),1)
         evidence=log.read_text()
         self.assertEqual(evidence.count("MOCK_INIT\n"),2)
-        self.assertEqual(evidence.count("MOCK_START\n"),1)
+        self.assertEqual(evidence.count("MOCK_START\n"),0)
         self.assertEqual(evidence.count("MOCK_CLEANUP\n"),1)
+
+    def test_start_failure_never_reinitializes(self):
+        cwd,proc,log=self.launch("fail-start")
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+            s.settimeout(5); s.connect(str(cwd/"gps.sock")); s.sendall(b"START\n")
+            self.assertEqual(s.recv(1),b"")
+        self.assertEqual(proc.wait(timeout=5),1)
+        evidence=log.read_text()
+        self.assertEqual(evidence.count("MOCK_INIT\n"),1)
+        self.assertEqual(evidence.count("MOCK_START\n"),1)
+        self.assertNotIn("MOCK_CLEANUP\n",evidence)
+        self.assertNotIn("MOCK_STOP\n",evidence)
 
     def test_stop_failure_closes_service(self):
         cwd,proc,log=self.launch("fail-stop")
