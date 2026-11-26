@@ -136,6 +136,34 @@ class BridgeIntegration(unittest.TestCase):
         self.assertNotIn("MOCK_CLEANUP\n",evidence)
         self.assertNotIn("MOCK_STOP\n",evidence)
 
+    def test_sigterm_idle_cleans_up(self):
+        cwd,proc,log=self.launch("normal")
+        proc.terminate()
+        self.assertEqual(proc.wait(timeout=5),0,log.read_text())
+        evidence=log.read_text()
+        self.assertEqual(evidence.count("MOCK_CLEANUP\n"),1)
+        self.assertNotIn("MOCK_STOP\n",evidence)
+        self.assertFalse((cwd/"gps.sock").exists())
+        self.assertFalse((cwd/"gps.sock.owner").exists())
+
+    def test_sigterm_active_stops_and_cleans_up(self):
+        cwd,proc,log=self.launch("normal")
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+            s.settimeout(5); s.connect(str(cwd/"gps.sock")); s.sendall(b"START\n")
+            for _ in range(500):
+                if "session start -> 0\n" in log.read_text(): break
+                if proc.poll() is not None: self.fail(log.read_text())
+                time.sleep(.01)
+            else: self.fail("active session not confirmed")
+            proc.terminate()
+            self.assertEqual(proc.wait(timeout=5),0,log.read_text())
+        evidence=log.read_text()
+        self.assertEqual(evidence.count("MOCK_STOP\n"),1)
+        self.assertEqual(evidence.count("MOCK_CLEANUP\n"),1)
+        self.assertLess(evidence.index("MOCK_STOP\n"),evidence.index("MOCK_CLEANUP\n"))
+        self.assertFalse((cwd/"gps.sock").exists())
+        self.assertFalse((cwd/"gps.sock.owner").exists())
+
     def test_stop_failure_closes_service(self):
         cwd,proc,log=self.launch("fail-stop")
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
