@@ -22,10 +22,45 @@ FIELD = re.compile(r"^(" + REG + r"),\s*\[(" + REG +
                    r")(?:,\s*#(0x[0-9a-f]+|[0-9]+))?\]$")
 
 
+STACK_WORD = re.compile(r"^(" + REG + r"),\s*\[sp(?:,\s*#(0x[0-9a-f]+|[0-9]+))?\]$")
+STACK_ADJUST = re.compile(r"^sp,\s*(?:sp,\s*)?#(0x[0-9a-f]+|[0-9]+)$")
+STACK_LIMIT = 4096
+
+
+def register_list(operands):
+    if not (operands.startswith("{") and operands.endswith("}")):
+        return None
+    names = operands[1:-1].split(",")
+    expanded = []
+    for item in names:
+        item = item.strip()
+        if item == "lr":
+            expanded.append(14)
+        elif re.fullmatch(REG, item):
+            expanded.append(int(item[1:]))
+        else:
+            span = re.fullmatch(r"(" + REG + r")-(" + REG + r")", item)
+            if not span:
+                return None
+            lo, hi = (int(v[1:]) for v in span.groups())
+            if lo >= hi:
+                return None
+            expanded.extend(range(lo, hi + 1))
+    if len(set(expanded)) != len(expanded) or not expanded:
+        return None
+    return ["lr" if i == 14 else "r" + str(i) for i in sorted(expanded)]
+
+
+def immediate_value(value):
+    return int(value, 16 if value.startswith("0x") else 10)
+
+
 def trace_prefix(lines, entry):
     """Track only an uninterrupted, supported prefix under an r0 entry hypothesis."""
     regs = {"r0": ("argument", 0, None)}
     events = []
+    sp = 0
+    slots = {}
     previous = None
     reason = "end_of_function"
     for line in lines:
@@ -43,7 +78,58 @@ def trace_prefix(lines, entry):
             break
         previous = address
         operands = operands.split("@", 1)[0].split(";", 1)[0].strip().lower()
-        if mnemonic in ("mov", "mov.w", "mov.n", "movs"):
+        if mnemonic in ("push", "push.w", "push.n", "pop", "pop.w", "pop.n"):
+            names = register_list(operands)
+            if names is None:
+                reason = "unsupported_stack_register_list"
+                break
+            size = 4 * len(names)
+            if mnemonic.startswith("push"):
+                if sp - size < -STACK_LIMIT:
+                    reason = "stack_bounds"
+                    break
+                sp -= size
+                for i, name in enumerate(names):
+                    slots[sp + 4 * i] = regs.get(name)
+            else:
+                if sp + size > 0:
+                    reason = "stack_bounds"
+                    break
+                for i, name in enumerate(names):
+                    value = slots.pop(sp + 4 * i, None)
+                    regs.pop(name, None)
+                    if value is not None:
+                        regs[name] = value
+                sp += size
+        elif mnemonic in ("sub", "sub.w", "sub.n", "add", "add.w", "add.n"):
+            adjust = STACK_ADJUST.fullmatch(operands)
+            if adjust is None:
+                reason = "unsupported_instruction_or_control_flow"
+                break
+            size = immediate_value(adjust[1])
+            new_sp = sp + (-size if mnemonic.startswith("sub") else size)
+            if size % 4 or not -STACK_LIMIT <= new_sp <= 0:
+                reason = "stack_bounds"
+                break
+            # Neither newly allocated nor released slots retain provenance.
+            for pos in list(slots):
+                if min(sp, new_sp) <= pos < max(sp, new_sp):
+                    del slots[pos]
+            sp = new_sp
+        elif mnemonic in ("str", "str.w", "str.n", "ldr", "ldr.w", "ldr.n") and STACK_WORD.fullmatch(operands):
+            name, immediate = STACK_WORD.fullmatch(operands).groups()
+            pos = sp + immediate_value(immediate or "0")
+            if pos % 4 or not sp <= pos <= -4:
+                reason = "stack_bounds"
+                break
+            if mnemonic.startswith("str"):
+                slots[pos] = regs.get(name)
+            else:
+                value = slots.get(pos)
+                regs.pop(name, None)
+                if value is not None:
+                    regs[name] = value
+        elif mnemonic in ("mov", "mov.w", "mov.n", "movs"):
             move = MOVE.fullmatch(operands)
             if move is None:
                 reason = "unsupported_move"
@@ -81,7 +167,8 @@ def trace_prefix(lines, entry):
         if len(events) > 4096:
             raise ValueError("Register trace exceeds limit")
     return {"entry_argument_assumption": "r0", "events": events,
-            "stop_reason": reason, "full_control_flow_analyzed": False}
+            "stop_reason": reason, "stack_delta_at_stop": sp,
+            "full_control_flow_analyzed": False}
 
 
 def audit(raw, function):
