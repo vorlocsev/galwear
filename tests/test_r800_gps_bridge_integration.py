@@ -26,6 +26,7 @@ class BridgeIntegration(unittest.TestCase):
             ("android-peer", ["tests/test_r800_gps_both_sides.c"]),
             ("android-peer-v2", ["-DR800_GPS_IPC_V2=1", "tests/test_r800_gps_both_sides.c"]),
             ("android-peer-default", ["-DR800_GPS_TEST_SOURCE_DEFAULT=1", "tests/test_r800_gps_both_sides.c"]),
+            ("android-peer-restart", ["tests/test_r800_gps_hal_bridge_restart.c"]),
         ):
             subprocess.run(flags + args + ["-o", str(cls.bin/name)],
                            cwd=ROOT, check=True, timeout=30)
@@ -35,7 +36,11 @@ class BridgeIntegration(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         cwd = Path(tmp.name)
         shutil.copy2(self.bin/"libbrcm-test.so", cwd/"libbrcm-test.so")
-        log = cwd/"bridge.log"
+        proc, log = self.spawn_bridge(cwd, mode, "bridge.log")
+        return cwd, proc, log
+
+    def spawn_bridge(self, cwd, mode, filename):
+        log = cwd/filename
         stream = log.open("wb")
         self.addCleanup(stream.close)
         proc = subprocess.Popen([str(self.bin/"gpsbridge"), "daemon"], cwd=cwd,
@@ -53,7 +58,7 @@ class BridgeIntegration(unittest.TestCase):
             if proc.poll() is not None: self.fail(log.read_text())
             time.sleep(.01)
         else: self.fail("bridge socket not ready")
-        return cwd, proc, log
+        return proc, log
 
     def test_both_real_sources(self):
         cwd, proc, log = self.launch("normal")
@@ -88,6 +93,63 @@ class BridgeIntegration(unittest.TestCase):
         self.assertIn("GPS_BOTH_SIDES=PASS",run.stdout)
         self.assertEqual(log.read_text().count("MOCK_ASYNC_DATA\n"),2)
         self.assertIsNone(proc.poll())
+
+    def restart_hal_case(self, mode, graceful):
+        cwd, original, original_log = self.launch("async-data")
+        client_log = cwd/"hal-restart.log"
+        with client_log.open("wb") as output:
+            hal = subprocess.Popen([str(self.bin/"android-peer-restart"), mode],
+                                   cwd=cwd, stdin=subprocess.PIPE,
+                                   stdout=output, stderr=subprocess.STDOUT)
+            def wait_marker(marker):
+                deadline = time.monotonic()+12
+                while time.monotonic()<deadline:
+                    if marker in client_log.read_text():
+                        return
+                    if hal.poll() is not None:
+                        self.fail(client_log.read_text())
+                    time.sleep(.01)
+                self.fail("HAL marker missing: "+marker+"\n"+client_log.read_text())
+            try:
+                wait_marker("FIRST_SESSION_READY\n")
+                self.assertIn("MOCK_ASYNC_DATA\n",original_log.read_text())
+                if graceful:
+                    original.terminate()
+                    self.assertEqual(original.wait(timeout=5),0,original_log.read_text())
+                    self.assertFalse((cwd/"gps.sock").exists())
+                    self.assertFalse((cwd/"gps.sock.owner").exists())
+                else:
+                    original.kill()
+                    self.assertLess(original.wait(timeout=5),0)
+                    self.assertTrue((cwd/"gps.sock.owner").is_file())
+                wait_marker("DISCONNECTED\n")
+                replacement, log = self.spawn_bridge(cwd,"async-data","replacement.log")
+                if mode=="idle":
+                    wait_marker("IDLE_CONNECTION_READY\n")
+                    self.assertNotIn("MOCK_START\n",log.read_text())
+                    hal.stdin.write(b"\n")
+                    hal.stdin.flush()
+                self.assertEqual(hal.wait(timeout=15),0,client_log.read_text()+log.read_text())
+                self.assertIn("GPS_HAL_BRIDGE_RESTART=PASS",client_log.read_text())
+                evidence=log.read_text()
+                self.assertEqual(evidence.count("MOCK_START\n"),1)
+                self.assertEqual(evidence.count("MOCK_STOP\n"),1)
+                self.assertEqual(evidence.count("MOCK_ASYNC_DATA\n"),1)
+                self.assertIsNone(replacement.poll())
+            finally:
+                if hal.poll() is None:
+                    hal.kill()
+                    hal.wait(timeout=5)
+                hal.stdin.close()
+
+    def test_default_hal_recovers_after_bridge_sigkill(self):
+        self.restart_hal_case("active",False)
+
+    def test_default_hal_recovers_after_bridge_sigterm(self):
+        self.restart_hal_case("active",True)
+
+    def test_default_hal_stop_during_bridge_outage(self):
+        self.restart_hal_case("idle",False)
 
     def test_v2_async_data_and_reconnect(self):
         cwd,proc,log=self.launch("async-data")
