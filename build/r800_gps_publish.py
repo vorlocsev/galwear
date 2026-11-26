@@ -11,9 +11,14 @@ from r800_android_userspace_preflight import read_regular
 from r800_gps_donor_snapshot import DONORS, LIMIT
 
 
-def publish(binary, report_path, manifest_path, output):
-    report = json.loads(read_regular(report_path, 4 * 1024**2))
-    manifest = json.loads(read_regular(manifest_path, 4096))
+def publish(binary, report_path, manifest_path, output, evidence=None):
+    report_raw = read_regular(report_path, 4 * 1024**2)
+    manifest_raw = read_regular(manifest_path, 4096)
+    report = json.loads(report_raw)
+    manifest = json.loads(manifest_raw)
+    if evidence is not None:
+        evidence["audit_sha256"] = hashlib.sha256(report_raw).hexdigest()
+        evidence["donor_manifest_sha256"] = hashlib.sha256(manifest_raw).hexdigest()
     if (report["status"] != "STATIC_GLIBC_CLOSURE_ONLY"
             or report["static_closure_pass"] is not True
             or report["safe_to_flash"] is not False
@@ -61,10 +66,8 @@ def main():
             evidence = {"schema": "galwear-r800-gps-evidence-v1",
                         "inputs": inputs,
                         "inputs_sha256": hashlib.sha256(raw).hexdigest(),
-                        "audit_sha256": hashlib.sha256(read_regular(args.report, 4 * 1024**2)).hexdigest(),
-                        "donor_manifest_sha256": hashlib.sha256(read_regular(args.manifest, 4096)).hexdigest(),
                         "safe_to_flash": False, "signed_attestation": False}
-        digest = publish(args.binary, args.report, args.manifest, args.output)
+        digest = publish(args.binary, args.report, args.manifest, args.output, evidence)
         if evidence is not None:
             evidence["binary_sha256"] = digest
             print(json.dumps(evidence, sort_keys=True))
