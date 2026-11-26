@@ -88,7 +88,7 @@ def main():
             header = subprocess.check_output(['readelf', '-h', str(path)], env=env, timeout=10)
             stream.write(header)
             required = [b'ELF32', b'little endian', b'ARM', b'Version5 EABI', b'DYN' if shared else b'REL']
-            if any(x not in header for x in required):
+            if any(x not in header for x in required) or b'hard-float ABI' in header or (shared and b'soft-float ABI' not in header):
                 raise ValueError('Unexpected ARM ELF header')
             if shared:
                 syms = subprocess.check_output(['readelf', '--dyn-syms', '-W', str(path)], env=env, timeout=10)
@@ -111,8 +111,8 @@ def main():
         for suite, abi in [(s, 0) for s in C_SUITES] + [('xtra_submit', i) for i in range(3)]:
             name = 'native-' + suite + '-' + str(abi)
             binary = work / name
-            if run(name + '-compile', 'host', ['cc', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
-                   '-pthread', '-DR800_XTRA_ABI=' + str(abi), '-Isrc/tools/gps',
+            if run(name + '-compile', 'host', ['cc', '-O2', '-Wall', '-Wextra', '-Werror',
+                   *(['-Wno-unused-function'] if suite in ('cache_read', 'lto_file') else []), '-pthread', '-DR800_XTRA_ABI=' + str(abi), '-Isrc/tools/gps',
                    'tests/test_r800_gps_' + suite + '.c', '-o', str(binary)]):
                 run(name, 'host', [str(binary)])
             else:
