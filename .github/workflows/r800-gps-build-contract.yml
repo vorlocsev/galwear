@@ -11,6 +11,9 @@ on:
       - build/r800_gps_link_gate.py
       - build/r800_gps_glibc_qemu.sh
       - build/r800_gps_mock_qemu.sh
+      - build/r800_gps_mock_xtra_qemu.sh
+      - build/r800_gps_mock_xtra_transcript.py
+      - tests/test_r800_gps_mock_xtra_transcript.py
       - build/r800_gps_mock_peer.py
       - build/r800_gps_mock_recovery.py
       - build/r800_gps_mock_resources.py
@@ -302,3 +305,30 @@ jobs:
           done
           echo "VENDOR_ABI_VERIFIED=false"
           echo "ARM32_RUNTIME_VERIFIED=false"
+
+      - name: Synthetic XTRA integration fixture and transcript regressions
+        run: |
+          set -eu
+          export LC_ALL=C
+          sh -n build/r800_gps_mock_xtra_qemu.sh
+          python3 -m unittest discover -s tests -p test_r800_gps_mock_xtra_transcript.py -v
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          for abi in 1 2; do
+            for case in 1 2 3 4; do
+              output="$tmp/mock-$abi-$case.so"
+              clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -Wall -Wextra -Werror -fPIC -fvisibility=hidden -shared -nostdlib -fuse-ld=lld -Wl,--hash-style=sysv,-z,noexecstack,-z,now,--no-undefined -DR800_XTRA_ABI="$abi" -DMOCK_XTRA_CASE="$case" -o "$output" tests/r800_mock_gps_hal.c
+              readelf -h "$output" > "$tmp/header"
+              grep -Eq 'Class:[[:space:]]*ELF32' "$tmp/header"
+              grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$tmp/header"
+              grep -Eq 'Type:[[:space:]]*DYN' "$tmp/header"
+              grep -Eq 'Flags:.*Version5 EABI.*soft-float ABI' "$tmp/header"
+              readelf --dyn-syms -W "$output" > "$tmp/symbols"
+              test "$(awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" {print $8}' "$tmp/symbols")" = gps_get_hardware_interface
+              test -z "$(awk '$7 == "UND" && NF >= 8 {print $8}' "$tmp/symbols")"
+              echo "XTRA_ABI=$abi CASE=$case ARM32_LINK_ONLY=PASS"
+            done
+          done
+          echo "QEMU_EXECUTED=false"
+          echo "VENDOR_ABI_VERIFIED=false"
+          echo "safe_to_flash=false"
