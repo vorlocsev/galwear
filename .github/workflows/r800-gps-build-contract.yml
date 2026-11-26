@@ -12,6 +12,8 @@ on:
       - build/r800_gps_glibc_qemu.sh
       - build/r800_gps_mock_qemu.sh
       - build/r800_gps_mock_peer.py
+      - build/r800_gps_mock_recovery.py
+      - tests/test_r800_gps_mock_recovery.py
       - tests/test_r800_gps_mock_peer.py
       - build/r800_gps_mock_transcript.py
       - tests/r800_mock_gps_hal.c
@@ -228,9 +230,10 @@ jobs:
           sh -n build/r800_gps_mock_qemu.sh
           python3 -m unittest discover -s tests -p test_r800_gps_mock_transcript.py -v
           python3 -m unittest discover -s tests -p test_r800_gps_mock_peer.py -v
+          python3 -m unittest discover -s tests -p test_r800_gps_mock_recovery.py -v
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
-          for stage in 0 1 2 3 4; do
+          for stage in 0 1 2 3 4 5 6; do
             output="$tmp/mock-$stage.so"
             clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -Wall -Wextra -Werror -fPIC -fvisibility=hidden -shared -nostdlib -fuse-ld=lld -Wl,--hash-style=sysv,-z,noexecstack,-z,now,--no-undefined -DR800_XTRA_ABI=0 -DMOCK_FAIL="$stage" -o "$output" tests/r800_mock_gps_hal.c
             readelf -h "$output" > "$tmp/header"
