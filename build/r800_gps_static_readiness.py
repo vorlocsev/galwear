@@ -85,6 +85,12 @@ def evaluate(link, preflight, archive, build, repeat, current_inputs):
                         "input_fingerprints": inputs["inputs"],
                         "compiler_argv": normalize_argv(inputs["argv"]),
                         "tizen_archive": archive}
+            if inputs["inputs"].get("host_snapshot") is not None:
+                trace = build.get("host_trace")
+                require(isinstance(trace, dict) and trace.get("status") == "HOST_LOADER_DIAGNOSTICS_MATCH"
+                        and trace.get("host_isolated") is False and trace.get("runtime_verified") is False
+                        and trace.get("safe_to_flash") is False, "HOST_TRACE")
+                expected["host_trace"] = trace
         except (KeyError, ValueError, TypeError, IndexError):
             pass
     require(repeat.get("schema") == "galwear-r800-gps-repeatability-v1"
