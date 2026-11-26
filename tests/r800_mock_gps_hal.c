@@ -9,7 +9,7 @@ typedef unsigned long pthread_t;
 #ifndef MOCK_FAIL
 #define MOCK_FAIL 0
 #endif
-#if MOCK_FAIL < 0 || MOCK_FAIL > 4
+#if MOCK_FAIL < 0 || MOCK_FAIL > 6
 #error Invalid mock failure stage
 #endif
 #if R800_XTRA_ABI != 0
@@ -17,7 +17,7 @@ typedef unsigned long pthread_t;
 #endif
 
 static GpsCallbacks *callbacks;
-static unsigned state, time_seen;
+static unsigned state, time_seen, start_attempts;
 static GpsLocation fix = {sizeof(GpsLocation), 31, 12.5, -34.25, 100.0,
                           1.5f, 90.0f, 5.0f, 1700000000000LL};
 static GpsLocation invalid_fix = {0, 1, 0, 0, 0, 0, 0, 0, 1700000000000LL};
@@ -32,7 +32,7 @@ static int mock_init(GpsCallbacks *cb)
     if (state || !cb || cb->size != sizeof(*cb) || !cb->location_cb ||
         !cb->status_cb || !cb->nmea_cb || !cb->set_capabilities_cb)
         return -90;
-    if (MOCK_FAIL == 1) return -11;
+    if (MOCK_FAIL == 1 || (MOCK_FAIL == 6 && start_attempts)) return -11;
     callbacks = cb;
     state = 1;
     cb->set_capabilities_cb(0x1234);
@@ -60,7 +60,8 @@ static int mock_mode(uint32_t mode, uint32_t recurrence, uint32_t interval,
 static int mock_start(void)
 {
     if (state != 2) return -94;
-    if (MOCK_FAIL == 3) return -13;
+    ++start_attempts;
+    if (MOCK_FAIL == 3 || ((MOCK_FAIL == 5 || MOCK_FAIL == 6) && start_attempts == 1)) return -13;
     state = 3;
     callbacks->status_cb(&invalid_status);
     callbacks->location_cb(&invalid_fix);
