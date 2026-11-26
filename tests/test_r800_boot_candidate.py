@@ -54,6 +54,17 @@ class BootCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "partition budget"):
             boot.component_evidence(dtb(), kernel(boot.PARTITION))
 
+    def test_oversized_valid_arm64_image(self):
+        image = kernel(boot.PARTITION + 1)
+        with self.assertRaisesRegex(ValueError, "Kernel exceeds partition budget"):
+            boot.component_evidence(dtb(), image)
+        with self.assertRaisesRegex(ValueError, "Kernel exceeds partition budget"):
+            boot.build(image, dtb(), template())
+
+    def test_invalid_magic_is_not_partition_failure(self):
+        with self.assertRaisesRegex(ValueError, "Expected uncompressed ARM64 Linux Image"):
+            boot.component_evidence(dtb(), bytes(64))
+
     def test_valid_roundtrip(self):
         ref = template()
         out = boot.build(kernel(), dtb(), ref)
