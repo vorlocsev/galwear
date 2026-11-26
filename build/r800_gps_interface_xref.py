@@ -118,6 +118,25 @@ def thumb_pic_clues(raw, off, start, size, relocations, tables, direct):
     return clues
 
 
+def callback_inventory(raw, mapping, relocations, tags, tables, *, symbolic=False):
+    slots = callback_slots(tables, symbolic=symbolic)
+    if symbolic:
+        occupied = {va for table in tables.values()
+                    for va in range(table["table_va"], table["table_va"] + table["declared_size"], 4)}
+        for slot, evidence in symbolic_code_targets(raw, mapping, relocations, tags).items():
+            if evidence["relocation_type"] != 21 or slot in occupied:
+                continue
+            _, flags = mapping(slot, 4)
+            if flags & 7 != 6:
+                continue
+            value = evidence["value"]
+            slots[slot] = {"target_va": value & ~1, "isa": "thumb" if value & 1 else "arm",
+                           "source": "GLOB_DAT_SLOT_CANDIDATE", "symbolic_evidence": evidence}
+    if len(slots) > MAX_REFS:
+        raise ValueError("Callback reference budget exceeded")
+    return slots
+
+
 def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(), callee_depth=1, data_by_range=None, callback_calls=False):
     discovery = discover(raw, symbolic=symbolic)
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
@@ -174,7 +193,7 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
     data_by_range = data_by_range or {}
     if callback_calls and (not assume_aapcs or not callee_ranges):
         raise ValueError("Callback mode requires explicit callee ranges and AAPCS mode")
-    callbacks = callback_slots(tables) if callback_calls else {}
+    callbacks = callback_inventory(raw, mapping, relocations, tags, tables, symbolic=symbolic) if callback_calls else {}
     leaves = {}
     spans = [(start, start + size) for _, _, start, size in ranges]
     for isa, start, size in callee_ranges:
@@ -189,6 +208,9 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
             raise ValueError("Callee range not executable and nonwritable")
         leaves[(start, isa)] = size
         spans.append((start, start + size))
+    # Symbolic callbacks require a matching complete declared symbol extent.
+    callbacks = {slot: row for slot, row in callbacks.items() if "symbolic_evidence" not in row
+                 or leaves.get((row["target_va"], row["isa"])) == row["symbolic_evidence"]["symbol_size"]}
     leaf = leaf_analyzer(raw, mapping, relocations, tables, direct, leaves, max_depth=callee_depth, data_by_range=data_by_range, callbacks=callbacks) if leaves else None
     code = []
     seen = set()
@@ -277,6 +299,8 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
             "symbolic_mode": symbolic, "got_membership_verified": False,
             "callback_call_mode": callback_calls, "callback_slot_count": len(callbacks),
             "callback_identity_verified": False,
+            "symbolic_callback_slot_count": sum("symbolic_evidence" in r for r in callbacks.values()),
+            "function_got_slot_candidate_count": sum(r.get("source") == "GLOB_DAT_SLOT_CANDIDATE" for r in callbacks.values()),
             "code_ranges": code, "function_identity_verified": False,
             "instruction_boundaries_verified": False, "control_flow_verified": False,
             "table_identity_verified": False, "selected_abi": None,
@@ -308,7 +332,7 @@ def main():
     parser.add_argument("--assume-aapcs", action="store_true", help="Opt in to opaque direct call summaries")
     parser.add_argument("--callee", action="append", type=parse_callee, default=[])
     parser.add_argument("--callee-depth", type=int, default=1, help="Maximum explicit call depth (1-4)")
-    parser.add_argument("--callback-calls", action="store_true", help="Model relative callback pointers with explicit callee ranges")
+    parser.add_argument("--callback-calls", action="store_true", help="Model callback pointers with explicit callee ranges (symbolic with --symbolic)")
     args = parser.parse_args()
     try:
         report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs, callee_ranges=args.callee, callee_depth=args.callee_depth, callback_calls=args.callback_calls)
