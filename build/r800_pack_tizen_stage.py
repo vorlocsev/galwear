@@ -69,7 +69,7 @@ def bind_donors(report, donor_hashes):
     return bound
 
 
-def verify_archive(path, *, expected=None, donor_hashes=None):
+def verify_archive(path, *, expected=None, donor_hashes=None, required_files=None):
     """Check exact canonical bytes; never use tar extraction APIs."""
     raw = read_regular(Path(path), MAX_ARCHIVE)
     pos = 0
@@ -123,6 +123,13 @@ def verify_archive(path, *, expected=None, donor_hashes=None):
         if len(raw) != expected_size or any(raw[pos:]):
             raise ValueError("Unexpected archive trailer or additional members")
         result = verify(tree, expected=report)
+    if required_files is not None:
+        if not isinstance(required_files, dict) or not required_files:
+            raise ValueError("Invalid required archive file inventory")
+        for guest, digest in sorted(required_files.items()):
+            guest_name(guest)
+            if report["files"].get(guest, {}).get("sha256") != digest:
+                raise ValueError("Archive GNSS closure digest mismatch: " + guest)
     bound = bind_donors(report, donor_hashes) if donor_hashes is not None else None
     return {"status": "TIZEN_ELF_ARCHIVE_STATIC_ONLY",
             "donor_bindings": bound,
