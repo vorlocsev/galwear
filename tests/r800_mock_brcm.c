@@ -24,7 +24,7 @@ static int init(GpsCallbacks *c)
 static int start(void)
 {
     puts("MOCK_START"); fflush(stdout);
-    if (!strcmp(mode(),"fail-reinit")) return -1;
+    if (!strcmp(mode(),"fail-start")) return -1;
     if (active) return -1;
     active=1;
     GpsStatus status={sizeof(status),1};
@@ -61,6 +61,8 @@ static int loc_in(double lat,double lon,float acc)
 }
 static int position(uint32_t m,uint32_t r,uint32_t i,uint32_t a,uint32_t t)
 {
+    puts("MOCK_CONFIG"); fflush(stdout);
+    if (!strcmp(mode(),"fail-reinit") || (!strcmp(mode(),"retry-config") && inits==1)) return -1;
     return (m || r || i!=1000 || a || t)?-1:0;
 }
 static const GpsInterface iface={
