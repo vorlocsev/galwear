@@ -259,6 +259,7 @@ static int inject_utc(int64_t utc, int64_t boot_ref, int unc)
 /* the system clock is network-synced (Android NTP / the phone) */
 #define inject_now() inject_utc(clk_ms(0), 0, 500)
 
+#include "gps_xtra.h"
 static void xtra_download_cb(void) {}
 static GpsXtraCallbacks xcbs = {
 #if R800_XTRA_ABI == 2
@@ -274,6 +275,7 @@ static const GpsXtraInterface *xtra;
 static void inject_lto(void)
 {
 	int n, r;
+	enum gps_xtra_result result;
 	/* Never infer the proprietary callback layout from the extension size. */
 	if (R800_XTRA_ABI == 0)
 		return;
@@ -283,19 +285,13 @@ static void inject_lto(void)
 		fflush(0);
 		return;
 	}
-	if (!xtra) {
-		const GpsXtraInterface *candidate = gps->get_extension ? gps->get_extension("gps-xtra") : 0;
-		xcbs.create_thread_cb = cbs.create_thread_cb;
-		if (candidate && candidate->size >= sizeof(GpsXtraInterface) &&
-		    candidate->init && candidate->inject_xtra_data && candidate->init(&xcbs) == 0)
-			xtra = candidate;
-	}
-	if (!xtra) {
-		printf("lto: no gps-xtra\n");
+	xcbs.create_thread_cb = cbs.create_thread_cb;
+	result = gps_xtra_submit(gps, &xtra, &xcbs, lto_buf, n, &r);
+	if (result != XTRA_OK && result != XTRA_INJECT_FAILED) {
+		printf("lto: XTRA unavailable or init failed (%d, %d)\n", result, r);
 		fflush(0);
 		return;
 	}
-	r = xtra->inject_xtra_data(lto_buf, n);
 	printf("lto: injected %d bytes -> %d\n", n, r);
 	fflush(0);
 }
