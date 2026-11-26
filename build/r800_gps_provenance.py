@@ -3,9 +3,11 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import stat
 from r800_gps_donor_snapshot import pinned_directory
+from r800_gps_host_elf import audit as host_audit
 
 from r800_android_userspace_preflight import read_regular
 
@@ -131,10 +133,13 @@ def collect(root, ndk, command):
                  "r800_gps_publish.py", "r800_gps_link_gate.py",
                  "r800_android_userspace_preflight.py",
                  "r800_android_linker_audit.py", "r800_tizen_dependencies.py",
-                 "r800_pack_tizen_stage.py", "r800_verify_tizen_stage.py"):
+                 "r800_pack_tizen_stage.py", "r800_verify_tizen_stage.py",
+                 "r800_gps_host_elf.py"):
         files[name] = root / "build" / name
+    fingerprints = {key: fingerprint(path) for key, path in files.items()}
+    fingerprints["host_elf"] = host_audit({name: tc / name for name in TOOLS})
     return {"schema": "galwear-r800-gps-inputs-v1", "argv": command,
-            "inputs": {key: fingerprint(path) for key, path in files.items()},
+            "inputs": fingerprints,
             "compiler_contract": "freestanding-snapshot-v3", "xtra_abi": abi,
             "tool_snapshot": TOOLS,
             "source_snapshot": {name: "source" if name == "gpsbridge.c" else name for name in SOURCES},
@@ -151,6 +156,11 @@ def main():
     args = parser.parse_args()
     try:
         record = collect(args.root, args.ndk, args.command)
+        strict_host = os.environ.get("R800_REQUIRE_HOST_ELF", "0")
+        if strict_host not in ("0", "1"):
+            raise ValueError("Invalid R800_REQUIRE_HOST_ELF")
+        if strict_host == "1" and record["inputs"]["host_elf"]["status"] != "HOST_STATIC_CANDIDATES_ONLY":
+            raise ValueError("Host tool dependencies require review")
         staging = Path(args.command[args.command.index("-o") + 1]).parent
         if args.mode == "capture":
             source_snapshot(args.root, staging, record, create=True)
