@@ -82,6 +82,9 @@ on:
       - src/tools/gps/gps_output.h
       - src/tools/gps/gps_client.h
       - src/tools/gps/gps_cache.h
+      - src/tools/gps/gps_cache_read.h
+      - src/tools/gps/gps_cache_arm_stat.h
+      - tests/test_r800_gps_cache_read.c
       - tests/test_r800_gps_cache.c
       - tests/test_r800_gps_client.c
       - build/r800_android_userspace_preflight.py
@@ -273,4 +276,6 @@ jobs:
           trap 'rm -rf "$tmp"' EXIT
           cc -O2 -Wall -Wextra -Werror -pthread -Isrc/tools/gps tests/test_r800_gps_cache.c -o "$tmp/gps-cache-test"
           timeout 15 "$tmp/gps-cache-test"
+          cc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -Isrc/tools/gps tests/test_r800_gps_cache_read.c -o "$tmp/gps-cache-read-test"
+          timeout 15 "$tmp/gps-cache-read-test"
           echo "ARM32_RUNTIME_VERIFIED=false"
