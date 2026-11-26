@@ -85,6 +85,8 @@ def parse_gconv(raw):
         if offset:
             if not get(offset) or index>=count:
                 raise ValueError("Invalid gconv hash reference")
+    names=[get(struct.unpack_from("<H",raw,modules+12*i)[0]) for i in range(count)]
+    references=[]
     paths=set()
     extra_paths=set()
     builtin=0
@@ -108,8 +110,11 @@ def parse_gconv(raw):
         canon,fd,fn,td,tn,other=struct.unpack_from("<6H",raw,modules+12*i)
         if not get(canon):
             raise ValueError("Empty gconv canonical name")
-        reference(fd,fn)
-        reference(td,tn)
+        for source,destination,directory,name in (("INTERNAL",names[i],fd,fn),
+                                                    (names[i],"INTERNAL",td,tn)):
+            path=reference(directory,name)
+            if path is not None:
+                references.append({"from":source,"to":destination,"path":path,"scope":"PRIMARY"})
         if other:
             start=extra+other-1
             if start%2 or start+2>len(raw) or start in offsets:
@@ -137,6 +142,7 @@ def parse_gconv(raw):
             step_count+=steps
             if chain_count>MAX_ROWS or step_count>MAX_ROWS or cursor+6*steps>len(raw):
                 raise ValueError("Gconv extra chain budget or bounds")
+            current=source
             for _ in range(steps):
                 dest,directory,name=struct.unpack_from("<3H",raw,cursor)
                 cursor+=6
@@ -145,6 +151,8 @@ def parse_gconv(raw):
                 path=reference(directory,name,required=True)
                 if path is not None:
                     extra_paths.add(path)
+                    references.append({"from":names[current],"to":names[dest],"path":path,"scope":"EXTRA"})
+                current=dest
             if dest in destinations:
                 raise ValueError("Duplicate gconv extra destination")
             destinations.add(dest)
@@ -153,7 +161,7 @@ def parse_gconv(raw):
     return {"module_records":count,"hash_slots":slots,"builtin_reference_count":builtin,
             "extra_chain_reference_count":len(offsets),"extra_chain_count":chain_count,
             "extra_step_count":step_count,"extra_module_paths":sorted(extra_paths),
-            "module_paths":sorted(paths),"extra_chains_parsed":True,
+            "module_paths":sorted(paths),"conversion_references":references,"extra_chains_parsed":True,
             "hash_lookup_verified":False}
 
 

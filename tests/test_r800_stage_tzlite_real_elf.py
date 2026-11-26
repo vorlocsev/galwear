@@ -473,6 +473,26 @@ class RealStageTests(unittest.TestCase):
         self.assertFalse(result["staging_authorized"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 
+    def test_gconv_consistency_real_image(self):
+        from test_r800_tzlite_cache_review import gconv_cache
+        directory=self.root/"usr/lib/gconv"
+        directory.mkdir()
+        # Existing primary fixture has INTERNAL -> INTERNAL for its external module.
+        (directory/"gconv-modules").write_text("module INTERNAL INTERNAL UTF-16\n")
+        (directory/"gconv-modules.cache").write_bytes(gconv_cache())
+        src=self.parent/"gconv.c"
+        src.write_text("int gconv(void) { return 0; }\n")
+        subprocess.run(FLAGS+[str(src),"-fPIC","-shared","-Wl,-soname,UTF-16.so",
+                              "-o",str(directory/"UTF-16.so")],
+                       check=True,timeout=30,capture_output=True)
+        image,sha=self.image_fixture()
+        report=inspect_image(image,sha,compare_gconv=True)
+        result=report["gconv_consistency"]
+        self.assertEqual(result["status"],"STATIC_EXTERNAL_REFERENCE_MATCH_ONLY",result["problems"])
+        self.assertEqual(len(result["matched"]),1)
+        self.assertFalse(result["cache_generation_authorized"])
+        self.assertFalse(result["safe_to_flash"])
+
     def test_gconv_text_missing_module(self):
         directory=self.root/"usr/lib/gconv"
         directory.mkdir()

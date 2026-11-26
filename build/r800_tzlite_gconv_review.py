@@ -68,7 +68,7 @@ def parse(raw):
                 raise ValueError("Gconv alias cycle or depth review")
             seen.add(name)
             name=aliases[name]
-    return {"alias_count":len(aliases),"conversions":list(modules.values()),
+    return {"alias_count":len(aliases),"aliases":aliases,"conversions":list(modules.values()),
             "module_paths":sorted({m["path"] for m in modules.values()})}
 
 
