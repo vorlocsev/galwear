@@ -6,6 +6,11 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import sys
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'build'))
+from r800_gps_repeatability import compare
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'src/tools/gps/build.sh'
 LIBS = ('libc.so.6', 'libdl.so.2', 'libpthread.so.0', 'ld-linux.so.3')
@@ -15,7 +20,7 @@ import sys
 from pathlib import Path
 p = Path(sys.argv[-1])
 kind = p.read_text()
-if kind != 'bridge':
+if p.name != 'gpsbridge':
     assert p.parent.name == 'libs', 'readelf must inspect the snapshot'
 print('Class: ' + ('ELF64' if kind == 'wide' else 'ELF32'))
 print('Data: ' + ('big endian' if kind == 'big' else 'little endian'))
@@ -29,7 +34,11 @@ CLANG = '''#!/usr/bin/env python3
 import os, sys
 from pathlib import Path
 Path(os.environ['TEST_MARKER']).touch()
-Path(sys.argv[sys.argv.index('-o') + 1]).write_text('bridge')
+output = Path(sys.argv[sys.argv.index('-o') + 1])
+value = 'bridge'
+if os.environ.get('TEST_MODE') == 'nonrepeatable' and Path.cwd().name == 'second':
+    value = 'different'
+output.write_text(value)
 '''
 GATE = '''import hashlib, json, os, sys
 from pathlib import Path
@@ -138,6 +147,22 @@ class BuildContract(unittest.TestCase):
         self.assertFalse(evidence[0]['signed_attestation'])
         self.assertFalse(evidence[0]['safe_to_flash'])
         self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
+
+    def test_repeatability(self):
+        env = dict(TEST_MODE='ok', TEST_OUT=str(self.out), TEST_MARKER=str(self.marker))
+        with mock.patch.dict(os.environ, env):
+            result = compare(self.script, self.ndk, self.libs, 0, timeout=30)
+        self.assertEqual(result['status'], 'LOCAL_REPEATABILITY_PASS')
+        self.assertFalse(result['safe_to_flash'])
+        self.assertEqual(result['runs'][0], result['runs'][1])
+
+    def test_repeatability_different_binary(self):
+        env = dict(TEST_MODE='nonrepeatable', TEST_OUT=str(self.out), TEST_MARKER=str(self.marker))
+        with mock.patch.dict(os.environ, env):
+            result = compare(self.script, self.ndk, self.libs, 0, timeout=30)
+        self.assertEqual(result['status'], 'LOCAL_REPEATABILITY_FAIL')
+        self.assertEqual(result['differences'], ['binary_sha256'])
+        self.assertFalse(result['safe_to_flash'])
 
     def test_wrong_class(self):
         self.reject_donor('wide')
