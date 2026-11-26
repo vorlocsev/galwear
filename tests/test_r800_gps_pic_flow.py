@@ -1,4 +1,4 @@
-"""Synthetic forward A32 PIC flow regressions."""
+"""Synthetic ARM/Thumb PIC flow regressions."""
 import struct
 import unittest
 from test_r800_gps_interface_xref import pic_image
@@ -32,7 +32,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(r['reached_instructions'], 5)
 
     def test_unresolved_path_suppresses_clues(self):
-        for bad in (0xffffffff, 0xeb000000, 0x1a000040, 0xeafffffe):
+        for bad in (0xffffffff, 0xeb000000, 0x1a000040):
             with self.subTest(bad=bad):
                 r = run([0xe3000fec, 0xe3400000, 0xe320f000, 0xe08f1000, bad])
                 self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
@@ -71,7 +71,7 @@ class ThumbFlowTests(unittest.TestCase):
         self.assertEqual(r['reached_instructions'], 5)
 
     def test_invalid_branch_and_it(self):
-        for words in ([0xe7fe], [0xe000, 0xf240, 0, 0x4770], [0xbf08, 0x4770], [0xf000, 0xf800]):
+        for words in ([0xe000, 0xf240, 0, 0x4770], [0xbf08, 0x4770], [0xf000, 0xf800]):
             r = self.run_flow(words)
             self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
             self.assertEqual(r['events'], [])
@@ -88,4 +88,58 @@ class ThumbFlowTests(unittest.TestCase):
 
     def test_missing_movw(self):
         r = self.run_flow([0xf2c0, 0, 0x4478, 0x4770])
+        self.assertEqual(r['events'], [])
+
+
+class LoopFlowTests(unittest.TestCase):
+    def test_arm_loop_invariant(self):
+        r = run([0xe3000ff0, 0xe3400000, 0xe08f1000, 0x1afffffd, 0xe12fff1e])
+        self.assertTrue(r['converged'])
+        self.assertEqual(r['back_edge_count'], 1)
+        self.assertEqual(len(r['events']), 1)
+
+    def test_arm_loop_conflict_removes_transient_event(self):
+        r = run([0xe3000ff0, 0xe3400000, 0xe08f1000, 0xe3000000, 0x1afffffc, 0xe12fff1e])
+        self.assertTrue(r['converged'])
+        self.assertEqual(r['back_edge_count'], 1)
+        self.assertEqual(r['events'], [])
+
+    def test_thumb_loop_invariant(self):
+        r = ThumbFlowTests().run_flow([0xf640, 0x70f4, 0xf2c0, 0, 0x4478, 0xd1fe, 0x4770])
+        # The conditional branch targets itself; the preceding ADD is outside the loop.
+        self.assertTrue(r['converged'])
+        self.assertEqual(r['back_edge_count'], 1)
+        self.assertEqual(len(r['events']), 1)
+
+    def test_thumb_loop_conflict_removes_transient_event(self):
+        r = ThumbFlowTests().run_flow([0xf640, 0x70f4, 0xf2c0, 0, 0x4478, 0xf240, 0, 0xd0fb, 0x4770])
+        self.assertTrue(r['converged'])
+        self.assertEqual(r['back_edge_count'], 1)
+        self.assertEqual(r['events'], [])
+
+    def test_self_loop_does_not_claim_termination(self):
+        for r in (run([0xeafffffe]), ThumbFlowTests().run_flow([0xe7fe])):
+            self.assertTrue(r['converged'])
+            self.assertEqual(r['back_edge_count'], 1)
+            self.assertFalse(r['range_end_reached'])
+            self.assertFalse(r['control_flow_verified'])
+            self.assertEqual(r['events'], [])
+
+    def test_budget_suppresses_transient_evidence(self):
+        from unittest.mock import patch
+        with patch('r800_gps_pic_flow.MAX_STEPS', 3):
+            r = run([0xe3000ff0, 0xe3400000, 0xe08f1000, 0xe12fff1e])
+        self.assertFalse(r['converged'])
+        self.assertEqual(r['events'], [])
+        self.assertEqual(r['boundaries'][0]['reason'], 'iteration_budget_exceeded')
+
+    def test_unknown_on_reachable_loop_path(self):
+        r = run([0xe3000ff0, 0xe3400000, 0xe08f1000, 0x1afffffd, 0xffffffff])
+        self.assertTrue(r['converged'])
+        self.assertEqual(r['events'], [])
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+
+    def test_loop_edge_into_thumb_wide_tail_rejected(self):
+        r = ThumbFlowTests().run_flow([0xf240, 0, 0xe7fd])
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
         self.assertEqual(r['events'], [])
