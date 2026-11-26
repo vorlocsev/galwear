@@ -3,6 +3,7 @@ import re
 from pathlib import PurePosixPath
 
 from r800_extract_ext4 import command
+from r800_tzlite_image_xattrs import inspect_xattrs
 
 
 def parse_inode(text, inode, kind):
@@ -50,6 +51,7 @@ def inspect_metadata(resolver,files):
             response=command(resolver.tool,resolver.snapshot,"stat <%d>"%inode)
             try:
                 cache[inode]=parse_inode(response.stdout,inode,kind)
+                cache[inode]["xattr_inventory"]=inspect_xattrs(resolver,inode)
             except ValueError as exc:
                 raise ValueError("Metadata parse failed:"+name+": "+str(exc)) from exc
         rec=cache[inode]
@@ -57,6 +59,9 @@ def inspect_metadata(resolver,files):
             raise ValueError("Inconsistent inode type:"+name)
         result[name]=rec
         mode=int(rec["mode"],8)
+        for attr,entry in rec["xattr_inventory"]["attributes"].items():
+            if entry["category"] in ("posix_acl","linux_capability","selinux_label","security_other"):
+                reviews.append("SECURITY_XATTR_REVIEW:"+name+":"+attr)
         if kind!="symlink":
             if mode&0o6000:
                 reviews.append("SPECIAL_PRIVILEGE_MODE:"+name)
@@ -66,5 +71,7 @@ def inspect_metadata(resolver,files):
             reviews.append("MULTIPLE_HARDLINKS:"+name)
     return {"status":"ORIGINAL_METADATA_INVENTORY_ONLY",
             "entries":result,"review_candidates":reviews,
-            "acl_verified":False,"xattrs_verified":False,"effective_access_verified":False,
+            "xattr_inventory_scope":"REPORTED_NAMES_AND_SIZES_ONLY",
+            "acl_verified":False,"xattrs_verified":False,"capabilities_verified":False,
+            "effective_access_verified":False,
             "ownership_restored":False,"permissions_restored":False}

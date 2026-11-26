@@ -182,6 +182,30 @@ class RealStageTests(unittest.TestCase):
         self.assertFalse(meta["effective_access_verified"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 
+    def test_original_xattr_inventory_not_restored(self):
+        digest=self.candidate_digest()
+        image,_=self.image_fixture()
+        # Only edit the disposable synthetic image, never the host file.
+        for request in ("ea_set /usr/bin/lhd user.fixture private-fixture-value",
+                        "ea_set /usr/bin/lhd security.selinux fixture-label"):
+            subprocess.run(["debugfs","-w","-R",request,str(image)],
+                           check=True,timeout=30,capture_output=True)
+        sha=hashlib.sha256(image.read_bytes()).hexdigest()
+        result=compare(self.output,image,sha,digest)
+        self.assertEqual(result["status"],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",result)
+        meta=result["original_metadata"]
+        attrs=meta["entries"]["/usr/bin/lhd"]["xattr_inventory"]
+        self.assertEqual(attrs["status"],"ATTRIBUTES_REPORTED")
+        self.assertEqual(attrs["attributes"]["user.fixture"]["reported_bytes"],21)
+        self.assertEqual(attrs["attributes"]["security.selinux"]["category"],"selinux_label")
+        self.assertIn("SECURITY_XATTR_REVIEW:/usr/bin/lhd:security.selinux",meta["review_candidates"])
+        self.assertNotIn("private-fixture-value",str(result))
+        self.assertNotIn("fixture-label",str(result))
+        self.assertNotIn("user.fixture",os.listxattr(self.output/"usr/bin/lhd"))
+        self.assertFalse(meta["xattrs_verified"])
+        self.assertFalse(meta["capabilities_verified"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
     def test_image_configuration_changed(self):
         digest=self.candidate_digest()
         (self.root/"etc/lhd/lhd.conf").write_bytes(b"different synthetic config\n")
