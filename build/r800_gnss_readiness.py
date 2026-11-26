@@ -95,6 +95,39 @@ def tzlite_recheck(first, root, digest):
     return dict(first,recheck_report_sha256=after["report_sha256"],recheck_passed=True)
 
 
+def tzlite_image_gate(root, image, image_digest, manifest_digest, gates):
+    name="tzlite_image_binding"
+    if any(v is None for v in (root,image,image_digest,manifest_digest)):
+        return outcome(name,"NOT_TESTED",reason="Candidate and independently recorded image/manifest digests required")
+    dependencies=("tzlite_manifest_integrity","tzlite_known_components","tizen_image_closure")
+    blocked=[n for n in dependencies
+             if not any(g["gate"]==n and g["status"]=="STATIC_PASS" for g in gates)]
+    if blocked:
+        return outcome(name,"BLOCKED",reason="Prerequisite static gates not confirmed",blocked_by=blocked)
+    gate=static_gate(name,"r800_tzlite_image_binding.py",
+                     ["--root",root,"--image",image,"--image-sha256",image_digest,
+                      "--manifest-sha256",manifest_digest],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",
+                     bindings={"schema":"r800-tzlite-image-binding-v1",
+                               "image_sha256":image_digest,"manifest_sha256":manifest_digest,
+                               "snapshot_verified":True,"configuration_count":4,
+                               "donor_authenticity_verified":False,"original_ownership_verified":False,
+                               "runtime_verified":False},timeout=600)
+    if gate["status"]=="STATIC_PASS":
+        detail=gate["detail"]
+        for key,minimum in (("elf_count",1),("alias_count",0)):
+            if type(detail.get(key)) is not int or detail[key]<minimum:
+                return outcome(name,"REVIEW_REQUIRED",problems=["INVALID_IMAGE_BINDING_COUNT:"+key])
+    return gate
+
+
+def tzlite_binding_recheck(binding, integrity):
+    if binding["status"]=="STATIC_PASS" and (
+            integrity["status"]!="STATIC_PASS" or integrity.get("recheck_passed") is not True):
+        return outcome(binding["gate"],"REVIEW_REQUIRED",
+                       problems=["TZLITE_BINDING_FINAL_INTEGRITY_FAILED"],before=binding)
+    return binding
+
+
 def offline_gate(enabled, sha, clean):
     if not enabled:
         return outcome("offline_regression","NOT_TESTED",reason="Local execution not requested")
@@ -287,6 +320,8 @@ def main():
                static_gate("glibc_link","r800_gps_link_gate.py",
                            ["--binary",a.binary,"--libdir",a.libdir] if a.binary and a.libdir else None,
                            "STATIC_GLIBC_CLOSURE_ONLY")]
+        gates.append(tzlite_image_gate(a.tzlite_root,a.tizen_image,a.tizen_image_sha256,
+                                       a.tzlite_manifest_sha256,gates))
         registration=next(g for g in gates if g["gate"]=="android_registration")
         gates.append(policy_gate(a.android_root,a.selinux_policy,a.selinux_policy_sha256,
                                  a.selinux_types,registration))
@@ -296,6 +331,11 @@ def main():
         for index,gate in enumerate(gates):
             if gate["gate"]=="tzlite_manifest_integrity":
                 gates[index]=tzlite_recheck(gate,a.tzlite_root,a.tzlite_manifest_sha256)
+                break
+        integrity=next(g for g in gates if g["gate"]=="tzlite_manifest_integrity")
+        for index,gate in enumerate(gates):
+            if gate["gate"]=="tzlite_image_binding":
+                gates[index]=tzlite_binding_recheck(gate,integrity)
                 break
         end_sha,end_clean=git_state()
         if end_sha!=sha or not end_clean:

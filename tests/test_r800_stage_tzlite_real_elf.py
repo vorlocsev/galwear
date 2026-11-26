@@ -14,6 +14,7 @@ import r800_tzlite_audit as audit
 import r800_stage_tzlite as stage
 import r800_tzlite_manifest as manifest
 from r800_tzlite_image_binding import compare
+import r800_gnss_readiness as readiness
 
 PROVIDER="/usr/lib/libfixture-real.so"
 ALIAS="/usr/lib/libfixture.so.1"
@@ -135,6 +136,23 @@ class RealStageTests(unittest.TestCase):
         self.assertFalse(result["donor_authenticity_verified"])
         self.assertFalse(result["safe_to_flash"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
+    def test_actual_image_readiness_gate(self):
+        digest=self.candidate_digest()
+        image,sha=self.image_fixture()
+        gates=[
+            readiness.tzlite_integrity_gate(self.output,digest),
+            readiness.static_gate("tzlite_known_components","r800_tzlite_audit.py",
+                                  ["--root",self.output],"TZLITE_KNOWN_STATIC_CANDIDATES_ONLY"),
+            readiness.static_gate("tizen_image_closure","r800_gps_image_audit.py",
+                                  ["--image",image,"--sha256",sha],"STATIC_IMAGE_GNSS_CLOSURE_ONLY"),
+        ]
+        self.assertTrue(all(g["status"]=="STATIC_PASS" for g in gates),gates)
+        result=readiness.tzlite_image_gate(self.output,image,sha,digest,gates)
+        self.assertEqual(result["status"],"STATIC_PASS",result)
+        self.assertEqual(result["detail"]["image_sha256"],sha)
+        self.assertFalse(result["detail"]["runtime_verified"])
+        self.assertFalse(result["detail"]["safe_to_flash"])
 
     def test_image_configuration_changed(self):
         digest=self.candidate_digest()
