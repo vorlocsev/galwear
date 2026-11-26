@@ -27,6 +27,7 @@ on:
       - "tests/test_readonly_init.py"
       - "src/kernel/r800.config"
       - "build/r800_boot_candidate.py"
+      - "tests/test_r800_boot_candidate.py"
       - "build/r800_android_userspace_preflight.py"
       - "src/dt/r800.dts"
       - "src/kernel/r800-wearos.patch"
@@ -56,6 +57,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
           python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
           python3 -m unittest discover -s tests -p 'test_readonly_init.py' -v
+          python3 -m unittest discover -s tests -p 'test_r800_boot_candidate.py' -v
 
       - name: Fetch pinned combined Exynos base and read-only patch check
         run: |
