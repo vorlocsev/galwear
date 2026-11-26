@@ -67,6 +67,8 @@ if mode == 'binary-symlink':
 print(json.dumps(report))
 if mode == 'source-code-mutate':
     (out.parent / 'src/tools/gps/gpsbridge.c').write_text('changed source')
+if mode == 'header-mutate':
+    (out.parent / 'src/tools/gps/gps_abi.h').write_text('changed header')
 if mode == 'tool-mutate':
     (out.parent / 'ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld').write_text('changed linker')
 if mode == 'mutate':
@@ -97,6 +99,8 @@ class BuildContract(unittest.TestCase):
         self.script.parent.mkdir(parents=True)
         shutil.copyfile(SCRIPT, self.script)
         (self.script.parent / 'gpsbridge.c').write_text('/* synthetic fixture */')
+        for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h'):
+            (self.script.parent / name).write_text('/* synthetic header */')
         self.ndk = self.root / 'ndk'
         tc = self.ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
         tc.mkdir(parents=True)
@@ -149,6 +153,17 @@ class BuildContract(unittest.TestCase):
         self.assertFalse(evidence[0]['safe_to_flash'])
         self.assertIsNone(evidence[0]['tizen_archive'])
         self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
+        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-explicit-v1')
+        self.assertEqual(evidence[0]['inputs']['xtra_abi'], 0)
+        for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h'):
+            self.assertIn(name, evidence[0]['inputs']['inputs'])
+
+    def test_missing_header_blocks_compiler(self):
+        (self.script.parent / 'gps_frame.h').unlink()
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
 
     def test_invalid_archive_blocks_compiler(self):
         archive = self.root / "invalid.tar"
@@ -235,7 +250,7 @@ class BuildContract(unittest.TestCase):
                 self.assertFalse(self.out.exists())
 
     def test_provenance_changes(self):
-        for mode in ('source-code-mutate', 'tool-mutate'):
+        for mode in ('source-code-mutate', 'header-mutate', 'tool-mutate'):
             with self.subTest(mode=mode):
                 self.assertNotEqual(self.run_build(mode).returncode, 0)
                 self.assertTrue(self.marker.exists())
