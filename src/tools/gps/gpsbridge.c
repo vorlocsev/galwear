@@ -231,6 +231,7 @@ static GpsCallbacks cbs = {
 };
 
 static const GpsInterface *gps;
+static int gps_initialized;
 
 /* clock in ms: 0 = REALTIME, 1 = MONOTONIC (libbrcm's elapsed clock), 7 = BOOTTIME
  * (Android's elapsedRealtime) */
@@ -359,8 +360,12 @@ static void aid(void)
 static int session(int on)
 {
 	int r;
-	if (!on)
-		return gps->stop();
+	if (!on) {
+		r = gps->stop();
+		printf("session stop -> %d\n", r);
+		fflush(0);
+		return r;
+	}
 	aid();
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				   GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
@@ -371,10 +376,14 @@ static int session(int on)
 		printf("start failed, re-init\n");
 		fflush(0);
 		xtra = 0;
+		gps_initialized = 0;
 		gps->cleanup();
 		r = gps->init(&cbs);
+		printf("re-init %d\n", r);
+		fflush(0);
 		if (r != 0)
 			return r;
+		gps_initialized = 1;
 		aid();
 		r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				       GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
@@ -468,6 +477,7 @@ disconnected:
 		if (fatal || (on && session(0) != 0)) {
 			/* Unknown engine state: fail closed rather than accept a new client. */
 			close(ls);
+			unlink(SOCK_PATH);
 			return 1;
 		}
 		printf("client gone\n");
@@ -506,9 +516,15 @@ int main(int argc, char **argv, char **envp)
 	printf("init %d\n", r);
 	if (r != 0)
 		return 1;
+	gps_initialized = 1;
 	if (daemon_mode) {
 		inject_now();
-		exit(serve());
+		r = serve();
+		if (gps_initialized) {
+			gps_initialized = 0;
+			gps->cleanup();
+		}
+		return r;
 	}
 	aid();
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE, GPS_POSITION_RECURRENCE_PERIODIC,
