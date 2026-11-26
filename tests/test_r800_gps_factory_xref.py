@@ -370,5 +370,72 @@ class StaticCalleeTests(unittest.TestCase):
         self.assertEqual(self.analyze(bytes(raw))["auto_callee_candidates"], [])
 
 
+def mapping_fixture(markers, *, thumb=False):
+    raw = bytearray(static_fixture(thumb=thumb))
+    strings = bytearray(b"\0first\0second\0alias\0")
+    for i, marker in enumerate(markers, 3):
+        label, value, *extra = marker
+        info, section, extent = extra or (0, 1, 0)
+        name = len(strings)
+        strings.extend(label + b"\0")
+        struct.pack_into("<IIIBBH", raw, 0x700 + 16*i, name, value, extent, info, 0, section)
+    raw[0x6a0:0x6a0+len(strings)] = strings
+    struct.pack_into("<I", raw, 0x664, len(strings))
+    struct.pack_into("<I", raw, 0x68c, 16*(3+len(markers)))
+    struct.pack_into("<I", raw, 0x694, 3+len(markers))
+    return bytes(raw)
+
+
+class MappingSymbolTests(unittest.TestCase):
+    def analyze(self, raw):
+        return target.audit(raw, auto_callees=True, callee_depth=2, static_symbols=True, mapping_symbols=True)
+
+    def test_uniform_arm_and_thumb(self):
+        for thumb in (False, True):
+            with self.subTest(thumb=thumb):
+                raw = mapping_fixture([(b"$a.0", 0x1100), (b"$t.1" if thumb else b"$a.1", 0x11e0)], thumb=thumb)
+                report = self.analyze(raw)
+                self.assertEqual(report["factory_symbol"]["mapping_symbol_coverage"], "UNIFORM_ISA_METADATA_ONLY")
+                self.assertEqual(len(report["auto_callee_candidates"]), 2)
+                self.assertEqual(report["code_ranges"][0]["pic_flow"]["events"][0]["table_va"], 0x2100)
+                self.assertFalse(report["function_boundaries_verified"])
+
+    def test_data_and_mode_change_in_factory(self):
+        for marker in (b"$d", b"$t"):
+            raw = mapping_fixture([(b"$a", 0x1100), (marker, 0x1110)])
+            with self.assertRaisesRegex(ValueError, "mapping range"):
+                self.analyze(raw)
+
+    def test_data_in_callee_not_analyzed(self):
+        raw = mapping_fixture([(b"$a", 0x1100), (b"$d.1", 0x11c4), (b"$a.2", 0x11e0)])
+        with self.assertRaisesRegex(ValueError, "mapping range"):
+            self.analyze(raw)
+
+    def test_marker_at_exclusive_end(self):
+        raw = mapping_fixture([(b"$a", 0x1100), (b"$d", 0x111c), (b"$a.1", 0x11c0)])
+        self.assertEqual(len(self.analyze(raw)["auto_callee_candidates"]), 2)
+
+    def test_missing_coverage_and_opt_in(self):
+        for raw in (call_fixture(), static_fixture(), mapping_fixture([(b"$a", 0x1104)])):
+            with self.assertRaisesRegex(ValueError, "mapping"):
+                self.analyze(raw)
+        with self.assertRaises(ValueError):
+            target.audit(call_fixture(), auto_callees=True, mapping_symbols=True)
+        self.assertFalse(target.audit(static_fixture())["mapping_symbol_mode"])
+
+    def test_conflicting_or_malformed_markers(self):
+        for markers in ([(b"$a", 0x1100), (b"$t", 0x1100)], [(b"$a", 0x1102)],
+                        [(b"$t", 0x1101)], [(b"$a", 0x1200)], [(b"$a", 0x1100, 2, 1, 0)],
+                        [(b"$d", 0x1100, 0, 4, 0)], [(b"$a", 0x1100, 0, 1, 4)]):
+            with self.subTest(markers=markers), self.assertRaises(ValueError):
+                self.analyze(mapping_fixture(markers))
+
+    def test_wrong_section_file_mapping(self):
+        raw = bytearray(mapping_fixture([(b"$a", 0x1100)]))
+        struct.pack_into("<I", raw, 0x638, 4)
+        with self.assertRaisesRegex(ValueError, "file-backed"):
+            self.analyze(bytes(raw))
+
+
 if __name__ == "__main__":
     unittest.main()
