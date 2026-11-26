@@ -81,6 +81,8 @@ on:
       - src/tools/gps/gps_lto.h
       - src/tools/gps/gps_output.h
       - src/tools/gps/gps_client.h
+      - src/tools/gps/gps_cache.h
+      - tests/test_r800_gps_cache.c
       - tests/test_r800_gps_client.c
       - build/r800_android_userspace_preflight.py
       - tests/test_android_userspace_preflight.py
@@ -262,4 +264,13 @@ jobs:
           trap 'rm -rf "$tmp"' EXIT
           cc -O2 -Wall -Wextra -Werror -pthread -Isrc/tools/gps tests/test_r800_gps_client.c -o "$tmp/gps-client-test"
           timeout 15 "$tmp/gps-client-test"
+          echo "ARM32_RUNTIME_VERIFIED=false"
+
+      - name: Native GPS atomic cache and session isolation
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          cc -O2 -Wall -Wextra -Werror -pthread -Isrc/tools/gps tests/test_r800_gps_cache.c -o "$tmp/gps-cache-test"
+          timeout 15 "$tmp/gps-cache-test"
           echo "ARM32_RUNTIME_VERIFIED=false"
