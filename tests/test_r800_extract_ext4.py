@@ -61,6 +61,38 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertFalse((self.output/"home").exists())
         self.assertFalse(result["safe_to_flash"])
 
+    def test_gps_gnss_profile_includes_broadcom(self):
+        for name in ("libc", "libdl", "libpthread", "ld"):
+            self.put("lib/"+name+"-2.24.so", name.encode("ascii"))
+        self.put("usr/lib/libbrcm.so", b"synthetic Broadcom")
+        self.put("opt/usr/r800dev/gps.last", b"excluded")
+        sha = self.make_image()
+        result = extract(self.image, self.output, "gps-gnss", sha)
+        self.assertEqual(result["missing_or_ambiguous"], [])
+        record = result["files"]["tizen/libbrcm.so"]
+        self.assertEqual(record["source"], "/usr/lib/libbrcm.so")
+        self.assertEqual(record["sha256"], hashlib.sha256(b"synthetic Broadcom").hexdigest())
+        self.assertEqual((self.output/"tizen/libbrcm.so").read_bytes(), b"synthetic Broadcom")
+        self.assertFalse((self.output/"opt").exists())
+        self.assertFalse(result["donor_compatibility_verified"])
+        self.assertFalse(result["safe_to_flash"])
+        self.assertEqual(hashlib.sha256(self.image.read_bytes()).hexdigest(), sha)
+
+    def test_gps_gnss_missing_broadcom(self):
+        for name in ("libc", "libdl", "libpthread", "ld"):
+            self.put("lib/"+name+"-2.24.so", name.encode("ascii"))
+        sha = self.make_image()
+        result = extract(self.image, self.output, "gps-gnss", sha)
+        self.assertEqual(result["missing_or_ambiguous"], ["tizen/libbrcm.so"])
+
+    def test_gps_gnss_rejects_broadcom_symlink(self):
+        self.put("usr/lib/libbrcm-real.so", b"synthetic Broadcom")
+        (self.tree/"usr/lib/libbrcm.so").symlink_to("libbrcm-real.so")
+        sha = self.make_image()
+        with self.assertRaisesRegex(ValueError, "regular donor"):
+            extract(self.image, self.output, "gps-gnss", sha)
+        self.assertFalse(self.output.exists())
+
     def test_vendor_profile(self):
         self.put("lib/libeffectsconfig.so", b"synthetic library")
         sha = self.make_image()
