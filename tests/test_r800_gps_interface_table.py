@@ -187,5 +187,64 @@ class TableTests(unittest.TestCase):
             target.discover(bytes(raw), symbolic=True)
 
 
+class LoadMappingTests(unittest.TestCase):
+    @staticmethod
+    def add_load(raw, va, fs, ms, flags, off=0):
+        raw = bytearray(raw)
+        struct.pack_into("<H", raw, 44, 4)
+        struct.pack_into("<8I", raw, 52 + 3 * 32,
+                         1, off, va, 0, fs, ms, flags, 1)
+        return bytes(raw)
+
+    def test_partial_full_and_bss_overlap(self):
+        for va, fs, ms, flags in ((0x1102, 2, 2, 6),
+                                  (0x1100, 4, 4, 5),
+                                  (0x10f0, 0, 0x40, 6),
+                                  (0x10fc, 4, 8, 4)):
+            with self.subTest(va=va, fs=fs, ms=ms, flags=flags):
+                raw = self.add_load(fixture(), va, fs, ms, flags)
+                mapping, _ = target.parse_elf(raw)
+                with self.assertRaisesRegex(ValueError, "not uniquely mapped"):
+                    mapping(0x1100, 4)
+                self.assertEqual(target.discover(raw)["candidate_count"], 0)
+
+    def test_overlap_with_symbolic_function_extent(self):
+        raw = symbolic_fixture(value=0x1100, size=12)
+        raw = self.add_load(raw, 0x1108, 0, 4, 6)
+        report = target.audit(raw, 0x2100, "xtra", symbolic=True)
+        self.assertEqual(report["entries"][1]["status"], "UNRESOLVED")
+        self.assertEqual(target.discover(raw, symbolic=True)["candidate_count"], 0)
+        self.assertFalse(report["safe_to_flash"])
+
+    def test_partial_relocation_target_overlap(self):
+        for fs in (0, 2):
+            with self.subTest(fs=fs):
+                raw = self.add_load(fixture(), 0x2106, fs, 2, 4)
+                with self.assertRaisesRegex(ValueError, "ambiguously mapped"):
+                    target.parse_elf(raw)
+
+    def test_dynamic_table_overlap(self):
+        raw = self.add_load(fixture(), 0x207c, 0, 4, 4)
+        with self.assertRaisesRegex(ValueError, "not uniquely mapped"):
+            target.parse_elf(raw)
+
+    def test_adjacent_and_empty_memory_extents(self):
+        for va, fs, ms in ((0x1200, 4, 4), (0x1100, 0, 0)):
+            with self.subTest(va=va, fs=fs, ms=ms):
+                raw = self.add_load(fixture(), va, fs, ms, 6)
+                mapping, _ = target.parse_elf(raw)
+                self.assertEqual(mapping(0x1100, 4), (0x100, 5))
+                self.assertEqual(target.discover(raw)["candidate_count"], 1)
+
+    def test_unique_bss_relocation_is_not_file_backed(self):
+        raw = self.add_load(fixture(relocs=[(0x2104, 23), (0x2108, 23),
+                                           (0x3000, 23)]), 0x3000, 0, 16, 6)
+        mapping, relocations = target.parse_elf(raw)
+        self.assertEqual(relocations[0x3000], (23, 0))
+        with self.assertRaisesRegex(ValueError, "not uniquely file-backed"):
+            mapping(0x3000, 4)
+        self.assertEqual(target.discover(raw)["candidate_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
