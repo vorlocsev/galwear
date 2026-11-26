@@ -87,12 +87,68 @@ def thumb_stack(a, b, width):
     return None
 
 
+def sign_extend(value, bits):
+    return value - (1 << bits) if value & (1 << (bits - 1)) else value
+
+
+def arm_call(word, va):
+    if word & 0xff000000 == 0xeb000000:
+        return va + 8 + sign_extend((word & 0xffffff) << 2, 26), "arm", "BL"
+    if word & 0xfe000000 == 0xfa000000:
+        delta = ((word & 0xffffff) << 2) | ((word >> 23) & 2)
+        return va + 8 + sign_extend(delta, 26), "thumb", "BLX"
+    return None
+
+
+def thumb_call(a, b, width, va):
+    if width != 4 or a & 0xf800 != 0xf000:
+        return None
+    if b & 0xd000 == 0xd000:
+        isa, base, kind = "thumb", va + 4, "BL"
+    elif b & 0xd001 == 0xc000:
+        isa, base, kind = "arm", (va + 4) & ~3, "BLX"
+    else:
+        return None
+    s = (a >> 10) & 1
+    i1 = 1 ^ (((b >> 13) & 1) ^ s)
+    i2 = 1 ^ (((b >> 11) & 1) ^ s)
+    delta = (s << 24) | (i1 << 23) | (i2 << 22) | ((a & 1023) << 12) | ((b & 2047) << 1)
+    return base + sign_extend(delta, 25), isa, kind
+
+
+def assumed_call(state, call, va, start, end, mapping):
+    target, isa, kind = call
+    align = 4 if isa == "arm" else 2
+    if state.get("sp") is None or state["sp"] % 8:
+        return None
+    if mapping is None or not 0 <= target <= 0xffffffff or target % align or start <= target < end:
+        return None
+    try:
+        _, flags = mapping(target, align)
+    except ValueError:
+        return None
+    if not flags & 1 or flags & 2:
+        return None
+    row = {"address": va, "target_va": target, "target_isa": isa, "instruction": kind,
+           "arguments": {"r" + str(r): {"kind": state[r][0], "value": state[r][1]}
+                         for r in range(4) if r in state and state[r][0] in ("constant", "address")},
+           "return_assumed": True, "callee_analyzed": False}
+    # Neither arbitrary memory nor the outgoing stack argument area is guaranteed
+    # unchanged by an opaque callee. Do not preserve saved LR in memory either.
+    for key in list(state):
+        if key not in ("sp", 4, 5, 6, 7, 8, 10, 11):
+            state.pop(key)
+    return row
+
+
 class Flow:
     """Must-fact intersection: unseen nodes are distinct from unknown facts."""
-    def __init__(self, start, end, nodes):
+    def __init__(self, start, end, nodes, assume_aapcs=False):
         self.end = end
         self.nodes = nodes
-        self.incoming = {start: {"sp": 0, 14: ("entry_lr", 0)}}
+        self.incoming = {start: {"sp": 0, 14: ("entry_lr", 0), "memory_unchanged": True}}
+        self.assume_aapcs = assume_aapcs
+        self.calls = []
         self.pending = deque([start])
         self.queued = {start}
         self.events = []
@@ -131,6 +187,7 @@ class Flow:
             yield self.current, dict(self.incoming[self.current])
             # Transient events must not survive until the reporting pass.
             self.events.clear()
+            self.calls.clear()
             self.boundaries.clear()
         self.converged = True
         self.emitting = True
@@ -144,6 +201,9 @@ class Flow:
         return {"status": "PARTIAL_FLOW_REVIEW_REQUIRED" if self.boundaries or not self.converged else "CONDITIONAL_FIXED_POINT_FLOW_ONLY",
                 "events": self.events if self.converged and not self.boundaries else [],
                 "boundaries": self.boundaries,
+                "assume_aapcs": self.assume_aapcs,
+                "assumed_calls": self.calls if self.converged and not self.boundaries else [],
+                "callee_execution_verified": False, "memory_preservation_assumed": False,
                 "reached_instructions": sum(va != self.end for va in self.incoming),
                 "range_end_reached": self.end in self.incoming,
                 "converged": self.converged, "iterations": self.steps,
@@ -151,11 +211,11 @@ class Flow:
                 "control_flow_verified": False, "safe_to_flash": False}
 
 
-def audit(raw, off, start, size, relocations, tables, direct):
+def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None):
     if size % 4 or start % 4 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid A32 flow range")
     end = start + size
-    flow = Flow(start, end, range(start, end, 4))
+    flow = Flow(start, end, range(start, end, 4), assume_aapcs)
     enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
     for va, state in flow.walk():
         word, = struct.unpack_from("<I", raw, off + va - start)
@@ -174,6 +234,15 @@ def audit(raw, off, start, size, relocations, tables, direct):
             continue
         if va in relocations:
             boundary("relocated_instruction")
+            continue
+        call = arm_call(word, va) if assume_aapcs else None
+        if call is not None:
+            row = assumed_call(state, call, va, start, end, mapping)
+            if row is None:
+                boundary("unresolved_or_unaligned_call")
+            else:
+                flow.calls.append(row)
+                enqueue(va + 4, state)
             continue
         if cond <= 14 and word & 0x0f000000 == 0x0a000000:
             delta = word & 0xffffff
@@ -209,7 +278,7 @@ def audit(raw, off, start, size, relocations, tables, direct):
             prev = state.get(rd)
             set_reg(rd, ("constant", (prev[1] & 0xffff) | (imm << 16))
                     if prev and prev[0] == "constant" else None)
-        elif word & 0xffff0ff0 == 0xe1a00000 and rd <= 12 and rm <= 12:
+        elif word & 0xffff0ff0 == 0xe1a00000 and rd in (*range(13), 14) and rm in (*range(13), 14):
             set_reg(rd, state.get(rm))
         elif word == 0xe320f000:  # NOP
             pass
@@ -231,7 +300,7 @@ def audit(raw, off, start, size, relocations, tables, direct):
             if prev and prev[0] == "address":
                 delta = word & 0xfff
                 slot = prev[1] + (delta if word & (1 << 23) else -delta)
-            value = direct[slot]["table_va"] if slot in direct else None
+            value = direct[slot]["table_va"] if slot in direct and state.get("memory_unchanged") else None
             set_reg(rd, ("address", value) if value is not None else None)
             if value is not None:
                 events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
@@ -243,7 +312,7 @@ def audit(raw, off, start, size, relocations, tables, direct):
     return flow.report()
 
 
-def audit_thumb(raw, off, start, size, relocations, tables, direct):
+def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None):
     """Bounded Thumb flow, with linear instruction-boundary assumptions."""
     if size % 2 or start % 2 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid Thumb flow range")
@@ -258,7 +327,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
         b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
         nodes[start + pos] = (a, b, width)
         pos += width
-    flow = Flow(start, end, nodes)
+    flow = Flow(start, end, nodes, assume_aapcs)
     enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
 
     # Reject even an unreachable IT encoding: a branch into its body could
@@ -279,7 +348,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
         def load(rd, rn, delta):
             prev = state.get(rn)
             slot = prev[1] + delta if prev and prev[0] == "address" else None
-            value = direct[slot]["table_va"] if slot in direct else None
+            value = direct[slot]["table_va"] if slot in direct and state.get("memory_unchanged") else None
             set_reg(rd, ("address", value) if value is not None else None)
             if value is not None:
                 events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
@@ -289,6 +358,15 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
             continue
         if any(slot in relocations for slot in range(va & ~3, ((va + width - 1) & ~3) + 1, 4)):
             boundary("relocated_instruction")
+            continue
+        call = thumb_call(a, b, width, va) if assume_aapcs else None
+        if call is not None:
+            row = assumed_call(state, call, va, start, end, mapping)
+            if row is None:
+                boundary("unresolved_or_unaligned_call")
+            else:
+                flow.calls.append(row)
+                enqueue(va + width, state)
             continue
         conditional = width == 2 and a & 0xf000 == 0xd000 and (a >> 8) & 15 < 14
         unconditional = width == 2 and a & 0xf800 == 0xe000
@@ -325,7 +403,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
                 prev = state.get(rd)
                 set_reg(rd, ("constant", (prev[1] & 0xffff) | (imm << 16))
                         if prev and prev[0] == "constant" else None)
-        elif width == 2 and a & 0xff00 == 0x4600 and (a & 7) + ((a >> 4) & 8) <= 12 and (a >> 3) & 15 <= 12:
+        elif width == 2 and a & 0xff00 == 0x4600 and (a & 7) + ((a >> 4) & 8) in (*range(13), 14) and (a >> 3) & 15 in (*range(13), 14):
             set_reg((a & 7) + ((a >> 4) & 8), state.get((a >> 3) & 15))
         elif width == 2 and a == 0xbf00:
             pass
