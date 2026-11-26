@@ -321,6 +321,17 @@ def multiply(state, rd, lhs, rhs, setflags):
             state.update(N=bool(result & 0x80000000), Z=result == 0)
 
 
+def constant_alu(state, op, rd, lhs, rhs, carry, setflags, *, shifted=False):
+    saved = {k: state[k] for k in FLAG_KEYS if k in state}
+    alu_flags(state, op, rd, lhs, rhs, carry)
+    if not setflags:
+        for k in FLAG_KEYS:
+            state.pop(k, None)
+        state.update(saved)
+    elif shifted and op in ("mov", "mvn", "and", "orr", "eor", "bic") and carry is None:
+        state.pop("C", None)
+
+
 def arm_alu(state, word):
     if word & 0xffe0f0f0 == 0xe0000090:
         rd, rs, rm = (word >> 16) & 15, (word >> 8) & 15, word & 15
@@ -328,13 +339,16 @@ def arm_alu(state, word):
             return False
         multiply(state, rd, constant(state, rm), constant(state, rs), bool(word & (1 << 20)))
         return True
-    # A32 unconditional data processing, S=1; immediate or shifted register.
-    if word & 0xfc100000 != 0xe0100000:
+    # A32 unconditional data processing; immediate or shifted register.
+    if word & 0xfc000000 != 0xe0000000:
         return False
     op = {0: "and", 1: "eor", 2: "sub", 3: "rsb", 4: "add", 5: "adc", 6: "sbc", 12: "orr", 13: "mov", 14: "bic", 15: "mvn"}.get((word >> 21) & 15)
     rn, rd = (word >> 16) & 15, (word >> 12) & 15
     if op is None or rd > 12 or rn > 12 or (op in ("mov", "mvn") and rn != 0):
         return False
+    setflags = bool(word & (1 << 20))
+    if not setflags and op == "mov" and not word & (1 << 25) and word & 0xff0 == 0:
+        return False  # Existing MOV alias preserves address facts and LR tokens.
     carry = None
     shifted = False
     if word & (1 << 25):
@@ -357,9 +371,7 @@ def arm_alu(state, word):
     lhs = constant(state, rn)
     if op == "rsb":
         op, lhs, rhs = "sub", rhs, lhs
-    alu_flags(state, op, rd, lhs, rhs, carry)
-    if shifted and op in ("mov", "mvn", "and", "orr", "eor", "bic") and carry is None:
-        state.pop("C", None)
+    constant_alu(state, op, rd, lhs, rhs, carry, setflags, shifted=shifted)
     return True
 
 
@@ -408,8 +420,8 @@ def thumb_wide_alu(state, a, b, width):
             return False
         multiply(state, rd, constant(state, rn), constant(state, rm), False)
         return True
-    # T32 data processing (shifted register), S=1 only.
-    if a & 0xfe10 != 0xea10 or b & 0x8000 or max(rd, rm) > 12:
+    # T32 data processing (shifted register).
+    if a & 0xfe00 != 0xea00 or b & 0x8000 or max(rd, rm) > 12:
         return False
     op = {0: "and", 1: "bic", 2: "orr", 4: "eor", 8: "add", 10: "adc",
           11: "sbc", 13: "sub", 14: "rsb"}.get((a >> 5) & 15)
@@ -425,9 +437,56 @@ def thumb_wide_alu(state, a, b, width):
     lhs = constant(state, rn)
     if op == "rsb":
         op, lhs, rhs = "sub", rhs, lhs
-    alu_flags(state, op, rd, lhs, rhs, carry)
-    if op in ("mov", "mvn", "and", "orr", "eor", "bic") and carry is None:
-        state.pop("C", None)
+    constant_alu(state, op, rd, lhs, rhs, carry, bool(a & 16), shifted=True)
+    return True
+
+
+def thumb_expand_imm(imm12, carry):
+    """ThumbExpandImm_C; reject unpredictable zero replicated constants."""
+    if not 0 <= imm12 < 4096:
+        raise ValueError("Invalid Thumb immediate")
+    if imm12 >> 10 == 0:
+        byte = imm12 & 255
+        mode = (imm12 >> 8) & 3
+        if mode and not byte:
+            raise ValueError("Unpredictable Thumb immediate replication")
+        value = (byte, byte * 0x10001, byte * 0x1000100, byte * 0x1010101)[mode]
+        return value, carry
+    return shift_with_carry(0x80 | (imm12 & 127), "ror", imm12 >> 7, carry)
+
+
+def thumb_immediate_alu(state, a, b, width):
+    if width != 4 or b & 0x8000:
+        return False
+    rn, rd = a & 15, (b >> 8) & 15
+    if rd > 12:
+        return False
+    imm12 = ((a & 0x400) << 1) | ((b >> 12) & 7) * 256 | (b & 255)
+    if a & 0xfbf0 in (0xf200, 0xf2a0):  # ADDW/SUBW, excluding ADR and SP.
+        if rn > 12:
+            return False
+        op = "add" if a & 0xfbf0 == 0xf200 else "sub"
+        constant_alu(state, op, rd, constant(state, rn), imm12, None, False)
+        return True
+    if a & 0xfa00 != 0xf000:
+        return False
+    code = (a >> 5) & 15
+    op = {0: "and", 1: "bic", 2: "orr", 4: "eor", 8: "add",
+          13: "sub", 14: "rsb"}.get(code)
+    if rn == 15 and code in (2, 3):
+        op = "mov" if code == 2 else "mvn"
+    elif rn > 12:
+        return False
+    if op is None:
+        return False
+    try:
+        rhs, carry = thumb_expand_imm(imm12, state.get("C"))
+    except ValueError:
+        return False
+    lhs = constant(state, rn)
+    if op == "rsb":
+        op, lhs, rhs = "sub", rhs, lhs
+    constant_alu(state, op, rd, lhs, rhs, carry, bool(a & 16))
     return True
 
 
@@ -853,7 +912,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
                 flow.record_return(state)
             continue
         stack = thumb_stack(a, b, width)
-        if thumb_compare(state, a, width) or thumb_alu(state, a, width) or thumb_wide_alu(state, a, b, width):
+        if thumb_compare(state, a, width) or thumb_alu(state, a, width) or thumb_wide_alu(state, a, b, width) or thumb_immediate_alu(state, a, b, width):
             pass
         elif stack is not None:
             if not stack_transfer(state, *stack):
