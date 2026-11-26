@@ -146,6 +146,17 @@ class ArchiveDonorBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "donor digest mismatch"):
             verify_archive(self.archive, donor_hashes=bad)
 
+    def test_required_closure_file_hashes(self):
+        required = {name: row["sha256"] for name, row in self.expected["files"].items()}
+        report = verify_archive(self.archive, donor_hashes=self.hashes,
+                                required_files=required)
+        self.assertEqual(report["status"], "TIZEN_ELF_ARCHIVE_STATIC_ONLY")
+        for changed in (dict(required, **{"/usr/bin/gpsd": "0"*64}),
+                        dict(required, **{"/lib/libc.so.6": "0"*64})):
+            with self.assertRaisesRegex(ValueError, "GNSS closure digest mismatch"):
+                verify_archive(self.archive, donor_hashes=self.hashes,
+                               required_files=changed)
+
     def test_missing_donor_in_valid_archive(self):
         partial = self.base / "partial"
         archive = self.base / "partial.tar"
