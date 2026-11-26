@@ -246,5 +246,58 @@ class LoadMappingTests(unittest.TestCase):
         self.assertEqual(target.discover(raw)["candidate_count"], 1)
 
 
+class LoadAlignmentTests(unittest.TestCase):
+    @staticmethod
+    def page_fixture():
+        # Move the data segment to an aligned file offset without changing VAs.
+        raw = bytearray(fixture())
+        raw = raw[:0x200] + bytearray(0xe00) + raw[0x200:]
+        struct.pack_into("<I", raw, 52 + 32 + 4, 0x1000)
+        struct.pack_into("<I", raw, 52 + 64 + 4, 0x1000)
+        return raw
+
+    def test_alignment_power_and_congruence(self):
+        for align in (0, 1, 2, 0x200, 0x1000):
+            with self.subTest(align=align):
+                raw = self.page_fixture()
+                for index in (0, 1):
+                    struct.pack_into("<I", raw, 52 + index * 32 + 28, align)
+                self.assertEqual(target.discover(bytes(raw))["candidate_count"], 1)
+        for align in (3, 0x300, 0x2000):
+            with self.subTest(align=align):
+                raw = self.page_fixture()
+                struct.pack_into("<I", raw, 52 + 32 + 28, align)
+                with self.assertRaisesRegex(ValueError, "Invalid PT_LOAD alignment"):
+                    target.discover(bytes(raw))
+
+    def test_default_and_strict_page_congruence(self):
+        self.assertFalse(target.discover(fixture())["strict_4k_page_review"])
+        with self.assertRaisesRegex(ValueError, "page offset mismatch"):
+            target.discover(fixture(), strict_pages=True)
+        raw = bytes(self.page_fixture())
+        report = target.discover(raw, strict_pages=True)
+        self.assertEqual(report["candidate_count"], 1)
+        self.assertTrue(report["strict_4k_page_review"])
+        self.assertFalse(report["safe_to_flash"])
+        self.assertTrue(target.audit(raw, 0x2100, "xtra",
+                                     strict_pages=True)["strict_4k_page_review"])
+
+    def test_shared_page_even_without_byte_overlap(self):
+        for flags, filesz in ((5, 4), (6, 4), (6, 0)):
+            with self.subTest(flags=flags, filesz=filesz):
+                raw = LoadMappingTests.add_load(self.page_fixture(),
+                                               0x1200, filesz, 4, flags, off=0x200)
+                self.assertEqual(target.discover(raw)["candidate_count"], 1)
+                with self.assertRaisesRegex(ValueError, "shared memory page"):
+                    target.discover(raw, strict_pages=True)
+
+    def test_adjacent_page_and_empty_extent(self):
+        for va, off, ms in ((0x3000, 0, 4), (0x1100, 0x100, 0)):
+            with self.subTest(va=va, ms=ms):
+                raw = LoadMappingTests.add_load(self.page_fixture(),
+                                               va, 0, ms, 6, off=off)
+                self.assertEqual(target.discover(raw, strict_pages=True)["candidate_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
