@@ -40,6 +40,7 @@ def lines(raw):
 def nsswitch(raw):
     databases=set()
     providers=set()
+    basic={}
     for line in lines(raw):
         if ":" not in line:
             raise ValueError("Missing NSS separator")
@@ -52,9 +53,12 @@ def nsswitch(raw):
         if not tokens or any(v not in ("files","dns") for v in tokens):
             raise ValueError("Unsupported NSS provider or action")
         providers.update(tokens)
+        if name in ("passwd","group","hosts"):
+            basic[name]=tokens
     if not {"passwd","group","hosts"}.issubset(databases):
         raise ValueError("Missing basic NSS databases")
-    return {"database_count":len(databases),"provider_candidates":sorted(providers)}
+    return {"database_count":len(databases),"provider_candidates":sorted(providers),
+            "basic_database_providers":basic,"other_database_count":len(databases)-len(basic)}
 
 
 def hosts(raw):

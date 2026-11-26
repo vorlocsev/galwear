@@ -376,6 +376,35 @@ class RealStageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"manifest digest"):
             verify_extended(self.output,image,sha,review,"0"*64)
 
+    def test_nss_provider_real_elf(self):
+        from r800_tzlite_nss_review import FUNCTIONS
+        (self.root/"etc/nsswitch.conf").write_text("passwd: files\ngroup: files\nhosts: files dns\n")
+        (self.root/"etc/hosts").write_text("127.0.0.1 localhost\n")
+        (self.root/"etc/resolv.conf").write_text("nameserver 192.0.2.1\n")
+        for provider,functions in (("files",set(sum(FUNCTIONS.values(),()))),("dns",FUNCTIONS["hosts"])):
+            src=self.parent/(provider+".c")
+            src.write_text("\n".join("int _nss_"+provider+"_"+name+"(void) { return 0; }"
+                                     for name in sorted(functions)))
+            soname="libnss_"+provider+".so.2"
+            subprocess.run(FLAGS+[str(src),"-fPIC","-shared","-Wl,-soname,"+soname,
+                                  "-o",str(self.root/"usr/lib"/soname)],
+                           check=True,timeout=30,capture_output=True)
+        image,sha=self.image_fixture()
+        result=inspect_image(image,sha,review_nss=True)["nss_review"]
+        self.assertEqual(result["status"],"STATIC_NSS_CANDIDATES_ONLY",result["problems"])
+        self.assertEqual(result["providers"]["files"]["required_export_count"],6)
+        self.assertEqual(result["providers"]["dns"]["required_export_count"],2)
+        self.assertFalse(result["nss_runtime_verified"])
+
+    def test_nss_provider_missing_exports(self):
+        (self.root/"etc/nsswitch.conf").write_text("passwd: files\ngroup: files\nhosts: files\n")
+        (self.root/"etc/hosts").write_text("127.0.0.1 localhost\n")
+        image,sha=self.image_fixture()
+        result=inspect_image(image,sha,review_nss=True)["nss_review"]
+        self.assertEqual(result["status"],"REVIEW_REQUIRED")
+        self.assertIn("NSS_EXPORT_REVIEW:_nss_files_getpwnam_r",result["providers"]["files"]["problems"])
+        self.assertFalse(result["safe_to_flash"])
+
     def test_extended_stage_wrong_review(self):
         image,sha=self.image_fixture()
         with self.assertRaisesRegex(ValueError,"review manifest SHA-256"):
