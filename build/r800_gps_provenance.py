@@ -14,7 +14,7 @@ import subprocess
 from r800_android_userspace_preflight import read_regular
 
 LIMIT = 256 * 1024**2
-HEADERS = ("gps_abi.h", "gps_command.h", "gps_frame.h", "gps_lto.h", "gps_output.h", "gps_client.h", "gps_cache.h", "gps_cache_read.h", "gps_cache_arm_stat.h")
+HEADERS = ("gps_abi.h", "gps_command.h", "gps_frame.h", "gps_lto.h", "gps_output.h", "gps_client.h", "gps_cache.h", "gps_cache_read.h", "gps_cache_arm_stat.h", "gps_lto_file.h")
 SOURCES = ("gpsbridge.c", *HEADERS)
 SOURCE_LIMIT = 4 * 1024**2
 TOOLS = {"clang": "clang", "ld.lld": "lld", "llvm-readelf": "readelf"}
