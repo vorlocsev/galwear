@@ -27,16 +27,8 @@ ARCHIVE=${R800_TIZEN_ARCHIVE:-}
 if [ -n "$ARCHIVE" ]; then
     python3 "$ROOT/build/r800_pack_tizen_stage.py" verify --archive "$ARCHIVE" --donor-manifest "$TMP/input.json" > "$TMP/archive.json"
 fi
-# Validate the exact private snapshot used by the linker, not just its source.
-for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
-    "$TC/llvm-readelf" -h "$TMP/libs/$lib" > "$TMP/donor-elf.txt"
-    grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*$' "$TMP/donor-elf.txt"
-    grep -Eq 'Data:.*little endian' "$TMP/donor-elf.txt"
-    grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$TMP/donor-elf.txt"
-    grep -Eq 'Type:[[:space:]]*DYN([[:space:]]|$)' "$TMP/donor-elf.txt"
-done
-set -- "$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
-    -DR800_XTRA_ABI="$XTRA_ABI" --no-default-config -nostdinc -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
+set -- "$TMP/tools/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
+    -DR800_XTRA_ABI="$XTRA_ABI" --no-default-config -nostdinc -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld --ld-path="$TMP/tools/ld.lld" \
     -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
     -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-e,_start \
     -o "$TMP/gpsbridge" "$TMP/sources/gpsbridge.c" "$TMP/libs/libc.so.6" "$TMP/libs/libdl.so.2" "$TMP/libs/libpthread.so.0"
@@ -50,10 +42,22 @@ python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
     unset COMPILER_PATH GCC_EXEC_PREFIX CCC_OVERRIDE_OPTIONS CLANG_CONFIG_FILE
     unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
     export LC_ALL=C TZ=UTC
+    # Donor checks and link use captured NDK executables only.
+    for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
+        "$TMP/tools/llvm-readelf" -h "$TMP/libs/$lib" > "$TMP/donor-elf.txt"
+        grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*$' "$TMP/donor-elf.txt"
+        grep -Eq 'Data:.*little endian' "$TMP/donor-elf.txt"
+        grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$TMP/donor-elf.txt"
+        grep -Eq 'Type:[[:space:]]*DYN([[:space:]]|$)' "$TMP/donor-elf.txt"
+    done
     "$@"
 )
 python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
-"$TC/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
+(
+    unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
+    export LC_ALL=C TZ=UTC
+    "$TMP/tools/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
+)
 grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
 grep -Fq '/lib/ld-linux.so.3' "$TMP/elf.txt"
