@@ -16,7 +16,9 @@ def normalize_argv(argv):
     staging = Path(argv[argv.index("-o") + 1]).parent
     normalized = []
     for arg in argv:
-        if arg.startswith(str(staging) + "/"):
+        if arg.startswith("--ld-path=" + str(staging) + "/"):
+            normalized.append("--ld-path=$STAGING/" + str(Path(arg.split("=", 1)[1]).relative_to(staging)))
+        elif arg.startswith(str(staging) + "/"):
             normalized.append("$STAGING/" + str(Path(arg).relative_to(staging)))
         else:
             normalized.append(arg)
