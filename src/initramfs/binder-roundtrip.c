@@ -3,6 +3,8 @@
  * Compile against the pinned kernel UAPI header.
  */
 #define _GNU_SOURCE
+/* The pinned vendor UAPI uses userspace pid_t and uid_t directly. */
+#include <sys/types.h>
 #include <linux/android/binder.h>
 #include <fcntl.h>
 #include <stdint.h>
