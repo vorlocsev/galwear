@@ -225,5 +225,50 @@ class TizenDependencyTests(unittest.TestCase):
         self.assertTrue(any("Overlapping PT_LOAD" in p["reason"] for p in report["problems"]))
         self.assertNotIn(self.target,report["files"])
 
+
+    def test_stage_rejects_shared_page_before_output(self):
+        self.put(self.target,fixture("arm",needed=["libx.so"]))
+        data=fixture("arm")
+        struct.pack_into("<H",data,44,3)
+        struct.pack_into("<8I",data,116,1,0x200,0x1200,0,0,4,6,1)
+        self.put("/usr/lib/libx.so",data)
+        with tempfile.TemporaryDirectory() as tmp:
+            output=Path(tmp)/"staged"
+            self.assertEqual(audit(self.root,[self.target])["problems"],[])
+            with self.assertRaisesRegex(ValueError,"shared memory page"):
+                stage(self.root,output,[self.target])
+            self.assertFalse(output.exists())
+            self.assertEqual(list(Path(tmp).iterdir()),[])
+
+    def test_stage_persists_strict_load_evidence(self):
+        import hashlib
+        import json
+        self.put(self.target,fixture("arm",needed=["libx.so"]))
+        self.put("/usr/lib/libx.so",fixture("arm"))
+        with tempfile.TemporaryDirectory() as tmp:
+            output=Path(tmp)/"staged"
+            report=stage(self.root,output,[self.target])
+            evidence=json.loads((output/"tizen-elf-evidence.json").read_text())
+            self.assertEqual(evidence,report)
+            self.assertTrue(report["strict_4k_page_review"])
+            for guest,item in report["files"].items():
+                self.assertTrue(item["load_review"]["strict_4k_page_review"])
+                self.assertEqual(item["sha256"],hashlib.sha256(
+                    (output/guest.lstrip("/")).read_bytes()).hexdigest())
+            self.assertFalse(report["safe_to_flash"])
+            self.assertFalse(report["runtime_verified"])
+
+    def test_stage_rejects_missing_strict_evidence(self):
+        from unittest.mock import patch
+        self.put(self.target,fixture("arm"))
+        report=audit(self.root,[self.target],strict_pages=True)
+        del report["files"][self.target]["load_review"]
+        with tempfile.TemporaryDirectory() as tmp:
+            output=Path(tmp)/"staged"
+            with patch("r800_stage_tizen.audit",return_value=report):
+                with self.assertRaisesRegex(ValueError,"Missing strict PT_LOAD evidence"):
+                    stage(self.root,output,[self.target])
+            self.assertEqual(list(Path(tmp).iterdir()),[])
+
 if __name__=="__main__":
     unittest.main()
