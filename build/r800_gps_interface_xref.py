@@ -118,7 +118,7 @@ def thumb_pic_clues(raw, off, start, size, relocations, tables, direct):
     return clues
 
 
-def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=()):
+def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(), callee_depth=1):
     discovery = discover(raw, symbolic=symbolic)
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
     tables = {r["table_va"]: r for r in discovery["candidates"]}
@@ -167,6 +167,8 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
         raise ValueError("Indirect reference budget exceeded")
     ranges = tuple(ranges)
     callee_ranges = tuple(callee_ranges)
+    if type(callee_depth) is not int or not 1 <= callee_depth <= 4 or (callee_depth != 1 and not callee_ranges):
+        raise ValueError("Callee depth requires explicit ranges and must be between 1 and 4")
     if callee_ranges and (not assume_aapcs or len(callee_ranges) > 16):
         raise ValueError("Explicit callee ranges require AAPCS mode; maximum 16")
     leaves = {}
@@ -183,7 +185,7 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
             raise ValueError("Callee range not executable and nonwritable")
         leaves[(start, isa)] = size
         spans.append((start, start + size))
-    leaf = leaf_analyzer(raw, mapping, relocations, tables, direct, leaves) if leaves else None
+    leaf = leaf_analyzer(raw, mapping, relocations, tables, direct, leaves, max_depth=callee_depth) if leaves else None
     code = []
     seen = set()
     for role, isa, start, size in ranges:
@@ -293,9 +295,10 @@ def main():
     parser.add_argument("--symbolic", action="store_true")
     parser.add_argument("--assume-aapcs", action="store_true", help="Opt in to opaque direct call summaries")
     parser.add_argument("--callee", action="append", type=parse_callee, default=[])
+    parser.add_argument("--callee-depth", type=int, default=1, help="Maximum explicit call depth (1-4)")
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs, callee_ranges=args.callee)
+        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs, callee_ranges=args.callee, callee_depth=args.callee_depth)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
