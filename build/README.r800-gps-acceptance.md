@@ -33,6 +33,12 @@ The report records PASS, FAIL, BLOCKED or NOT_TESTED for each phase, plus
 requested source SHA-256, log hashes and the candidate hash if the build,
 static re-audit and final candidate integrity check pass. REQUESTED_CHECKS_PASS is not a release gate or a
 signature. Missing optional phases remain NOT_TESTED. Failed requested
-phases make the runner exit nonzero. A host-only report cannot establish
+phases make the runner exit nonzero. Successful host-only invocations
+must contain exactly 43 check rows; successful donor invocations require 45
+(with QEMU either explicitly requested or NOT_TESTED). Each successful
+subprocess row must have exit code zero and a regular, non-symlink log
+matching its recorded SHA-256. Missing, duplicate, unexpected or mismatched
+rows and invalid PASS logs populate evidence_errors and force REVIEW_REQUIRED.
+These checks validate local consistency only, not authenticity or a signature. A host-only report cannot establish
 vendor ABI compatibility, hardware readiness, independent reproducibility,
 or safety to flash. Preserve the logs and report together.
