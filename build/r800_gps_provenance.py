@@ -8,6 +8,7 @@ from pathlib import Path
 import stat
 from r800_gps_donor_snapshot import pinned_directory
 from r800_gps_host_elf import audit as host_audit
+from r800_gps_host_snapshot import snapshot as host_snapshot, plan as host_plan, WRAPPER
 
 from r800_android_userspace_preflight import read_regular
 
@@ -91,13 +92,15 @@ def validate_command(root, ndk, command):
     if not output.is_absolute() or output.name != "gpsbridge":
         raise ValueError("Unexpected compiler output path")
     staging = output.parent
+    captured = "--ld-path=" + str(staging / "host/ld.lld") in command
+    linker = staging / ("host/ld.lld" if captured else "tools/ld.lld")
     for abi in (0, 1, 2):
         expected = [str(staging / "tools/clang"), "--target=armv7a-linux-gnueabi",
                     "-mfloat-abi=softfp", "-mfpu=vfpv3-d16",
                     "-DR800_XTRA_ABI=" + str(abi),
                     "--no-default-config", "-nostdinc", "-O2", "-fno-pic", "-no-pie",
                     "-fno-stack-protector", "-fno-builtin", "-ffreestanding",
-                    "-nostdlib", "-fuse-ld=lld", "--ld-path=" + str(staging / "tools/ld.lld"),
+                    "-nostdlib", "-fuse-ld=lld", "--ld-path=" + str(linker),
                     "-Wl,--hash-style=sysv", "-Wl,-z,noexecstack", "-Wl,-z,now",
                     "-Wl,--no-undefined", "-Wl,--dynamic-linker=/lib/ld-linux.so.3",
                     "-Wl,-e,_start", "-o", str(output),
@@ -134,13 +137,19 @@ def collect(root, ndk, command):
                  "r800_android_userspace_preflight.py",
                  "r800_android_linker_audit.py", "r800_tizen_dependencies.py",
                  "r800_pack_tizen_stage.py", "r800_verify_tizen_stage.py",
-                 "r800_gps_host_elf.py"):
+                 "r800_gps_host_elf.py", "r800_gps_host_snapshot.py"):
         files[name] = root / "build" / name
     fingerprints = {key: fingerprint(path) for key, path in files.items()}
     fingerprints["host_elf"] = host_audit({name: tc / name for name in TOOLS})
+    staging = Path(command[command.index("-o") + 1]).parent
+    captured = "--ld-path=" + str(staging / "host/ld.lld") in command
+    fingerprints["host_snapshot"] = ({"mode": "captured-loader-experimental",
+        "providers": host_plan(fingerprints["host_elf"]),
+        "wrapper_sha256": hashlib.sha256(WRAPPER).hexdigest(),
+        "host_isolated": False, "runtime_verified": False} if captured else None)
     return {"schema": "galwear-r800-gps-inputs-v1", "argv": command,
             "inputs": fingerprints,
-            "compiler_contract": "freestanding-snapshot-v3", "xtra_abi": abi,
+            "compiler_contract": "freestanding-snapshot-v4", "xtra_abi": abi,
             "tool_snapshot": TOOLS,
             "source_snapshot": {name: "source" if name == "gpsbridge.c" else name for name in SOURCES},
             "safe_to_flash": False, "signed_attestation": False}
@@ -165,6 +174,8 @@ def main():
         if args.mode == "capture":
             source_snapshot(args.root, staging, record, create=True)
             tool_snapshot(args.ndk, staging, record, create=True)
+            if record["inputs"]["host_snapshot"] is not None:
+                host_snapshot(staging, record["inputs"]["host_elf"], create=True)
             with args.record.open("x", encoding="utf-8") as stream:
                 json.dump(record, stream, sort_keys=True)
         else:
@@ -172,6 +183,8 @@ def main():
                 raise ValueError("Build inputs or compiler arguments changed")
             source_snapshot(args.root, staging, record)
             tool_snapshot(args.ndk, staging, record)
+            if record["inputs"]["host_snapshot"] is not None:
+                host_snapshot(staging, record["inputs"]["host_elf"])
     except (OSError, ValueError) as exc:
         parser.exit(2, "Provenance rejected: " + str(exc) + "\n")
 
