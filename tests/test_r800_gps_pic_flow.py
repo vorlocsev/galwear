@@ -865,10 +865,10 @@ class ImmediateAluTests(unittest.TestCase):
     def test_unknown_result_preserves_flags(self):
         from r800_gps_pic_flow import thumb_immediate_alu, arm_alu
         s={0:('address',0x2100),2:('constant',7),'Z':True}
-        self.assertTrue(thumb_immediate_alu(s,0xf100,0x0201,4))
+        self.assertTrue(thumb_immediate_alu(s,0xf000,0x0201,4))
         self.assertNotIn(2,s)
         self.assertTrue(s['Z'])
-        self.assertTrue(arm_alu(s,0xe2802001))
+        self.assertTrue(arm_alu(s,0xe2002001))
         self.assertNotIn(2,s)
         self.assertTrue(s['Z'])
 
@@ -885,3 +885,70 @@ class ImmediateAluTests(unittest.TestCase):
         self.assertEqual(r['boundaries'],[])
         r=ThumbITTests().evaluate([0x2000,0xf100,0x0001,0xbf0c,0xf240,7,0xf240,9,0x4770])
         self.assertEqual(r['leaf_summary']['r0'],('constant',7))
+
+class AddressAluTests(unittest.TestCase):
+    def test_arm_adr_plus_minus(self):
+        from r800_gps_pic_flow import arm_adr
+        self.assertEqual(arm_adr(0xe28f0074, 0x1100), (0, ('address', 0x117c)))
+        self.assertEqual(arm_adr(0xe24f1074, 0x1100), (1, ('address', 0x1094)))
+        self.assertEqual(arm_adr(0xe24f000c, 0), (0, None))
+        self.assertIsNone(arm_adr(0xe29f0074, 0x1100))
+        self.assertIsNone(arm_adr(0xe28ff074, 0x1100))
+
+    def test_thumb_adr_alignment_and_sign(self):
+        from r800_gps_pic_flow import thumb_adr
+        self.assertEqual(thumb_adr(0xa01e, None, 2, 0x1102), (0, ('address', 0x117c)))
+        self.assertEqual(thumb_adr(0xf60f, 0x70fc, 4, 0x1102), (0, ('address', 0x2100)))
+        self.assertEqual(thumb_adr(0xf2af, 0x0204, 4, 0x1102), (2, ('address', 0x1100)))
+        self.assertIsNone(thumb_adr(0xf20f, 0x0f04, 4, 0x1100))
+        self.assertIsNone(thumb_adr(0xa800, None, 2, 0x1100))
+
+    def test_address_offsets_preserve_flags(self):
+        from r800_gps_pic_flow import arm_alu, thumb_wide_alu, thumb_immediate_alu
+        for decode, expected in ((lambda s: arm_alu(s, 0xe2802004), 0x2104),
+                                 (lambda s: arm_alu(s, 0xe0402001), 0x20fe),
+                                 (lambda s: thumb_wide_alu(s, 0xeb00, 0x0281, 4), 0x2108),
+                                 (lambda s: thumb_immediate_alu(s, 0xf200, 0x0204, 4), 0x2104),
+                                 (lambda s: thumb_immediate_alu(s, 0xf1a0, 0x0204, 4), 0x20fc)):
+            s = {0: ('address', 0x2100), 1: ('constant', 2), 'Z': True, 'C': False}
+            self.assertTrue(decode(s))
+            self.assertEqual(s[2], ('address', expected))
+            self.assertTrue(s['Z'])
+            self.assertFalse(s['C'])
+
+    def test_signed_displacements_and_overflow(self):
+        from r800_gps_pic_flow import address_alu
+        for base, delta, expected in ((0x2100, 0xffffffff, ('address', 0x20ff)),
+                                      (0xffffffff, 1, None), (0, 0xffffffff, None)):
+            s = {0: ('address', base), 1: ('constant', 9)}
+            self.assertTrue(address_alu(s, 'add', 1, 0, delta, False))
+            self.assertEqual(s.get(1), expected)
+
+    def test_address_plus_address_and_flag_setting_not_promoted(self):
+        from r800_gps_pic_flow import arm_alu
+        s = {0: ('address', 0x2100), 1: ('address', 0x2200), 2: ('constant', 9), 'Z': True}
+        self.assertTrue(arm_alu(s, 0xe0802001))
+        self.assertNotIn(2, s)
+        self.assertTrue(s['Z'])
+        self.assertTrue(arm_alu(s, 0xe2902001))
+        self.assertNotIn(2, s)
+        self.assertNotIn('Z', s)
+
+    def test_arm_adr_and_field_offset_load(self):
+        r = run([0xe28f0074, 0xe2800004, 0xe5901000, 0xe12fff1e])
+        self.assertEqual(r['boundaries'], [])
+        self.assertEqual(r['events'][0]['slot_va'], 0x1180)
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
+
+    def test_thumb_adr_and_field_offset_load(self):
+        r = ThumbFlowTests().run_flow([0xa01e, 0xf200, 4, 0x6801, 0x4770])
+        self.assertEqual(r['boundaries'], [])
+        self.assertEqual(r['events'][0]['slot_va'], 0x1180)
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
+
+    def test_derived_table_address_and_return(self):
+        r = ThumbFlowTests().run_flow([0xf60f, 0x70f8, 0xf200, 4, 0x4770])
+        self.assertEqual(r['boundaries'], [])
+        self.assertEqual(r['events'], [{'address': 0x1104, 'register': 'r0', 'table_va': 0x2100,
+                                       'kind': 'DERIVED_TABLE_ADDRESS'}])
+        self.assertEqual(r['leaf_summary']['r0'], ('address', 0x2100))
