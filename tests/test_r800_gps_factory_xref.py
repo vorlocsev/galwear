@@ -593,6 +593,93 @@ class AutomaticCallbackTests(unittest.TestCase):
         self.assertEqual([e["slot_va"] for e in row["callback_slot_candidates"]], [0x2104, 0x2108])
         self.assertEqual(report["code_ranges"][0]["pic_flow"]["assumed_calls"], [])
 
+class SymbolicCallbackTests(unittest.TestCase):
+    def fixture(self, *, got=False, typ=None, **kwargs):
+        raw = AutomaticCallbackTests().fixture(**kwargs)
+        if got:
+            struct.pack_into("<I", raw, 0x304, 0x11a0)
+            struct.pack_into("<I", raw, 0x110, 0xe5903040)
+            struct.pack_into("<I", raw, 0x20c, 32)
+            struct.pack_into("<II", raw, 0x418, 0x2140, 0x200 | (21 if typ is None else typ))
+        else:
+            struct.pack_into("<I", raw, 0x304, 0)
+            struct.pack_into("<I", raw, 0x404, 0x200 | (2 if typ is None else typ))
+        return raw
+
+    def analyze(self, raw, **kwargs):
+        return target.audit(bytes(raw), auto_callees=True, callback_calls=True, symbolic=True,
+                            callee_depth=2, **kwargs)
+
+    def test_symbolic_table_callback(self):
+        raw = self.fixture()
+        report = self.analyze(raw)
+        self.assertEqual(report["symbolic_callback_slot_count"], 1)
+        self.assertEqual(report["function_got_slot_candidate_count"], 0)
+        ev = report["auto_callee_candidates"][0]["callback_slot_candidates"][0]
+        self.assertEqual(ev["symbolic_evidence"]["symbol_index"], 2)
+        flow = report["code_ranges"][0]["pic_flow"]
+        self.assertEqual(flow["boundaries"], [])
+        self.assertEqual(flow["assumed_calls"][0]["instruction"], "BLX_REG")
+        self.assertFalse(report["safe_to_flash"])
+        with self.assertRaisesRegex(ValueError, "No eligible"):
+            target.audit(bytes(raw), auto_callees=True, callback_calls=True, callee_depth=2)
+
+    def test_got_function_pointer(self):
+        report = self.analyze(self.fixture(got=True))
+        self.assertEqual(report["function_got_slot_candidate_count"], 1)
+        self.assertFalse(report["got_membership_verified"])
+        flow = report["code_ranges"][0]["pic_flow"]
+        self.assertEqual(flow["boundaries"], [])
+        self.assertEqual(flow["events"][-1]["slot_va"], 0x2140)
+        self.assertEqual(flow["events"][-1]["source"], "GLOB_DAT_SLOT_CANDIDATE")
+        self.assertTrue(flow["assumed_calls"][0]["callee_analyzed"])
+
+    def test_external_preemptible_and_nonzero_addend(self):
+        for raw in (self.fixture(first_other=0), self.fixture(first_info=0x1a)):
+            with self.assertRaisesRegex(ValueError, "No eligible"):
+                self.analyze(raw)
+        for got in (False, True):
+            raw = self.fixture(got=got)
+            struct.pack_into("<I", raw, 0x340 if got else 0x304, 4)
+            with self.assertRaisesRegex(ValueError, "No eligible"):
+                self.analyze(raw)
+        raw = self.fixture()
+        struct.pack_into("<H", raw, 0x4ee, 0)
+        with self.assertRaisesRegex(ValueError, "No eligible"):
+            self.analyze(raw)
+
+    def test_got_type_and_permissions(self):
+        for raw in (self.fixture(got=True, typ=2), self.fixture(got=True, typ=22),
+                    self.fixture(typ=21), self.fixture(typ=22)):
+            with self.assertRaisesRegex(ValueError, "No eligible"):
+                self.analyze(raw)
+        raw = self.fixture(got=True)
+        struct.pack_into("<I", raw, 52+32+24, 4)
+        with self.assertRaisesRegex(ValueError, "No eligible"):
+            self.analyze(raw)
+
+    def test_explicit_extent_must_match_symbol(self):
+        from r800_gps_interface_xref import audit
+        raw = self.fixture(got=True)
+        report = audit(bytes(raw), [("factory", "arm", 0x1100, 28)], symbolic=True,
+                       callback_calls=True, assume_aapcs=True, callee_ranges=[("arm", 0x11c0, 4)])
+        self.assertEqual(report["symbolic_callback_slot_count"], 0)
+        self.assertEqual(report["code_ranges"][0]["pic_flow"]["assumed_calls"], [])
+
+    def test_symbolic_thumb_callback(self):
+        raw = self.fixture(thumb=True)
+        struct.pack_into("<I", raw, 0x404, 0x302)
+        report = self.analyze(raw)
+        self.assertEqual(report["auto_callee_candidates"][0]["isa"], "thumb")
+        call = report["code_ranges"][0]["pic_flow"]["assumed_calls"][0]
+        self.assertEqual(call["target_isa"], "thumb")
+
+    def test_versioned_symbolic_mode_still_rejected(self):
+        raw = self.fixture()
+        struct.pack_into("<II", raw, 0x240, 0x6ffffff0, 0x2340)
+        with self.assertRaises(ValueError):
+            self.analyze(raw)
+
 
 if __name__ == "__main__":
     unittest.main()
