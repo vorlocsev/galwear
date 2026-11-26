@@ -49,6 +49,7 @@ sh "$ROOT/build/r800_gps_probe_tls_object.sh" "$TC/llvm-readelf" "$TMP/probe.o"
   -Wl,--dynamic-linker=/lib/ld-linux.so.3,-e,_start \
   -o "$TMP/root/probe" "$TMP/probe.o" \
   "$TMP/root/lib/libc.so.6" "$TMP/root/lib/libdl.so.2" "$TMP/root/lib/libpthread.so.0"
+python3 "$ROOT/build/r800_gps_probe_linked.py" "$TMP/root/probe"
 python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/root/probe" --libdir "$TMP/root/lib" > "$TMP/audit.json"
 cat "$TMP/audit.json"
 (cd "$TMP/root/lib" && sha256sum -c "$TMP/manifest")
