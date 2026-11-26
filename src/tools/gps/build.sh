@@ -27,14 +27,25 @@ ARCHIVE=${R800_TIZEN_ARCHIVE:-}
 if [ -n "$ARCHIVE" ]; then
     python3 "$ROOT/build/r800_pack_tizen_stage.py" verify --archive "$ARCHIVE" --donor-manifest "$TMP/input.json" > "$TMP/archive.json"
 fi
+HOST_MODE=${R800_HOST_SNAPSHOT:-0}
+case "$HOST_MODE" in 0|1) ;; *) echo "invalid R800_HOST_SNAPSHOT" >&2; exit 2;; esac
+LINKER=$TMP/tools/ld.lld
+if [ "$HOST_MODE" = 1 ]; then LINKER=$TMP/host/ld.lld; fi
 set -- "$TMP/tools/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
-    -DR800_XTRA_ABI="$XTRA_ABI" --no-default-config -nostdinc -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld --ld-path="$TMP/tools/ld.lld" \
+    -DR800_XTRA_ABI="$XTRA_ABI" --no-default-config -nostdinc -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld --ld-path="$LINKER" \
     -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
     -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-e,_start \
     -o "$TMP/gpsbridge" "$TMP/sources/gpsbridge.c" "$TMP/libs/libc.so.6" "$TMP/libs/libdl.so.2" "$TMP/libs/libpthread.so.0"
 PROVENANCE=$ROOT/build/r800_gps_provenance.py
 python3 "$PROVENANCE" capture "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
 python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
+run_tool() {
+    if [ "$HOST_MODE" = 1 ]; then
+        "$TMP/host/loader" --inhibit-cache --glibc-hwcaps-mask "" --library-path "$TMP/host/lib" "$@"
+    else
+        "$@"
+    fi
+}
 # Do not inherit common compiler/loader injection variables.
 # The build contract is freestanding and uses only explicit local includes.
 (
@@ -44,19 +55,19 @@ python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
     export LC_ALL=C TZ=UTC
     # Donor checks and link use captured NDK executables only.
     for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
-        "$TMP/tools/llvm-readelf" -h "$TMP/libs/$lib" > "$TMP/donor-elf.txt"
+        run_tool "$TMP/tools/llvm-readelf" -h "$TMP/libs/$lib" > "$TMP/donor-elf.txt"
         grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*$' "$TMP/donor-elf.txt"
         grep -Eq 'Data:.*little endian' "$TMP/donor-elf.txt"
         grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$TMP/donor-elf.txt"
         grep -Eq 'Type:[[:space:]]*DYN([[:space:]]|$)' "$TMP/donor-elf.txt"
     done
-    "$@"
+    run_tool "$@"
 )
 python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
 (
     unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
     export LC_ALL=C TZ=UTC
-    "$TMP/tools/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
+    run_tool "$TMP/tools/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
 )
 grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
