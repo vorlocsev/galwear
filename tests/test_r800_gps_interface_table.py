@@ -31,6 +31,19 @@ def fixture(layout="xtra", relocs=None, words=None, extra=(), code_flags=5):
     return bytes(raw)
 
 
+def symbolic_fixture(typ=2, info=0x12, other=2, section=1, value=0x1101,
+                     size=2, word=0, sym=1, extra=()):
+    strings = b"\0local_fn\0"
+    tags = [(4, 0x2240), (5, 0x2280), (10, len(strings)),
+            (6, 0x22c0), (11, 16), *extra]
+    raw = bytearray(fixture(relocs=[(0x2104, 23), (0x2108, (sym << 8) | typ)],
+                            words=[12, 0x1100, word], extra=tags))
+    struct.pack_into("<5I", raw, 0x440, 1, 2, 1, 0, 0)
+    raw[0x480:0x480 + len(strings)] = strings
+    struct.pack_into("<IIIBBH", raw, 0x4d0, 1, value, size, info, other, section)
+    return bytes(raw)
+
+
 class TableTests(unittest.TestCase):
     def test_relative_arm_thumb(self):
         report = target.audit(fixture(), 0x2100, "xtra")
@@ -120,6 +133,58 @@ class TableTests(unittest.TestCase):
         from unittest.mock import patch
         with patch.object(target, "MAX_CANDIDATES", 0), self.assertRaises(ValueError):
             target.discover(fixture())
+
+
+    def test_symbolic_relocations(self):
+        for typ in (2, 21, 22):
+            with self.subTest(typ=typ):
+                raw = symbolic_fixture(typ=typ)
+                self.assertEqual(target.discover(raw)["candidate_count"], 0)
+                report = target.discover(raw, symbolic=True)
+                self.assertEqual(report["candidate_count"], 1)
+                entry = report["candidates"][0]["entries"][1]
+                self.assertEqual((entry["target_va"], entry["isa"]), (0x1100, "thumb"))
+                self.assertEqual(entry["status"], "SYMBOLIC_EXECUTABLE_CANDIDATE")
+                self.assertEqual(entry["symbolic_evidence"]["relocation_type"], typ)
+                self.assertFalse(report["safe_to_flash"])
+                self.assertFalse(report["candidates"][0]["relocations_applied"])
+
+    def test_symbolic_binding_visibility(self):
+        for info, other, accepted in ((2, 0, True), (0x12, 2, True), (0x12, 3, True),
+                                      (0x22, 2, True), (0x12, 0, False), (0x22, 0, False)):
+            with self.subTest(info=info, other=other):
+                report = target.discover(symbolic_fixture(info=info, other=other), symbolic=True)
+                self.assertEqual(report["candidate_count"], int(accepted))
+
+    def test_symbolic_unsupported_definition(self):
+        for kwargs in ({"section": 0}, {"section": 0xfff1}, {"info": 0x11},
+                       {"info": 0x1a}, {"size": 0}, {"value": 0x2100}, {"value": 0x1102}):
+            with self.subTest(kwargs=kwargs):
+                report = target.discover(symbolic_fixture(**kwargs), symbolic=True)
+                self.assertEqual(report["candidate_count"], 0)
+
+    def test_nonzero_addend_not_resolved(self):
+        for typ in (2, 21, 22):
+            with self.subTest(typ=typ):
+                report = target.audit(symbolic_fixture(typ=typ, word=4), 0x2100, "xtra", symbolic=True)
+                self.assertEqual(report["entries"][1]["status"], "UNRESOLVED")
+
+    def test_symbol_index_bounds(self):
+        with self.assertRaisesRegex(ValueError, "symbol index"):
+            target.discover(symbolic_fixture(sym=2), symbolic=True)
+
+    def test_unsupported_symbol_inventory(self):
+        for extra in ([(0x6ffffff0, 0x2300)], [(0x6ffffef5, 0x2300)]):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                target.discover(symbolic_fixture(extra=extra), symbolic=True)
+        with self.assertRaises(ValueError):
+            target.discover(fixture(relocs=[(0x2104, 23), (0x2108, 258)]), symbolic=True)
+
+    def test_symbolic_bad_hash_chain(self):
+        raw = bytearray(symbolic_fixture())
+        struct.pack_into("<I", raw, 0x450, 1)
+        with self.assertRaisesRegex(ValueError, "Cyclic"):
+            target.discover(bytes(raw), symbolic=True)
 
 
 if __name__ == "__main__":
