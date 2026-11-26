@@ -217,6 +217,82 @@ def thumb_compare(state, a, width):
     return False
 
 
+def alu_flags(state, op, rd, lhs, rhs, carry=None):
+    """32-bit constant ALU; address-valued arithmetic remains unknown."""
+    arithmetic = op in ("add", "sub")
+    for key in (FLAG_KEYS if arithmetic else ("N", "Z")):
+        state.pop(key, None)
+    if not arithmetic and carry is not None:
+        state["C"] = carry
+    state.pop(rd, None)
+    if rhs is None or (op != "mov" and lhs is None):
+        return
+    if op == "mov":
+        result = rhs
+    elif op == "add":
+        result = (lhs + rhs) & 0xffffffff
+        state.update(C=lhs + rhs > 0xffffffff, V=bool(~(lhs ^ rhs) & (lhs ^ result) & 0x80000000))
+    elif op == "sub":
+        result = (lhs - rhs) & 0xffffffff
+        state.update(C=lhs >= rhs, V=bool((lhs ^ rhs) & (lhs ^ result) & 0x80000000))
+    elif op == "and":
+        result = lhs & rhs
+    elif op == "orr":
+        result = lhs | rhs
+    elif op == "eor":
+        result = lhs ^ rhs
+    else:
+        raise ValueError("Unknown ALU operation")
+    state[rd] = ("constant", result)
+    state.update(N=bool(result & 0x80000000), Z=result == 0)
+
+
+def arm_alu(state, word):
+    # A32 unconditional data processing, S=1; immediate or unshifted register.
+    if word & 0xfc100000 != 0xe0100000:
+        return False
+    op = {0: "and", 1: "eor", 2: "sub", 4: "add", 12: "orr", 13: "mov"}.get((word >> 21) & 15)
+    rn, rd = (word >> 16) & 15, (word >> 12) & 15
+    if op is None or rd > 12 or rn > 12 or (op == "mov" and rn != 0):
+        return False
+    carry = None
+    if word & (1 << 25):
+        imm, shift = word & 255, 2 * ((word >> 8) & 15)
+        rhs = ((imm >> shift) | (imm << (32 - shift))) & 0xffffffff
+        if shift:
+            carry = bool(rhs & 0x80000000)
+    elif word & 0xff0 == 0 and word & 15 <= 12:
+        rhs = constant(state, word & 15)
+    else:
+        return False
+    alu_flags(state, op, rd, constant(state, rn), rhs, carry)
+    return True
+
+
+def thumb_alu(state, a, width):
+    # T16 flag-setting encodings outside IT; no shifted operands except LSL #0.
+    if width != 2:
+        return False
+    if a & 0xffc0 == 0:  # MOVS register alias (LSLS #0)
+        alu_flags(state, "mov", a & 7, None, constant(state, (a >> 3) & 7))
+    elif a & 0xf800 == 0x2000:
+        alu_flags(state, "mov", (a >> 8) & 7, None, a & 255)
+    elif a & 0xf800 == 0x1800:
+        rd, rn, operand = a & 7, (a >> 3) & 7, (a >> 6) & 7
+        rhs = operand if a & 0x400 else constant(state, operand)
+        alu_flags(state, "sub" if a & 0x200 else "add", rd, constant(state, rn), rhs)
+    elif a & 0xf800 in (0x3000, 0x3800):
+        rd = (a >> 8) & 7
+        alu_flags(state, "sub" if a & 0x800 else "add", rd, constant(state, rd), a & 255)
+    elif a & 0xffc0 in (0x4000, 0x4040, 0x4300):
+        op = {0x4000: "and", 0x4040: "eor", 0x4300: "orr"}[a & 0xffc0]
+        rd = a & 7
+        alu_flags(state, op, rd, constant(state, rd), constant(state, (a >> 3) & 7))
+    else:
+        return False
+    return True
+
+
 def assumed_call(state, call, va, start, end, mapping, leaf=None):
     target, isa, kind = call
     align = 4 if isa == "arm" else 2
@@ -433,7 +509,7 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
             boundary("conditional_or_unknown_instruction")
             continue
         stack = arm_stack(word)
-        if arm_compare(state, word):
+        if arm_compare(state, word) or arm_alu(state, word):
             pass
         elif stack is not None:
             if not stack_transfer(state, *stack):
@@ -639,7 +715,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
                 flow.record_return(state)
             continue
         stack = thumb_stack(a, b, width)
-        if thumb_compare(state, a, width):
+        if thumb_compare(state, a, width) or thumb_alu(state, a, width):
             pass
         elif stack is not None:
             if not stack_transfer(state, *stack):
