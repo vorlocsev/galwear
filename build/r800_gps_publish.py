@@ -47,9 +47,27 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ("binary", "report", "manifest", "output"):
         p.add_argument(name, type=Path)
+    p.add_argument('provenance', type=Path, nargs='?')
     args = p.parse_args()
     try:
+        evidence = None
+        if args.provenance is not None:
+            raw = read_regular(args.provenance, 1024**2)
+            inputs = json.loads(raw)
+            if (inputs.get("schema") != "galwear-r800-gps-inputs-v1"
+                    or inputs.get("safe_to_flash") is not False
+                    or inputs.get("signed_attestation") is not False):
+                raise ValueError("Unexpected provenance scope")
+            evidence = {"schema": "galwear-r800-gps-evidence-v1",
+                        "inputs": inputs,
+                        "inputs_sha256": hashlib.sha256(raw).hexdigest(),
+                        "audit_sha256": hashlib.sha256(read_regular(args.report, 4 * 1024**2)).hexdigest(),
+                        "donor_manifest_sha256": hashlib.sha256(read_regular(args.manifest, 4096)).hexdigest(),
+                        "safe_to_flash": False, "signed_attestation": False}
         digest = publish(args.binary, args.report, args.manifest, args.output)
+        if evidence is not None:
+            evidence["binary_sha256"] = digest
+            print(json.dumps(evidence, sort_keys=True))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         p.exit(2, "Publication rejected: " + str(exc) + "\n")
     print(digest + "  " + str(args.output))
