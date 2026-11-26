@@ -16,6 +16,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stddef.h>
 #include <time.h>
 #include <pthread.h>
@@ -34,6 +35,14 @@
 #include "gps_wire.h"
 #include "gps_nmea.h"
 #include "gps_epoch_frame.h"
+#include "gps_v2_control.h"
+
+#ifndef R800_GPS_IPC_V2
+#define R800_GPS_IPC_V2 0
+#endif
+#if R800_GPS_IPC_V2 != 0 && R800_GPS_IPC_V2 != 1
+#error Invalid R800_GPS_IPC_V2
+#endif
 
 #ifdef R800_GPS_HOST_TEST
 #define LOGI(...) ((void)0)
@@ -141,6 +150,7 @@ static GpsCallbacks callbacks_owned;
 static GpsCallbacks *cb = &callbacks_owned;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static int sock = -1;
+static int v2_ready; /* under lock; connection-scoped */
 static int sock_failed; /* protected by lock; only reader closes published fd */
 static int want_on;          /* framework asked for a session */
 static unsigned long session_epoch; /* under lock; reader owns satellite reset */
@@ -314,7 +324,7 @@ static void handle_nmea_sv(const char *s)
 		report_sv();
 }
 
-static void handle_line(char *l)
+static void handle_line(const char *l)
 {
     if (!strncmp(l, "FIX ", 4)) {
         struct gps_wire_fix f;
@@ -349,11 +359,32 @@ static void handle_line(char *l)
     }
 }
 
+static long long v2_now(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* With lock held. The reader alone advances the v2 controller. */
+static int v2_drive(struct gps_v2_control *v2)
+{
+    char line[32];
+    int action = gps_v2_control_plan(v2, want_on, session_epoch, v2_now());
+    if (action < 0) return -1;
+    if (!action) return 0;
+    int n = snprintf(line, sizeof(line), "%s %u\n",
+                     action == 1 ? "START" : "STOP", v2->session.id);
+    return n > 0 && n < (int)sizeof(line) ? send_line(line) : -1;
+}
+
 /* connects (retrying), re-sends the wanted state, then reads lines forever */
 static void reader(void *arg)
 {
 	char buf[256];
 	struct gps_epoch_frame stream = {0};
+    struct gps_v2_control v2 = {0};
+    int announced = 0;
     unsigned long seen_epoch = 0;
 	(void)arg;
 
@@ -399,13 +430,31 @@ static void reader(void *arg)
             sock = fd;
 			sock_failed = 0;
             seen_epoch = session_epoch;
-            int replay_failed = want_on && send_line("START\n") != 0;
+            int replay_failed;
+            v2_ready = 0;
+            if (R800_GPS_IPC_V2) {
+                long long now = v2_now();
+                gps_v2_control_reset(&v2, now);
+                replay_failed = now < 0 || send_line(GPS_V2_HELLO "\n") != 0;
+            } else {
+                replay_failed = want_on && send_line("START\n") != 0;
+            }
 			pthread_mutex_unlock(&lock);
             gps_epoch_reset(&stream, seen_epoch);
 			reset_sv();
             if (replay_failed)
                 goto disconnected;
 		}
+        if (R800_GPS_IPC_V2) {
+            pthread_mutex_lock(&lock);
+            int failed = !running || sock != fd || sock_failed || v2_drive(&v2);
+            pthread_mutex_unlock(&lock);
+            if (failed) goto disconnected;
+            struct pollfd p = {fd, POLLIN, 0};
+            int ready = poll(&p, 1, 100);
+            if (!ready || (ready < 0 && errno == EINTR)) continue;
+            if (ready < 0) goto disconnected;
+        }
 		ssize_t n = read(fd, buf, sizeof(buf));
 		if (n < 0 && errno == EINTR)
 			continue;
@@ -418,10 +467,44 @@ static void reader(void *arg)
         if (!valid_socket)
             goto disconnected;
 		for (ssize_t i = 0; i < n; ++i) {
-			int state = gps_epoch_byte(&stream, batch_epoch, (unsigned char)buf[i]);
+			int state = gps_epoch_byte(&stream, R800_GPS_IPC_V2 ? 0 : batch_epoch, (unsigned char)buf[i]);
 			if (state < 0)
 				goto disconnected;
 			if (state == 1) {
+                if (R800_GPS_IPC_V2) {
+                    const char *payload;
+                    int notify = 0;
+                    pthread_mutex_lock(&lock);
+                    enum gps_v2_phase before = v2.session.phase;
+                    int rc = !running || sock != fd || sock_failed ? -1 :
+                        gps_v2_control_receive(&v2, stream.frame.line, want_on,
+                                               session_epoch, v2_now(), &payload);
+                    v2_ready = v2.ready && rc >= 0;
+                    if (rc == 1 && before == GPS_V2_START_PENDING &&
+                        want_on && v2.epoch == session_epoch) {
+                        announced = 1;
+                        notify = GPS_STATUS_SESSION_BEGIN;
+                    } else if (rc == 1 && before == GPS_V2_STOP_PENDING && announced) {
+                        announced = 0;
+                        notify = GPS_STATUS_SESSION_END;
+                    }
+                    pthread_mutex_unlock(&lock);
+                    if (rc < 0) goto disconnected;
+                    if (notify) {
+                        reset_sv();
+                        report_status((uint16_t)notify);
+                    }
+                    if (rc == 2) {
+                        int st;
+                        /* ACKs own session begin/end; vendor engine status remains data. */
+                        if (strncmp(payload, "STATUS ", 7) ||
+                            !gps_wire_parse_status(payload + 7, &st) ||
+                            (st != GPS_STATUS_SESSION_BEGIN && st != GPS_STATUS_SESSION_END))
+                            handle_line(payload);
+                    }
+                    stream.frame.used = 0;
+                    continue;
+                }
                 int deliver;
                 unsigned long epoch;
                 pthread_mutex_lock(&lock);
@@ -445,11 +528,16 @@ disconnected:
 		if (sock == fd) {
 			sock = -1;
 			sock_failed = 0;
+            v2_ready = 0;
 		}
 		close(fd);
 		pthread_mutex_unlock(&lock);
         gps_epoch_reset(&stream, 0);
         reset_sv();
+        if (R800_GPS_IPC_V2 && announced) {
+            announced = 0;
+            if (reader_running()) report_status(GPS_STATUS_SESSION_END);
+        }
 		retry_wait(1);
 	}
     pthread_mutex_lock(&lock);
@@ -458,6 +546,7 @@ disconnected:
         sock = -1;
     }
     sock_failed = 0;
+    v2_ready = 0;
     want_on = 0;
     running = 0;
     reader_id_valid = 0;
@@ -524,7 +613,8 @@ static int gps_start(void)
     if (!want_on) {
         want_on = 1;
         ++session_epoch;
-        send_line("START\n"); /* reader replays wanted state after reconnect */
+        if (!R800_GPS_IPC_V2)
+            send_line("START\n"); /* reader replays wanted state after reconnect */
     }
     pthread_mutex_unlock(&lock);
     return 0;
@@ -536,7 +626,8 @@ static int gps_stop(void)
     if (want_on) {
         want_on = 0;
         ++session_epoch;
-        send_line("STOP\n");
+        if (!R800_GPS_IPC_V2)
+            send_line("STOP\n");
     }
     pthread_mutex_unlock(&lock);
     return 0;
@@ -574,7 +665,7 @@ static int gps_inject_time(GpsUtcTime t, int64_t ref, int unc)
 	if (n <= 0 || n >= (int)sizeof(l))
 		return -EINVAL;
 	pthread_mutex_lock(&lock);
-	int rc = send_line(l);
+	int rc = R800_GPS_IPC_V2 && !v2_ready ? -ENOTCONN : send_line(l);
 	pthread_mutex_unlock(&lock);
 	return rc;
 }
@@ -594,7 +685,7 @@ static int gps_inject_location(double lat, double lon, float acc)
 	if (n <= 0 || n >= (int)sizeof(l))
 		return -EINVAL;
 	pthread_mutex_lock(&lock);
-	int rc = send_line(l);
+	int rc = R800_GPS_IPC_V2 && !v2_ready ? -ENOTCONN : send_line(l);
 	pthread_mutex_unlock(&lock);
 	return rc;
 }
