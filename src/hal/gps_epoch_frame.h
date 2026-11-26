@@ -8,7 +8,7 @@
 struct gps_epoch_frame {
     struct gps_frame frame;
     unsigned long epoch;
-    int dropping;
+    unsigned int dropping;
 };
 
 static inline void gps_epoch_reset(struct gps_epoch_frame *f, unsigned long epoch)
@@ -22,13 +22,15 @@ static inline int gps_epoch_byte(struct gps_epoch_frame *f, unsigned long epoch,
                                  unsigned char byte)
 {
     if (f->epoch != epoch) {
-        if (f->frame.used) f->dropping = 1;
+        if (f->frame.used) f->dropping = f->frame.used;
         f->frame.used = 0;
         f->epoch = epoch;
     }
     if (f->dropping) {
         if (!byte) return -1;
-        if (byte == '\n') f->dropping = 0;
+        if (byte == '\n') { f->dropping = 0; return 0; }
+        if (f->dropping >= GPS_FRAME_CAPACITY - 2) return -1;
+        ++f->dropping;
         return 0;
     }
     return gps_frame_byte(&f->frame, byte);
