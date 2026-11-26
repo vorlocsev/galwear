@@ -40,6 +40,8 @@ on:
       - build/r800_stage_tizen.py
       - build/r800_tizen_gnss_preflight.py
       - build/r800_verify_tizen_stage.py
+      - build/r800_gps_static_readiness.py
+      - tests/test_r800_gps_static_readiness.py
       - build/r800_pack_tizen_stage.py
       - tests/test_r800_tizen_dependencies.py
       - tests/test_r800_tizen_gnss_preflight.py
@@ -117,3 +119,8 @@ jobs:
           for suite in test_r800_tizen_dependencies.py test_r800_tizen_gnss_preflight.py test_r800_verify_tizen_stage.py test_r800_pack_tizen_stage.py; do
             python3 -m unittest discover -s tests -p "$suite" -v || exit 1
           done
+
+      - name: Static GPS readiness evidence contract
+        run: |
+          python3 -m py_compile build/r800_gps_static_readiness.py
+          python3 -m unittest discover -s tests -p test_r800_gps_static_readiness.py -v
