@@ -56,15 +56,37 @@ def guest_path(root: Path, name: str) -> Path:
     return root.joinpath(*parts)
 
 
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
 def read_regular(path: Path, limit: int) -> bytes:
+    """Read bounded bytes from one descriptor; reject leaf swaps and mutations."""
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
         raise ValueError("Expected bounded regular file")
-    with path.open("rb") as stream:
-        data = stream.read(limit + 1)
-    if len(data) != info.st_size or len(data) > limit:
-        raise ValueError("File changed while reading")
-    return data
+    # Do not follow a replaced leaf symlink or block on a swapped FIFO.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        expected = _file_identity(info)
+        if not stat.S_ISREG(opened.st_mode) or _file_identity(opened) != expected:
+            raise ValueError("File changed before reading")
+        data = bytearray()
+        while len(data) <= info.st_size:
+            chunk = os.read(fd, min(1024 * 1024, info.st_size + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if (len(data) != info.st_size
+                or _file_identity(os.fstat(fd)) != expected
+                or _file_identity(path.lstat()) != expected):
+            raise ValueError("File changed while reading")
+        return bytes(data)
+    finally:
+        os.close(fd)
 
 
 def parse_kernel_config(data: bytes) -> dict:
