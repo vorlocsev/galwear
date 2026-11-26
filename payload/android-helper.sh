@@ -270,65 +270,80 @@ if [ -c /dev/bbd_patch ] && [ -x /oem/r800dev/tzchroot.sh ] &&
         [ -e /sys/class/gps/gps/gps_pwr_en ] ||
             "$B" setsid /oem/r800dev/bin/gpiotool hold gpm13 0 1 >> "$SLOG" 2>&1 < /dev/null &
         "$B" sleep 1
-        n=0
-        while [ "$n" -lt 20 ]; do
-            n=$((n+1))
-            k "gnss: stack attempt $n"
-            "$B" chroot /mnt/tz $TZE /usr/bin/lhd /etc/lhd/lhd.conf > /mnt/tz/tmp/lhd.log 2>&1 < /dev/null &
-            lhd_pid=$!
-            lhd_start=$(child_identity "$lhd_pid") || lhd_start=
-            # Process survival is only a startup heuristic, not hardware readiness.
-            "$B" sleep 20
-            if child_alive "$lhd_pid" "$lhd_start"; then
-                if [ ! -x /oem/r800dev/gpsbridge ]; then
-                    wait "$lhd_pid" 2>/dev/null || :
-                    lhd_pid=; lhd_start=
-                else
-                    # Preserve the existing donor ownership recovery behavior.
-                    # Do not start the GNSS engine if it fails.
-                    if ! gnss_ipc_directory /oem/r800dev /mnt/tz/opt/usr/r800dev 0; then
-                        k "gnss: shared IPC directory metadata not confirmed; no GPS workers"
-                    elif "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss; then
-                        "$B" chroot /mnt/tz $TZE /usr/bin/gpsd -c /etc/gps-manager/brcm/gpsd.xml > /dev/null 2>&1 < /dev/null &
-                        gpsd_pid=$!
-                        gpsd_start=$(child_identity "$gpsd_pid") || gpsd_start=
-                        "$B" sleep 5
-                        if child_alive "$lhd_pid" "$lhd_start" && child_alive "$gpsd_pid" "$gpsd_start" &&
-                            gnss_ipc_directory /oem/r800dev /mnt/tz/opt/usr/r800dev 0; then
-                            # Avoid persistent logs containing network location or coordinates.
-                            "$B" chroot /mnt/tz $TZE /opt/usr/r800dev/gpsbridge daemon > /dev/null 2>&1 < /dev/null &
-                            bridge_pid=$!
-                            bridge_start=$(child_identity "$bridge_pid") || bridge_start=
-                            ipc_previous=
-                            while child_alive "$lhd_pid" "$lhd_start" &&
-                                  child_alive "$gpsd_pid" "$gpsd_start" &&
-                                  child_alive "$bridge_pid" "$bridge_start"; do
-                                ipc_state=unconfirmed
-                                if gnss_socket_metadata /oem/r800dev /mnt/tz/opt/usr/r800dev 0; then
-                                    ipc_state=metadata-candidate
-                                fi
-                                if [ "$ipc_state" != "$ipc_previous" ]; then
-                                    k "gnss: ipc=$ipc_state; runtime access not verified"
-                                    ipc_previous=$ipc_state
-                                fi
-                                "$B" sleep 3
-                            done
-                        fi
-                        # Stop GPS workers before the hub. No overlapping restarts.
-                        stop_child "$bridge_pid" "$bridge_start" || exit 1; bridge_pid=; bridge_start=
-                        stop_child "$gpsd_pid" "$gpsd_start" || exit 1; gpsd_pid=; gpsd_start=
-                        "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss ||
-                            k "gnss: donor ownership recovery failed"
+        # Device adapters. Background launch functions exec the foreground worker
+        # in the subshell so the tracked PID is the actual chroot child.
+        gnss_launch_lhd() { exec "$B" chroot /mnt/tz $TZE /usr/bin/lhd /etc/lhd/lhd.conf > /mnt/tz/tmp/lhd.log 2>&1 < /dev/null; }
+        gnss_launch_gpsd() { exec "$B" chroot /mnt/tz $TZE /usr/bin/gpsd -c /etc/gps-manager/brcm/gpsd.xml > /dev/null 2>&1 < /dev/null; }
+        gnss_launch_bridge() { exec "$B" chroot /mnt/tz $TZE /opt/usr/r800dev/gpsbridge daemon > /dev/null 2>&1 < /dev/null; }
+        gnss_bridge_available() { [ -x /oem/r800dev/gpsbridge ]; }
+        gnss_shared_directory() { gnss_ipc_directory /oem/r800dev /mnt/tz/opt/usr/r800dev 0; }
+        gnss_observe_socket() { gnss_socket_metadata /oem/r800dev /mnt/tz/opt/usr/r800dev 0; }
+        gnss_prepare_owner() { "$B" chroot /mnt/tz $TZE chown -R location:location /opt/gnss; }
+        gnss_delay() { "$B" sleep "$1"; }
+        # BEGIN GNSS_RESTART_LOOP
+        gnss_restart_loop() {
+            n=0
+            while [ "$n" -lt "$1" ]; do
+                n=$((n+1))
+                k "gnss: stack attempt $n"
+                gnss_launch_lhd &
+                lhd_pid=$!
+                lhd_start=$(child_identity "$lhd_pid") || lhd_start=
+                # Process survival is only a startup heuristic, not hardware readiness.
+                gnss_delay 20
+                if child_alive "$lhd_pid" "$lhd_start"; then
+                    if ! gnss_bridge_available; then
+                        wait "$lhd_pid" 2>/dev/null || :
+                        lhd_pid=; lhd_start=
                     else
-                        k "gnss: donor ownership preflight failed"
+                        # Preserve the existing donor ownership recovery behavior.
+                        # Do not start the GNSS engine if it fails.
+                        if ! gnss_shared_directory; then
+                            k "gnss: shared IPC directory metadata not confirmed; no GPS workers"
+                        elif gnss_prepare_owner; then
+                            gnss_launch_gpsd &
+                            gpsd_pid=$!
+                            gpsd_start=$(child_identity "$gpsd_pid") || gpsd_start=
+                            gnss_delay 5
+                            if child_alive "$lhd_pid" "$lhd_start" && child_alive "$gpsd_pid" "$gpsd_start" &&
+                                gnss_shared_directory; then
+                                # Avoid persistent logs containing network location or coordinates.
+                                gnss_launch_bridge &
+                                bridge_pid=$!
+                                bridge_start=$(child_identity "$bridge_pid") || bridge_start=
+                                ipc_previous=
+                                while child_alive "$lhd_pid" "$lhd_start" &&
+                                      child_alive "$gpsd_pid" "$gpsd_start" &&
+                                      child_alive "$bridge_pid" "$bridge_start"; do
+                                    ipc_state=unconfirmed
+                                    if gnss_observe_socket; then
+                                        ipc_state=metadata-candidate
+                                    fi
+                                    if [ "$ipc_state" != "$ipc_previous" ]; then
+                                        k "gnss: ipc=$ipc_state; runtime access not verified"
+                                        ipc_previous=$ipc_state
+                                    fi
+                                    gnss_delay 3
+                                done
+                            fi
+                            # Stop GPS workers before the hub. No overlapping restarts.
+                            stop_child "$bridge_pid" "$bridge_start" || exit 1; bridge_pid=; bridge_start=
+                            stop_child "$gpsd_pid" "$gpsd_start" || exit 1; gpsd_pid=; gpsd_start=
+                            gnss_prepare_owner ||
+                                k "gnss: donor ownership recovery failed"
+                        else
+                            k "gnss: donor ownership preflight failed"
+                        fi
                     fi
                 fi
-            fi
-            stop_stack || exit 1
-            k "gnss: stack exited; retry $n/20"
-            "$B" sleep 10
-        done
-        k "gnss: restart budget exhausted"
+                stop_stack || exit 1
+                k "gnss: stack exited; retry $n/$1"
+                [ "$n" -ge "$1" ] || gnss_delay 10
+            done
+            k "gnss: restart budget exhausted"
+        }
+        # END GNSS_RESTART_LOOP
+        gnss_restart_loop 20
     ) &
     # XTRA is disabled by default in GPS bridge. No unauthenticated automatic
     # LTO download; a verified donor file may be supplied separately.
