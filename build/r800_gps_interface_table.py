@@ -17,7 +17,7 @@ DENIED = {7, 8, 9, 35, 36, 37, 0x6000000f, 0x60000010, 0x60000011,
           0x60000012, 0x6fffe000, 0x6fffe001, 0x6fffe003}
 
 
-def parse_elf(raw):
+def parse_elf(raw, *, include_tags=False):
     if len(raw) < 52 or len(raw) > LIMIT or raw[:7] != b"\x7fELF\x01\x01\x01":
         raise ValueError("Expected bounded little-endian ELF32")
     etype, machine, version = struct.unpack_from("<HHI", raw, 16)
@@ -95,7 +95,7 @@ def parse_elf(raw):
             if not any(start <= target and 4 <= ms - (target - start) for start, _, _, ms, _ in loads):
                 raise ValueError("Relocation outside load memory")
             relocations[target] = (typ, sym)
-    return mapping, relocations
+    return (mapping, relocations, tags) if include_tags else (mapping, relocations)
 
 
 def inspect_table(raw, address, layout, mapping, relocations, digest):
