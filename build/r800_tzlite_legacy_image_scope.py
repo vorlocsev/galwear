@@ -157,7 +157,7 @@ def inspect_snapshot(resolver):
             "runtime_verified":False,"safe_to_flash":False}
 
 
-def inspect_image(image,sha,*,audit_plugins=False,extended_manifest=False,review_configs=False,review_nss=False):
+def inspect_image(image,sha,*,audit_plugins=False,extended_manifest=False,review_configs=False,review_nss=False,review_caches=False):
     if not re.fullmatch(r"[0-9a-f]{64}",sha):
         raise ValueError("Expected lowercase image SHA-256")
     tool=shutil.which("debugfs")
@@ -173,7 +173,7 @@ def inspect_image(image,sha,*,audit_plugins=False,extended_manifest=False,review
             raise ValueError("Snapshot digest mismatch")
         resolver=ImageResolver(tool,snapshot,scratch)
         report=inspect_snapshot(resolver)
-        if audit_plugins or extended_manifest or review_nss:
+        if audit_plugins or extended_manifest or review_nss or review_caches:
             from r800_tzlite_extra_plugins import check
             report["extra_plugin_audit"]=check(resolver,report)
             if report["extra_plugin_audit"]["problems"]:
@@ -196,6 +196,11 @@ def inspect_image(image,sha,*,audit_plugins=False,extended_manifest=False,review
             from r800_tzlite_nss_review import check as check_nss
             report["nss_review"]=check_nss(resolver,report["extra_config_review"],report["extra_plugin_audit"])
             report["nss_review_sha256"]=digest(report["nss_review"])
+        if review_caches:
+            from r800_tzlite_cache_review import check as check_caches
+            from r800_tzlite_metadata_plan import digest
+            report["cache_review"]=check_caches(resolver,report,report["extra_plugin_audit"])
+            report["cache_review_sha256"]=digest(report["cache_review"])
         st=image.lstat()
         if (st.st_dev,st.st_ino,st.st_mode,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=identity:
             raise ValueError("Donor image changed")
@@ -212,11 +217,12 @@ def main():
     p.add_argument("--extended-manifest",action="store_true")
     p.add_argument("--review-configs",action="store_true")
     p.add_argument("--review-nss",action="store_true")
+    p.add_argument("--review-caches",action="store_true")
     a=p.parse_args()
     try:
         report=inspect_image(a.image,a.sha256,audit_plugins=a.audit_plugins,
                              extended_manifest=a.extended_manifest,review_configs=a.review_configs,
-                             review_nss=a.review_nss)
+                             review_nss=a.review_nss,review_caches=a.review_caches)
     except (OSError,ValueError,subprocess.SubprocessError,RecursionError) as exc:
         report={"schema":"r800-tzlite-legacy-image-scope-v1","status":"LEGACY_SCOPE_REVIEW_REQUIRED",
                 "problems":[str(exc)],"safe_to_flash":False}

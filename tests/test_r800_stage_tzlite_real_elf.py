@@ -405,6 +405,20 @@ class RealStageTests(unittest.TestCase):
         self.assertIn("NSS_EXPORT_REVIEW:_nss_files_getpwnam_r",result["providers"]["files"]["problems"])
         self.assertFalse(result["safe_to_flash"])
 
+    def test_cache_review_real_image(self):
+        from test_r800_tzlite_cache_review import new_cache, gconv_cache
+        (self.root/"etc/ld.so.cache").write_bytes(new_cache())
+        cache=self.root/"usr/lib/gconv/gconv-modules.cache"
+        cache.parent.mkdir()
+        cache.write_bytes(gconv_cache())
+        image,sha=self.image_fixture()
+        result=inspect_image(image,sha,review_caches=True)["cache_review"]
+        self.assertEqual(result["files"]["/etc/ld.so.cache"]["records"][0]["status"],
+                         "AUDITED_PATH_CANDIDATE")
+        self.assertEqual(result["files"]["/usr/lib/gconv/gconv-modules.cache"]["outside_audited_subset_count"],1)
+        self.assertFalse(result["cache_installation_authorized"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
     def test_extended_stage_wrong_review(self):
         image,sha=self.image_fixture()
         with self.assertRaisesRegex(ValueError,"review manifest SHA-256"):
