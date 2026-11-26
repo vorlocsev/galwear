@@ -47,3 +47,45 @@ class FlowTests(unittest.TestCase):
     def test_movt_without_movw(self):
         r = run([0xe3400000, 0xe08f1000, 0xe12fff1e])
         self.assertEqual(r['events'], [])
+
+
+class ThumbFlowTests(unittest.TestCase):
+    def run_flow(self, halfwords):
+        raw = bytearray(pic_image(0x2100))
+        struct.pack_into('<' + 'H'*len(halfwords), raw, 0x100, *halfwords)
+        return audit(bytes(raw), [('factory', 'thumb', 0x1100, 2*len(halfwords))])['code_ranges'][0]['pic_flow']
+
+    def test_nonadjacent_alias(self):
+        # ADD at 0x110c, PC 0x1110, delta 0xff0.
+        r = self.run_flow([0xf640, 0x70f0, 0xbf00, 0xf2c0, 0, 0x4601, 0x4479, 0x4770])
+        self.assertEqual(r['events'], [{'address': 0x110c, 'register': 'r1', 'table_va': 0x2100, 'kind': 'COMPUTED_TABLE_ADDRESS'}])
+
+    def test_branch_join(self):
+        for fallthrough, expected in ((0xbf00, 1), (0x4610, 0)):
+            r = self.run_flow([0xf640, 0x70f0, 0xf2c0, 0, 0xd000, fallthrough, 0x4478, 0x4770])
+            self.assertEqual(len(r['events']), expected)
+
+    def test_unreachable_skipped(self):
+        r = self.run_flow([0xf640, 0x70f0, 0xf2c0, 0, 0xe000, 0xbe00, 0x4478, 0x4770])
+        self.assertEqual(len(r['events']), 1)
+        self.assertEqual(r['reached_instructions'], 5)
+
+    def test_invalid_branch_and_it(self):
+        for words in ([0xe7fe], [0xe000, 0xf240, 0, 0x4770], [0xbf08, 0x4770], [0xf000, 0xf800]):
+            r = self.run_flow(words)
+            self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+            self.assertEqual(r['events'], [])
+
+    def test_load_alias(self):
+        # PC at ADD is 0x110c; delta 0x74 -> 0x1180.
+        r = self.run_flow([0xf240, 0x0074, 0xf2c0, 0, 0x4478, 0x4602, 0xf8d2, 0x1000, 0x4770])
+        self.assertEqual(r['events'], [{'address': 0x110c, 'register': 'r1', 'slot_va': 0x1180, 'table_va': 0x2100, 'kind': 'RELOCATED_TABLE_LOAD'}])
+
+    def test_unsupported_after_evidence(self):
+        r = self.run_flow([0xf640, 0x70f4, 0xf2c0, 0, 0x4478, 0xbe00])
+        self.assertEqual(r['events'], [])
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+
+    def test_missing_movw(self):
+        r = self.run_flow([0xf2c0, 0, 0x4478, 0x4770])
+        self.assertEqual(r['events'], [])
