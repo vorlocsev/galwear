@@ -66,6 +66,8 @@ def stage(root, output, targets=TARGETS):
                   "ownership_preserved":False,"runtime_verified":False,
                   "safe_to_flash":False}
         (tree/"tizen-elf-evidence.json").write_text(json.dumps(result,indent=2,sort_keys=True))
+        from r800_verify_tizen_stage import verify
+        verify(tree, expected=result)
         os.rename(tree,output)
     return result
 
