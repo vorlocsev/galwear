@@ -40,11 +40,11 @@ def transfer(address, instruction, state):
     return (regs, sp, {k: v for k, v in slots.items() if v is not None}), trace["events"]
 
 
-def audit(raw, function, isa):
-    graph = cfg_audit(raw, function, isa)
+def solve(raw, function, isa, *, initial=None, resume_direct_calls=False):
+    graph = cfg_audit(raw, function, isa, resume_direct_calls=resume_direct_calls)
     entry, instructions = parse(raw, function)
     nodes = {n["address"]: n for n in graph["nodes"]}
-    incoming = {entry: ({"r0": ("argument", 0, None)}, 0, {})}
+    incoming = {entry: ({"r0": ("argument", 0, None)}, 0, {}) if initial is None else initial}
     pending = deque([entry])
     queued = {entry}
     steps = 0
@@ -56,6 +56,8 @@ def audit(raw, function, isa):
             raise ValueError("Dataflow iteration budget exceeded")
         outgoing, _ = transfer(address, instructions[address], incoming[address])
         for edge in nodes[address]["edges"]:
+            if edge["kind"] == "assumed_call_return":
+                outgoing = after_aapcs_call(incoming[address])
             dest = edge["target"]
             new = merge(incoming[dest], outgoing) if dest in incoming else outgoing
             if dest not in incoming or incoming[dest] != new:
@@ -80,7 +82,19 @@ def audit(raw, function, isa):
                 for a in sorted(incoming) if nodes[a]["boundaries"]],
             "disassembly_origin_verified": False, "control_flow_verified": False,
             "register_provenance_verified": False, "callback_layout_verified": False,
-            "selected_abi": None, "runtime_verified": False, "safe_to_flash": False}
+            "selected_abi": None, "runtime_verified": False, "safe_to_flash": False}, incoming
+
+
+def after_aapcs_call(state):
+    if state is None:
+        return None
+    # r9 is platform-specific. Memory may be modified by the callee.
+    preserved = {"r4", "r5", "r6", "r7", "r8", "r10", "r11"}
+    return ({k: v for k, v in state[0].items() if k in preserved}, state[1], {})
+
+
+def audit(raw, function, isa):
+    return solve(raw, function, isa)[0]
 
 
 def main():
