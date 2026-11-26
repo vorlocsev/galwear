@@ -167,6 +167,36 @@ int main(void)
     fd=connect_peer(ls);
     expect_line(fd,"START\n");
     assert(atomic_load(&loc_count)==2);
+
+    /* A complete GSV epoch on the old connection must not survive
+     * reconnection, even when the wanted session is still active. */
+    nmea(fd,"GPGSV,1,1,01,02,45,123,35");
+    transmit(fd,"STATUS 3\n");
+    wait_count(&status_count,5);
+    close(fd);
+    fd=connect_peer(ls);
+    expect_line(fd,"START\n");
+    nmea(fd,"GPRMC,1");
+    wait_count(&sv_count,4);
+    assert(last_sv.num_svs==0);
+
+    /* STOP while connected clears the replay intent. A new idle
+     * connection must accept TIME without a spurious START first. */
+    assert(!iface.stop());
+    expect_line(fd,"STOP\n");
+    close(fd);
+    fd=connect_peer(ls);
+    int rc=-ENOTCONN;
+    for (int i=0;i<500 && rc==-ENOTCONN;++i) {
+        rc=iface.inject_time(123,1,50);
+        if (rc==-ENOTCONN) usleep(10000);
+    }
+    assert(rc==0);
+    expect_line(fd,"TIME 123 1 50\n");
+    assert(!iface.start());
+    expect_line(fd,"START\n");
+    puts("GPS_PEER_ACTIVE_AND_IDLE_RECONNECT=PASS");
+
     iface.cleanup();
     await_readable(fd);
     assert(recv(fd,&ch,1,0)==0);
