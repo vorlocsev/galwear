@@ -138,7 +138,7 @@ class BuildContract(unittest.TestCase):
                      'r800_gps_publish.py', 'r800_gps_provenance.py',
                      'r800_android_linker_audit.py', 'r800_tizen_dependencies.py',
                      'r800_pack_tizen_stage.py', 'r800_verify_tizen_stage.py',
-                     'r800_gps_host_elf.py'):
+                     'r800_gps_host_elf.py', 'r800_gps_host_snapshot.py'):
             shutil.copyfile(SCRIPT.parents[3] / 'build' / name,
                             self.root / 'build' / name)
         (self.root / 'build/r800_gps_link_gate.py').write_text(GATE)
@@ -177,11 +177,12 @@ class BuildContract(unittest.TestCase):
         self.assertFalse(evidence[0]['safe_to_flash'])
         self.assertIsNone(evidence[0]['tizen_archive'])
         self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
-        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-snapshot-v3')
+        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-snapshot-v4')
         self.assertEqual(evidence[0]['inputs']['xtra_abi'], 0)
         host = evidence[0]['inputs']['inputs']['host_elf']
         self.assertEqual(host['status'], 'HOST_REVIEW_REQUIRED')
         self.assertFalse(host['host_isolated'])
+        self.assertIsNone(evidence[0]['inputs']['inputs']['host_snapshot'])
         self.assertEqual(evidence[0]['inputs']['tool_snapshot'],
                          {'clang': 'clang', 'ld.lld': 'lld', 'llvm-readelf': 'readelf'})
         for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h'):
@@ -227,6 +228,14 @@ class BuildContract(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertTrue(self.marker.exists())
                 self.assertFalse(self.out.exists())
+
+    def test_captured_host_mode_rejects_non_elf_tools(self):
+        with mock.patch.dict(os.environ, {'R800_HOST_SNAPSHOT': '1'}):
+            result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Host closure requires review', result.stderr)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
 
     def test_strict_host_audit_rejects_non_elf_tools(self):
         with mock.patch.dict(os.environ, {"R800_REQUIRE_HOST_ELF": "1"}):
