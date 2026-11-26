@@ -46,7 +46,10 @@ VENDOR_NAMES = (
 )
 GPS_GLIBC = {name: paths for name, paths in TIZEN.items() if name.startswith("tizen/")}
 GPS_GLIBC["tizen/ld-linux.so.3"] = ("/lib/ld-2.24.so", "/usr/lib/ld-2.24.so")
-PROFILES = {"tizen": TIZEN, "gps-glibc": GPS_GLIBC,
+# Keep glibc-only probing separate from the vendor GNSS interface.
+GPS_GNSS = dict(GPS_GLIBC)
+GPS_GNSS["tizen/libbrcm.so"] = ("/usr/lib/libbrcm.so",)
+PROFILES = {"tizen": TIZEN, "gps-glibc": GPS_GLIBC, "gps-gnss": GPS_GNSS,
             "vendor": {"vendor/"+n: ("/"+n,) for n in VENDOR_NAMES}}
 
 
