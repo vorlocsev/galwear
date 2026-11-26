@@ -149,5 +149,83 @@ class AcceptanceTests(unittest.TestCase):
         self.assertIsNone(report['experimental_binary_sha256'])
 
 
+class EvidenceMatrixTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name)
+        self.expected = {'native-client-0': ('host', 'PASS'),
+                         'experimental-build': ('donor_build', 'NOT_TESTED')}
+        self.log = self.out / 'native-client-0.log'
+        self.log.write_bytes(b'host result')
+        self.rows = [
+            dict(name='native-client-0', group='host', status='PASS',
+                 exit_code=0, log=self.log.name,
+                 log_sha256=hashlib.sha256(self.log.read_bytes()).hexdigest()),
+            dict(name='experimental-build', group='donor_build', status='NOT_TESTED'),
+        ]
+
+    def errors(self):
+        return acceptance.evidence_errors(self.rows, self.out, self.expected)
+
+    def test_complete_matrix(self):
+        self.assertEqual(self.errors(), [])
+
+    def test_missing_result(self):
+        self.rows.pop()
+        self.assertTrue(any('missing result' in e for e in self.errors()))
+
+    def test_duplicate_result(self):
+        self.rows.append(dict(self.rows[0]))
+        self.assertTrue(any('duplicate result' in e for e in self.errors()))
+
+    def test_wrong_group_or_status(self):
+        for key, value in [('group', 'qemu_synthetic'), ('status', 'NOT_TESTED')]:
+            with self.subTest(key=key):
+                original = self.rows[0][key]
+                self.rows[0][key] = value
+                self.assertTrue(self.errors())
+                self.rows[0][key] = original
+
+    def test_missing_or_changed_log(self):
+        self.log.write_bytes(b'changed')
+        self.assertTrue(any('log digest mismatch' in e for e in self.errors()))
+        self.log.unlink()
+        self.assertTrue(any('missing or invalid log' in e for e in self.errors()))
+
+    def test_log_symlink_rejected(self):
+        target = self.out / 'target'
+        target.write_bytes(self.log.read_bytes())
+        self.log.unlink()
+        self.log.symlink_to(target)
+        self.assertTrue(self.errors())
+
+    def test_pass_requires_zero_exit_and_exact_log_name(self):
+        for key, value in [('exit_code', 1), ('exit_code', False),
+                           ('log', '../outside.log'), ('log_sha256', None)]:
+            with self.subTest(key=key, value=value):
+                original = self.rows[0][key]
+                self.rows[0][key] = value
+                self.assertTrue(self.errors())
+                self.rows[0][key] = original
+
+    def test_requested_matrix(self):
+        host = acceptance.expected_checks()
+        donor = acceptance.expected_checks(donor=True)
+        qemu = acceptance.expected_checks(donor=True, qemu=True)
+        self.assertEqual(len(host), 43)
+        self.assertEqual(len(donor), 45)
+        self.assertEqual(len(qemu), 45)
+        self.assertEqual(host['glibc_qemu'][1], 'NOT_TESTED')
+        self.assertEqual(qemu['glibc_qemu'][1], 'PASS')
+        self.assertEqual(donor['experimental-candidate-integrity'][1], 'PASS')
+
+    def test_candidate_digest_mismatch(self):
+        name = 'experimental-candidate-integrity'
+        rows = [dict(name=name, group='donor_build', status='PASS',
+                     candidate_sha256='wrong')]
+        self.assertTrue(acceptance.evidence_errors(
+            rows, self.out, {name: ('donor_build', 'PASS')}, 'expected'))
+
 if __name__ == '__main__':
     unittest.main()
