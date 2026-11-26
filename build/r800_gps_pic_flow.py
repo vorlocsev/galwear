@@ -544,6 +544,45 @@ def thumb_immediate_alu(state, a, b, width):
     return True
 
 
+def callback_slots(tables):
+    """Only unambiguous relative code-pointer slots of discovered table candidates."""
+    slots, seen = {}, set()
+    for table in tables.values():
+        for entry in table["entries"]:
+            slot = entry["slot_va"]
+            if slot in seen:
+                slots.pop(slot, None)
+                continue
+            seen.add(slot)
+            if entry["status"] == "RELATIVE_EXECUTABLE_CANDIDATE":
+                slots[slot] = {"table_va": table["table_va"], "field": entry["field"],
+                               "target_va": entry["target_va"], "isa": entry["isa"]}
+    return slots
+
+
+def load_fact(state, rd, slot, va, direct, callbacks, events, kind):
+    value = None
+    if state.get("memory_unchanged"):
+        if slot in callbacks and slot not in direct:
+            row = callbacks[slot]
+            value = ("callback", row["target_va"] | int(row["isa"] == "thumb"))
+            events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
+                           "kind": "RELOCATED_CALLBACK_LOAD", **row})
+        elif slot in direct and slot not in callbacks:
+            target = direct[slot]["table_va"]
+            value = ("address", target)
+            events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
+                           "table_va": target, "kind": kind})
+    assign_fact(state, rd, value)
+
+
+def callback_call(state, reg):
+    fact = state.get(reg)
+    if fact and fact[0] == "callback":
+        return fact[1] & ~1, "thumb" if fact[1] & 1 else "arm", "BLX_REG"
+    return None
+
+
 def assumed_call(state, call, va, start, end, mapping, leaf=None):
     target, isa, kind = call
     align = 4 if isa == "arm" else 2
@@ -559,7 +598,7 @@ def assumed_call(state, call, va, start, end, mapping, leaf=None):
         return None
     row = {"address": va, "target_va": target, "target_isa": isa, "instruction": kind,
            "arguments": {"r" + str(r): {"kind": state[r][0], "value": state[r][1]}
-                         for r in range(4) if r in state and state[r][0] in ("constant", "address")},
+                         for r in range(4) if r in state and state[r][0] in ("constant", "address", "callback")},
            "return_assumed": True, "callee_analyzed": False}
     if leaf is not None:
         summary = leaf(target, isa, state)
@@ -576,6 +615,8 @@ def assumed_call(state, call, va, start, end, mapping, leaf=None):
                        memory_preserved_by_model=True,
                        modeled_nested_depth=summary["nested_depth"])
             return row
+    if kind == "BLX_REG":
+        return None  # Indirect calls require an accepted explicit callee summary.
     # Neither arbitrary memory nor the outgoing stack argument area is guaranteed
     # unchanged by an opaque callee. Do not preserve saved LR in memory either.
     for key in list(state):
@@ -680,7 +721,7 @@ class Flow:
                     and not self.back_edges and bool(self.returns)
                     and all(c["callee_analyzed"] for c in self.calls))
         r0 = self.returns[0].get(0) if accepted else None
-        if r0 is not None and (r0[0] not in ("constant", "address") or any(r.get(0) != r0 for r in self.returns)):
+        if r0 is not None and (r0[0] not in ("constant", "address", "callback") or any(r.get(0) != r0 for r in self.returns)):
             r0 = None
         preserved = [reg for reg in (4, 5, 6, 7, 8, 10, 11)
                      if accepted and all(r.get(reg) == ("callee_saved", reg) for r in self.returns)]
@@ -702,9 +743,10 @@ class Flow:
                 "control_flow_verified": False, "safe_to_flash": False}
 
 
-def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None, data_ranges=()):
+def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None, data_ranges=(), callbacks=None):
     if size % 4 or start % 4 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid A32 flow range")
+    callbacks = callbacks or {}
     end = start + size
     nodes = {va for lo, hi in code_spans(start, size, "arm", data_ranges) for va in range(lo, hi, 4)}
     flow = Flow(start, end, nodes, assume_aapcs, initial)
@@ -728,6 +770,8 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
             boundary("relocated_instruction")
             continue
         call = arm_call(word, va) if assume_aapcs else None
+        if callbacks and assume_aapcs and word & 0xfffffff0 == 0xe12fff30 and rm <= 12:
+            call = callback_call(state, rm)
         if call is not None:
             row = assumed_call(state, call, va, start, end, mapping, leaf)
             if row is None:
@@ -804,22 +848,14 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
             if not in_data(slot, data_ranges):
                 boundary("literal_outside_marked_data")
                 continue
-            value = direct[slot]["table_va"] if slot in direct and state.get("memory_unchanged") else None
-            set_reg(rd, ("address", value) if value is not None else None)
-            if value is not None:
-                events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
-                               "table_va": value, "kind": "RELOCATED_LITERAL_LOAD"})
+            load_fact(state, rd, slot, va, direct, callbacks, events, "RELOCATED_LITERAL_LOAD")
         elif word & 0xff700000 == 0xe5100000 and rd <= 12 and rn <= 12:
             prev = state.get(rn)
             slot = None
             if prev and prev[0] == "address":
                 delta = word & 0xfff
                 slot = prev[1] + (delta if word & (1 << 23) else -delta)
-            value = direct[slot]["table_va"] if slot in direct and state.get("memory_unchanged") else None
-            set_reg(rd, ("address", value) if value is not None else None)
-            if value is not None:
-                events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
-                               "table_va": value, "kind": "RELOCATED_TABLE_LOAD"})
+            load_fact(state, rd, slot, va, direct, callbacks, events, "RELOCATED_TABLE_LOAD")
         else:
             boundary("unsupported_instruction")
             continue
@@ -893,10 +929,11 @@ def transfer_it(state, steps, decision=None):
     return {k: v for k, v in lanes[0].items() if lanes[1].get(k) == v}
 
 
-def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None, data_ranges=()):
+def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None, data_ranges=(), callbacks=None):
     """Bounded Thumb flow, with linear instruction-boundary assumptions."""
     if size % 2 or start % 2 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid Thumb flow range")
+    callbacks = callbacks or {}
     end = start + size
     nodes = {}
     for lo, hi in code_spans(start, size, "thumb", data_ranges):
@@ -927,11 +964,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
         def load(rd, rn, delta):
             prev = state.get(rn)
             slot = prev[1] + delta if prev and prev[0] == "address" else None
-            value = direct[slot]["table_va"] if slot in direct and state.get("memory_unchanged") else None
-            set_reg(rd, ("address", value) if value is not None else None)
-            if value is not None:
-                events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
-                               "table_va": value, "kind": "RELOCATED_TABLE_LOAD"})
+            load_fact(state, rd, slot, va, direct, callbacks, events, "RELOCATED_TABLE_LOAD")
         if "sp" not in state:
             boundary("ambiguous_stack_depth")
             continue
@@ -943,6 +976,8 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
             enqueue(target, transfer_it(state, steps, condition_value(state, (a >> 4) & 15)))
             continue
         call = thumb_call(a, b, width, va) if assume_aapcs else None
+        if callbacks and assume_aapcs and width == 2 and a & 0xff87 == 0x4780 and (a >> 3) & 15 <= 12:
+            call = callback_call(state, (a >> 3) & 15)
         if call is not None:
             row = assumed_call(state, call, va, start, end, mapping, leaf)
             if row is None:
@@ -1016,11 +1051,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
             if not in_data(slot, data_ranges):
                 boundary("literal_outside_marked_data")
                 continue
-            value = direct[slot]["table_va"] if slot in direct and state.get("memory_unchanged") else None
-            set_reg(rd, ("address", value) if value is not None else None)
-            if value is not None:
-                events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
-                               "table_va": value, "kind": "RELOCATED_LITERAL_LOAD"})
+            load_fact(state, rd, slot, va, direct, callbacks, events, "RELOCATED_LITERAL_LOAD")
         elif width == 2 and a & 0xf800 == 0x6800:
             load(a & 7, (a >> 3) & 7, 4 * ((a >> 6) & 31))
         elif width == 4 and a & 0xfff0 == 0xf8d0 and a & 15 <= 12 and b >> 12 <= 12:
@@ -1034,7 +1065,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
     return flow.report()
 
 
-def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges, *, max_depth=1, data_by_range=None):
+def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges, *, max_depth=1, data_by_range=None, callbacks=None):
     """Explicit bounded callee ranges, no inferred entry points or recursion."""
     if type(max_depth) is not int or not 1 <= max_depth <= 4:
         raise ValueError("Callee depth must be between 1 and 4")
@@ -1049,7 +1080,7 @@ def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges, *, max_dept
         if entry in path or len(path) >= max_depth:
             return rejected
         initial = {reg: state[reg] for reg in range(4)
-                   if reg in state and state[reg][0] in ("constant", "address")}
+                   if reg in state and state[reg][0] in ("constant", "address", "callback")}
         initial.update({reg: ("callee_saved", reg) for reg in (4, 5, 6, 7, 8, 10, 11)})
         initial["memory_unchanged"] = bool(state.get("memory_unchanged"))
         key = (path, entry, tuple(sorted((r, v) for r, v in initial.items() if type(r) is int)), initial["memory_unchanged"])
@@ -1066,7 +1097,7 @@ def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges, *, max_dept
                 report = (audit if isa == "arm" else audit_thumb)(
                     raw, off, target, size, relocations, tables, direct,
                     initial=initial, assume_aapcs=len(path) + 1 < max_depth,
-                    mapping=mapping, leaf=nested, data_ranges=data_by_range.get(entry, ()))
+                    mapping=mapping, leaf=nested, data_ranges=data_by_range.get(entry, ()), callbacks=callbacks)
             except (ValueError, struct.error):
                 return rejected
             cache[key] = report["leaf_summary"]
