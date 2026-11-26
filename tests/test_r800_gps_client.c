@@ -21,7 +21,7 @@ static void *produce(void *arg)
         char line[32];
         int n = snprintf(line, sizeof(line), "%s %02d\n", p->kind, i);
         assert(n > 0 && n < (int)sizeof(line));
-        gps_client_send(&c, line, n);
+        gps_client_send(&c, gps_client_ticket(&c, 0), line, n);
     }
     return NULL;
 }
@@ -34,6 +34,7 @@ static void concurrent_frames(void)
     char line[32], byte;
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0);
     assert(gps_client_attach(&c, f[0]));
+    assert(gps_client_begin(&c));
     assert(!gps_client_attach(&c, f[1]));
     for (int i = 0; i < 2; ++i)
         assert(pthread_create(&workers[i], NULL, produce, &producers[i]) == 0);
@@ -64,8 +65,9 @@ static void disconnected_peer(void)
     int f[2];
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0);
     assert(gps_client_attach(&c, f[0]));
+    assert(gps_client_begin(&c));
     close(f[1]);
-    gps_client_send(&c, "FIX\n", 4);
+    gps_client_send(&c, gps_client_ticket(&c, 0), "FIX\n", 4);
     assert(!gps_client_matches(&c, f[0]));
     /* The callback must not close the serve loop's descriptor. */
     assert(close(f[0]) == 0);
@@ -79,7 +81,7 @@ static void *send_after_disconnect(void *arg)
     const char *line = arg;
     int r = pthread_barrier_wait(&disconnected);
     assert(r == 0 || r == PTHREAD_BARRIER_SERIAL_THREAD);
-    gps_client_send(&c, line, (int)strlen(line));
+    gps_client_send(&c, gps_client_ticket(&c, 0), line, (int)strlen(line));
     return NULL;
 }
 
@@ -90,6 +92,7 @@ static void concurrent_disconnect(void)
         pthread_t a, b;
         assert(socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0);
         assert(gps_client_attach(&c, f[0]));
+        assert(gps_client_begin(&c));
         assert(pthread_barrier_init(&disconnected, NULL, 3) == 0);
         assert(pthread_create(&a, NULL, send_after_disconnect, "FIX\n") == 0);
         assert(pthread_create(&b, NULL, send_after_disconnect, "NMEA\n") == 0);
@@ -112,8 +115,9 @@ static void saturated_peer(void)
     assert(socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0);
     assert(setsockopt(f[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small)) == 0);
     assert(gps_client_attach(&c, f[0]));
+    assert(gps_client_begin(&c));
     for (int i = 0; i < 2048 && gps_client_matches(&c, f[0]); ++i)
-        gps_client_send(&c, buf, sizeof(buf));
+        gps_client_send(&c, gps_client_ticket(&c, 0), buf, sizeof(buf));
     assert(!gps_client_matches(&c, f[0]));
     assert(close(f[0]) == 0);
     close(f[1]);
@@ -126,18 +130,66 @@ static void detach_and_reconnect(void)
     for (int i = 0; i < 64; ++i) {
         assert(socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0);
         assert(gps_client_attach(&c, f[0]));
+        assert(gps_client_begin(&c));
         gps_client_detach(&c, f[1]);
         assert(gps_client_matches(&c, f[0]));
-        gps_client_send(&c, "FIX\n", 4);
+        gps_client_send(&c, gps_client_ticket(&c, 0), "FIX\n", 4);
         assert(recv(f[1], buf, sizeof(buf), MSG_WAITALL) == 4);
         assert(memcmp(buf, "FIX\n", 4) == 0);
         gps_client_detach(&c, f[0]);
-        gps_client_send(&c, "BAD\n", 4);
+        gps_client_send(&c, gps_client_ticket(&c, 0), "BAD\n", 4);
         assert(recv(f[1], buf, sizeof(buf), MSG_DONTWAIT) == -1);
         assert(errno == EAGAIN || errno == EWOULDBLOCK);
         close(f[0]);
         close(f[1]);
     }
+}
+
+static void expect_silence(int fd)
+{
+    char byte;
+    assert(recv(fd, &byte, 1, MSG_DONTWAIT) == -1);
+    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+}
+
+static void session_boundaries(void)
+{
+    int f[2];
+    char buf[5];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0);
+    assert(gps_client_attach(&c, f[0]));
+    assert(!gps_client_ticket(&c, 0) && !gps_client_ticket(&c, 1));
+    assert(gps_client_begin(&c));
+    gps_client_epoch first = gps_client_ticket(&c, 0);
+    assert(first && !gps_client_begin(&c));
+    gps_client_stopping(&c);
+    assert(!gps_client_ticket(&c, 0));
+    gps_client_epoch stopping = gps_client_ticket(&c, 1);
+    assert(stopping && stopping != first);
+    gps_client_send(&c, first, "OLD\n", 4);
+    expect_silence(f[1]);
+    gps_client_send(&c, stopping, "STOP\n", 5);
+    assert(recv(f[1], buf, 5, MSG_WAITALL) == 5 && !memcmp(buf, "STOP\n", 5));
+    gps_client_end(&c);
+    assert(!gps_client_ticket(&c, 1));
+    gps_client_send(&c, stopping, "BAD\n", 4);
+    expect_silence(f[1]);
+    assert(gps_client_begin(&c));
+    gps_client_epoch second = gps_client_ticket(&c, 0);
+    assert(second && second != first && second != stopping);
+    gps_client_send(&c, first, "OLD\n", 4);
+    gps_client_send(&c, stopping, "BAD\n", 4);
+    expect_silence(f[1]);
+    gps_client_send(&c, second, "FIX\n", 4);
+    assert(recv(f[1], buf, 4, MSG_WAITALL) == 4 && !memcmp(buf, "FIX\n", 4));
+    gps_client_detach(&c, f[0]);
+    /* Attach the very same descriptor to prove the ticket is not an fd. */
+    assert(gps_client_attach(&c, f[0]));
+    assert(gps_client_begin(&c));
+    gps_client_send(&c, second, "OLD\n", 4);
+    expect_silence(f[1]);
+    gps_client_detach(&c, f[0]);
+    close(f[0]); close(f[1]);
 }
 
 int main(void)
@@ -147,5 +199,6 @@ int main(void)
     concurrent_disconnect(); puts("CONCURRENT_DISCONNECT_32=PASS");
     saturated_peer(); puts("SATURATED_PEER=PASS");
     detach_and_reconnect(); puts("RECONNECT_64=PASS");
+    session_boundaries(); puts("SESSION_BOUNDARIES=PASS");
     return 0;
 }
