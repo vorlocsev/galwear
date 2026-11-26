@@ -128,8 +128,8 @@ def checked_range(mapping, index, value, size, info, other, section, kind, versi
             "symbol_version": version, "default_visible_candidate": True, "section_index": section}
 
 
-def factory_range(raw):
-    mapping, _, tags = parse_elf(raw, include_tags=True)
+def factory_range(raw, *, strict_pages=False):
+    mapping, _, tags = parse_elf(raw, include_tags=True, strict_pages=strict_pages)
 
     def one(tag):
         if len(tags.get(tag, [])) != 1:
@@ -303,11 +303,11 @@ def require_mapped_code(row, markers, *, literal_pools=False):
     row["mapping_symbol_coverage"] = "CODE_AND_DATA_METADATA_ONLY" if data else "UNIFORM_ISA_METADATA_ONLY"
 
 
-def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symbols=False, literal_pools=False, callback_calls=False, symbolic=False):
+def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symbols=False, literal_pools=False, callback_calls=False, symbolic=False, strict_pages=False):
     """Find nonpreemptible dynamic function ranges at direct call candidates."""
     from r800_gps_pic_flow import arm_call, thumb_call, code_spans
     from r800_gps_interface_xref import callback_inventory
-    mapping, relocations, tags = parse_elf(raw, include_tags=True)
+    mapping, relocations, tags = parse_elf(raw, include_tags=True, strict_pages=strict_pages)
     from r800_android_linker_audit import inspect
 
     def one(tag):
@@ -388,7 +388,7 @@ def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symb
     selected = {}
     if callback_calls:
         from r800_gps_interface_table import discover
-        tables = {r["table_va"]: r for r in discover(raw, symbolic=symbolic)["candidates"]}
+        tables = {r["table_va"]: r for r in discover(raw, symbolic=symbolic, strict_pages=strict_pages)["candidates"]}
         # Seed potential callback targets at depth one, not a reachability claim.
         for slot, evidence in sorted(callback_inventory(raw, mapping, relocations, tags, tables, symbolic=symbolic).items()):
             entry = (evidence["target_va"], evidence["isa"])
@@ -438,8 +438,8 @@ def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symb
     return list(selected.values())
 
 
-def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False, mapping_symbols=False, literal_pools=False, callback_calls=False, symbolic=False):
-    symbol = factory_range(raw)
+def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False, mapping_symbols=False, literal_pools=False, callback_calls=False, symbolic=False, strict_pages=False):
+    symbol = factory_range(raw, strict_pages=strict_pages)
     if type(callee_depth) is not int or not 1 <= callee_depth <= 4 or (callee_depth != 1 and not auto_callees):
         raise ValueError("Callee depth requires automatic mode and must be between 1 and 4")
     if static_symbols and not auto_callees:
@@ -450,12 +450,12 @@ def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False, mapp
         raise ValueError("Literal pool mode requires mapping symbols")
     if callback_calls and not auto_callees:
         raise ValueError("Callback mode requires automatic callees")
-    callees = automatic_callees(raw, symbol, callee_depth, static_symbols=static_symbols, mapping_symbols=mapping_symbols, literal_pools=literal_pools, callback_calls=callback_calls, symbolic=symbolic) if auto_callees else []
+    callees = automatic_callees(raw, symbol, callee_depth, static_symbols=static_symbols, mapping_symbols=mapping_symbols, literal_pools=literal_pools, callback_calls=callback_calls, symbolic=symbolic, strict_pages=strict_pages) if auto_callees else []
     if callback_calls and not callees:
         raise ValueError("No eligible automatic callee ranges for callback mode")
     report = xref(raw, [("factory", symbol["isa"], symbol["start_va"], symbol["size"])],
                   assume_aapcs=auto_callees, callee_ranges=[(r["isa"], r["start_va"], r["size"]) for r in callees],
-                  callee_depth=callee_depth if callees else 1, callback_calls=callback_calls, symbolic=symbolic,
+                  callee_depth=callee_depth if callees else 1, callback_calls=callback_calls, symbolic=symbolic, strict_pages=strict_pages,
                   data_by_range={(r["start_va"], r["isa"]): r.get("data_ranges", ()) for r in [symbol, *callees]})
     report.update(auto_callee_mode=auto_callees, auto_callee_candidates=callees,
                   requested_callee_depth=callee_depth, static_symbol_mode=static_symbols, mapping_symbol_mode=mapping_symbols, literal_pool_mode=literal_pools, callee_discovery_complete=False)
@@ -476,9 +476,10 @@ def main():
     parser.add_argument("--literal-pools", action="store_true", help="Allow explicitly mapped data islands within code ranges")
     parser.add_argument("--callback-calls", action="store_true", help="Seed bounded symbol ranges from callback slot candidates")
     parser.add_argument("--symbolic", action="store_true", help="Opt in to unversioned SYSV symbolic references")
+    parser.add_argument("--strict-pages", action="store_true", help="Conservative 4 KiB PT_LOAD page review")
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth, static_symbols=args.static_symbols, mapping_symbols=args.mapping_symbols, literal_pools=args.literal_pools, callback_calls=args.callback_calls, symbolic=args.symbolic)
+        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth, static_symbols=args.static_symbols, mapping_symbols=args.mapping_symbols, literal_pools=args.literal_pools, callback_calls=args.callback_calls, symbolic=args.symbolic, strict_pages=args.strict_pages)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc),
                   "selected_abi": None, "safe_to_flash": False}
