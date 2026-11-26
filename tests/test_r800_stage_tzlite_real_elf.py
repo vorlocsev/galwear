@@ -439,6 +439,21 @@ class RealStageTests(unittest.TestCase):
         self.assertIn("GCONV_EXTRA_CHAIN_RUNTIME_UNVERIFIED",review["problems"])
         self.assertFalse(review["cache_installation_authorized"])
 
+    def test_cache_plan_real_image(self):
+        from test_r800_tzlite_cache_review import new_cache, gconv_cache
+        (self.root/"etc/ld.so.cache").write_bytes(new_cache(path=b"/lib/libfixture.so.1"))
+        path=self.root/"usr/lib/gconv/gconv-modules.cache"
+        path.parent.mkdir()
+        path.write_bytes(gconv_cache(chains=True))
+        image,sha=self.image_fixture()
+        result=inspect_image(image,sha,plan_caches=True)
+        plan=result["cache_plan"]
+        self.assertEqual(plan["extended_manifest_sha256"],result["extended_manifest_sha256"])
+        self.assertEqual(plan["loader_candidates"][0]["path"],"/lib/libfixture.so.1")
+        self.assertEqual(len(plan["gconv_missing_paths"]),2)
+        self.assertFalse(plan["cache_generation_authorized"])
+        self.assertFalse(plan["safe_to_flash"])
+
     def test_cache_existing_donor_alias_not_staged(self):
         from test_r800_tzlite_cache_review import new_cache
         (self.root/"etc/ld.so.cache").write_bytes(new_cache(path=b"/usr/lib/libfixture.so.1"))
