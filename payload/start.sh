@@ -32,11 +32,16 @@ if $B grep -q "charging-mode" /proc/cmdline && [ -x $CHG/r800charger ] && [ ! -f
 		[ -e /oem ] || $B ln -s /data /oem
 		$B mkdir -p /dev/block
 		for p in 16 17 18; do [ -e /dev/block/mmcblk0p$p ] || $B ln -s /dev/mmcblk0p$p /dev/block/mmcblk0p$p; done
-		$B sh /data/r800dev/tzchroot.sh 2>&1 | logfile "charger: tzchroot: "
-		( while true; do
-			$B chroot /mnt/tz /usr/bin/lhd /etc/lhd/lhd.conf > /dev/null 2>&1 < /dev/null
-			$B sleep 3
-		done ) &
+		if tz_result=$("$B" timeout 60 "$B" sh /data/r800dev/tzchroot.sh 2>&1); then
+			printf '%s\n' "$tz_result" | logfile "charger: tzchroot: "
+			( while true; do
+				$B chroot /mnt/tz /usr/bin/lhd /etc/lhd/lhd.conf > /dev/null 2>&1 < /dev/null
+				$B sleep 3
+			done ) &
+		else
+			printf '%s\n' "$tz_result" | logfile "charger: tzchroot: "
+			log "charger: sensor chroot blocked; continue charging without lhd"
+		fi
 	fi
 	exec $CHG/r800charger
 fi

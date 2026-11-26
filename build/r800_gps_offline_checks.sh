@@ -28,6 +28,7 @@ python3 build/r800_run_required_suite.py 'test_r800_gnss_startup_metadata.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_supervisor.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_supervisor_failure.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_restart_loop.py'
+python3 build/r800_run_required_suite.py 'test_r800_tzchroot_mounts.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_policy.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_policy_readiness.py'
 python3 build/r800_run_required_suite.py 'test_r800_gps_link_gate.py'
@@ -44,7 +45,7 @@ python3 build/r800_run_required_suite.py 'test_r800_gnss_readiness.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_ci.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_donor_gate.py'
 python3 build/r800_run_required_suite.py 'test_android_linker_audit.py'
-for script in src/tools/gps/build.sh build/r800_gps_glibc_qemu.sh payload/android-helper.sh; do
+for script in src/tools/gps/build.sh build/r800_gps_glibc_qemu.sh payload/android-helper.sh payload/start.sh src/tools/sensors/tzchroot.sh; do
     sh -n "$script"
 done
 arm_compile() {
