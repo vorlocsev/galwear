@@ -148,5 +148,79 @@ class FactoryTests(unittest.TestCase):
             target.audit(version_fixture(duplicate=True))
 
 
+def call_fixture(*, second_thumb=False, first_info=0x12, first_other=2,
+                 second_value=None, second_size=None, relocated=False):
+    raw = bytearray(fixture(size=28))
+    strings = b"\0" + target.FACTORY + b"\0first\0second\0"
+    first_name = len(target.FACTORY) + 2
+    second_name = first_name + 6
+    raw[0x480:0x480 + len(strings)] = strings
+    struct.pack_into("<I", raw, 0x22c, len(strings))
+    struct.pack_into("<7I", raw, 0x440, 1, 4, 1, 0, 0, 0, 0)
+    struct.pack_into("<IIIBBH", raw, 0x4e0, first_name, 0x11c0, 12, first_info, first_other, 1)
+    struct.pack_into("<IIIBBH", raw, 0x4f0, second_name,
+                     (0x11e1 if second_thumb else 0x11e0) if second_value is None else second_value,
+                     (2 if second_thumb else 4) if second_size is None else second_size, 0x02, 0, 1)
+    struct.pack_into("<7I", raw, 0x100, 0xe3000070, 0xe3400000, 0xe08f0000, 0xe92d4010,
+                     0xeb00002a, 0xe5901000, 0xe8bd8010)
+    struct.pack_into("<3I", raw, 0x1c0, 0xe92d4010,
+                     0xfa000005 if second_thumb else 0xeb000005, 0xe8bd8010)
+    if second_thumb:
+        struct.pack_into("<H", raw, 0x1e0, 0x4770)
+    else:
+        struct.pack_into("<I", raw, 0x1e0, 0xe12fff1e)
+    if relocated:
+        struct.pack_into("<I", raw, 0x20c, 32)
+        struct.pack_into("<II", raw, 0x418, 0x1110, 23)
+    return bytes(raw)
+
+
+class AutomaticCalleeTests(unittest.TestCase):
+    def test_opt_in_and_depth(self):
+        raw = call_fixture()
+        self.assertEqual(target.audit(raw)["auto_callee_candidates"], [])
+        shallow = target.audit(raw, auto_callees=True)
+        self.assertEqual([r["symbol_name"] for r in shallow["auto_callee_candidates"]], ["first"])
+        self.assertEqual(shallow["code_ranges"][0]["pic_flow"]["events"], [])
+        deep = target.audit(raw, auto_callees=True, callee_depth=2)
+        self.assertEqual([r["symbol_name"] for r in deep["auto_callee_candidates"]], ["first", "second"])
+        self.assertEqual(deep["code_ranges"][0]["pic_flow"]["events"][0]["table_va"], 0x2100)
+        self.assertFalse(deep["safe_to_flash"])
+
+    def test_interworking(self):
+        report = target.audit(call_fixture(second_thumb=True), auto_callees=True, callee_depth=2)
+        self.assertEqual(report["auto_callee_candidates"][1]["isa"], "thumb")
+        self.assertEqual(report["code_ranges"][0]["pic_flow"]["events"][0]["table_va"], 0x2100)
+
+    def test_preemptible_and_ifunc_excluded(self):
+        for kwargs in ({"first_other": 0}, {"first_info": 0x1a}):
+            with self.subTest(kwargs=kwargs):
+                report = target.audit(call_fixture(**kwargs), auto_callees=True, callee_depth=2)
+                self.assertEqual(report["auto_callee_candidates"], [])
+                self.assertEqual(report["code_ranges"][0]["pic_flow"]["events"], [])
+
+    def test_overlapping_and_zero_size_alias_excluded(self):
+        for value, size in ((0x11c0, 4), (0x11c4, 0), (0x11bc, 8)):
+            with self.subTest(value=value, size=size):
+                report = target.audit(call_fixture(second_value=value, second_size=size), auto_callees=True, callee_depth=2)
+                self.assertEqual(report["auto_callee_candidates"], [])
+
+    def test_relocated_call_not_scanned(self):
+        report = target.audit(call_fixture(relocated=True), auto_callees=True, callee_depth=2)
+        self.assertEqual(report["auto_callee_candidates"], [])
+
+    def test_unsupported_hash_and_version_modes(self):
+        for raw in (gnu_fixture(), gnu_fixture(True), version_fixture()):
+            with self.subTest(raw=raw[0x218:0x220]), self.assertRaisesRegex(ValueError, "unversioned SYSV"):
+                target.audit(raw, auto_callees=True)
+
+    def test_depth_validation(self):
+        for depth in (0, 5, True):
+            with self.subTest(depth=depth), self.assertRaises(ValueError):
+                target.audit(call_fixture(), auto_callees=True, callee_depth=depth)
+        with self.assertRaises(ValueError):
+            target.audit(call_fixture(), callee_depth=2)
+
+
 if __name__ == "__main__":
     unittest.main()
