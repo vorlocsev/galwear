@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PY_SUITES = ('mock_transcript', 'mock_peer', 'mock_recovery', 'mock_resources', 'mock_xtra_transcript')
+PY_SUITES = ('acceptance', 'mock_transcript', 'mock_peer', 'mock_recovery', 'mock_resources', 'mock_xtra_transcript')
 C_SUITES = ('client', 'cache', 'cache_read', 'lto_file')
 ARM = ['clang', '--target=armv7a-linux-gnueabi', '-marm', '-mfloat-abi=softfp', '-mfpu=vfpv3-d16',
        '-O2', '--no-default-config', '-nostdinc', '-ffreestanding', '-fno-builtin',
