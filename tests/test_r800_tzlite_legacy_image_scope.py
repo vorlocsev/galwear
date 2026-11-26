@@ -78,6 +78,23 @@ class RealImageScopeTests(unittest.TestCase):
         self.assertFalse(result["safe_to_flash"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 
+    def test_config_review_real_image(self):
+        for name,raw in (("/etc/nsswitch.conf",b"passwd: files\ngroup: files\nhosts: files dns\n"),
+                         ("/etc/hosts",b"192.0.2.1 private-fixture.test\n"),
+                         ("/etc/resolv.conf",b"nameserver 192.0.2.2\n"),
+                         ("/usr/etc/sensor.xml",b"<sensor/>")):
+            (self.root/name.lstrip("/")).write_bytes(raw)
+        image,sha=self.image()
+        result=scope.inspect_image(image,sha,review_configs=True)
+        report=result["extra_config_review"]
+        self.assertEqual(report["problems"],[])
+        self.assertEqual(report["files"]["/etc/hosts"]["sha256"],
+                         result["entries"]["/etc/hosts"]["sha256"])
+        self.assertNotIn("private-fixture.test",str(report))
+        self.assertNotIn("192.0.2.2",str(report))
+        self.assertFalse(report["staging_authorized"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
     def test_wrong_digest(self):
         image,_=self.image()
         with self.assertRaises(ValueError):
