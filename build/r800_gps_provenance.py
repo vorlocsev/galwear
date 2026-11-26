@@ -16,6 +16,20 @@ from r800_android_userspace_preflight import read_regular
 LIMIT = 256 * 1024**2
 HEADERS = ("gps_abi.h", "gps_command.h", "gps_frame.h", "gps_lto.h", "gps_output.h", "gps_client.h", "gps_cache.h", "gps_cache_read.h", "gps_cache_arm_stat.h", "gps_lto_file.h", "gps_xtra.h")
 SOURCES = ("gpsbridge.c", *HEADERS)
+BUILD_MODULES = (
+    "r800_gps_provenance.py",
+    "r800_gps_donor_snapshot.py",
+    "r800_gps_publish.py",
+    "r800_gps_link_gate.py",
+    "r800_android_userspace_preflight.py",
+    "r800_android_linker_audit.py",
+    "r800_tizen_dependencies.py",
+    "r800_pack_tizen_stage.py",
+    "r800_verify_tizen_stage.py",
+    "r800_gps_host_elf.py",
+    "r800_gps_host_snapshot.py",
+    "r800_gps_host_trace.py",
+)
 SOURCE_LIMIT = 4 * 1024**2
 TOOLS = {"clang": "clang", "ld.lld": "lld", "llvm-readelf": "readelf"}
 
@@ -133,12 +147,7 @@ def collect(root, ndk, command):
     }
     for name in HEADERS:
         files[name] = root / "src/tools/gps" / name
-    for name in ("r800_gps_provenance.py", "r800_gps_donor_snapshot.py",
-                 "r800_gps_publish.py", "r800_gps_link_gate.py",
-                 "r800_android_userspace_preflight.py",
-                 "r800_android_linker_audit.py", "r800_tizen_dependencies.py",
-                 "r800_pack_tizen_stage.py", "r800_verify_tizen_stage.py",
-                 "r800_gps_host_elf.py", "r800_gps_host_snapshot.py", "r800_gps_host_trace.py"):
+    for name in BUILD_MODULES:
         files[name] = root / "build" / name
     fingerprints = {key: fingerprint(path) for key, path in files.items()}
     fingerprints["host_elf"] = host_audit({name: tc / name for name in TOOLS})
