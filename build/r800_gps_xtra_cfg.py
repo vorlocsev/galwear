@@ -53,7 +53,7 @@ def parse(raw, function):
     return entry, nodes
 
 
-def audit(raw, function, isa):
+def audit(raw, function, isa, *, resume_direct_calls=False):
     if isa not in ("arm", "thumb"):
         raise ValueError("Explicit ARM or Thumb mode required")
     entry, nodes = parse(raw, function)
@@ -95,6 +95,14 @@ def audit(raw, function, isa):
                 fall()
         elif base == "bx" and operands == "lr":
             boundaries[address] = ["return_candidate"]
+        elif (resume_direct_calls and base == "bl" and TARGET.fullmatch(operands)
+              and int(TARGET.fullmatch(operands)[1], 16) not in nodes):
+            boundaries[address] = ["assumed_aapcs_direct_call"]
+            nxt = ordered[i + 1] if i + 1 < len(ordered) else None
+            if nxt is not None and nxt - address == 4:
+                edge("assumed_call_return", nxt)
+            else:
+                boundaries[address].append("call_return_unresolved")
         elif base in ("bl", "blx", "bx"):
             boundaries[address] = ["call_or_indirect_boundary"]
         elif base in FALLTHROUGH and FIRST_REG.fullmatch(operands):
