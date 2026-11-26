@@ -86,28 +86,75 @@ def parse_gconv(raw):
             if not get(offset) or index>=count:
                 raise ValueError("Invalid gconv hash reference")
     paths=set()
-    builtin=extra_count=0
+    extra_paths=set()
+    builtin=0
+    offsets={}
+    def reference(directory,name,*,required=False):
+        nonlocal builtin
+        d,n=get(directory),get(name)
+        if not d:
+            if n:
+                builtin+=1
+            elif required:
+                raise ValueError("Empty gconv conversion step")
+            return None
+        path=d+n
+        if not d.endswith("/") or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,255}\.so",n) or not valid_path(path):
+            raise ValueError("Unsupported gconv module path")
+        paths.add(path)
+        return path
+
     for i in range(count):
         canon,fd,fn,td,tn,other=struct.unpack_from("<6H",raw,modules+12*i)
         if not get(canon):
             raise ValueError("Empty gconv canonical name")
-        for directory,name in ((fd,fn),(td,tn)):
-            d,n=get(directory),get(name)
-            if not d:
-                if n:
-                    builtin+=1
-                continue
-            path=d+n
-            if not d.endswith("/") or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,255}\.so",n) or not valid_path(path):
-                raise ValueError("Unsupported gconv module path")
-            paths.add(path)
+        reference(fd,fn)
+        reference(td,tn)
         if other:
-            if extra+other-1+2>len(raw):
-                raise ValueError("Invalid gconv extra conversion offset")
-            extra_count+=1
+            start=extra+other-1
+            if start%2 or start+2>len(raw) or start in offsets:
+                raise ValueError("Invalid or duplicate gconv extra conversion offset")
+            offsets[start]=i
+
+    # glibc 2.24 iconvconfig writes contiguous zero-terminated lists,
+    # with one-based byte offsets; outname_offset is a module index.
+    cursor=extra
+    chain_count=step_count=0
+    for start,source in sorted(offsets.items()):
+        if start!=cursor:
+            raise ValueError("Gconv extra list gap or overlap")
+        destinations=set()
+        while True:
+            if cursor+2>len(raw):
+                raise ValueError("Unterminated gconv extra list")
+            steps,=struct.unpack_from("<H",raw,cursor)
+            cursor+=2
+            if not steps:
+                if not destinations:
+                    raise ValueError("Empty gconv extra list")
+                break
+            chain_count+=1
+            step_count+=steps
+            if chain_count>MAX_ROWS or step_count>MAX_ROWS or cursor+6*steps>len(raw):
+                raise ValueError("Gconv extra chain budget or bounds")
+            for _ in range(steps):
+                dest,directory,name=struct.unpack_from("<3H",raw,cursor)
+                cursor+=6
+                if dest>=count:
+                    raise ValueError("Invalid gconv extra module index")
+                path=reference(directory,name,required=True)
+                if path is not None:
+                    extra_paths.add(path)
+            if dest in destinations:
+                raise ValueError("Duplicate gconv extra destination")
+            destinations.add(dest)
+    if cursor!=len(raw):
+        raise ValueError("Unreferenced gconv extra table bytes")
     return {"module_records":count,"hash_slots":slots,"builtin_reference_count":builtin,
-            "extra_chain_reference_count":extra_count,"module_paths":sorted(paths),
-            "extra_chains_parsed":False,"hash_lookup_verified":False}
+            "extra_chain_reference_count":len(offsets),"extra_chain_count":chain_count,
+            "extra_step_count":step_count,"extra_module_paths":sorted(extra_paths),
+            "module_paths":sorted(paths),"extra_chains_parsed":True,
+            "hash_lookup_verified":False}
 
 
 def classify(path,closure):
@@ -167,7 +214,7 @@ def check(resolver,inventory,plugins):
                 if any(r["status"]!="AUDITED_PATH_CANDIDATE" for r in record["records"]):
                     result["problems"].append("CACHE_PATH_REVIEW:"+name)
                 if name==GCONV and record["extra_chain_reference_count"]:
-                    result["problems"].append("GCONV_EXTRA_CHAINS_UNVERIFIED")
+                    result["problems"].append("GCONV_EXTRA_CHAIN_RUNTIME_UNVERIFIED")
             except (ValueError,struct.error):
                 result["problems"].append("CACHE_FORMAT_REVIEW:"+name)
         finally:

@@ -13,7 +13,7 @@ def new_cache(name=b"libfixture.so.1",path=b"/usr/lib/libfixture.so.1"):
         "<iIIIQ",3,72,73+len(name),0,0)+strings
 
 
-def gconv_cache():
+def gconv_cache(*,chains=False):
     strings=bytearray(b"\0")
     def add_string(value):
         offset=len(strings)
@@ -22,14 +22,20 @@ def gconv_cache():
     canon=add_string(b"INTERNAL")
     directory=add_string(b"/usr/lib/gconv/")
     module=add_string(b"UTF-16.so")
+    other_name=add_string(b"EXTRA.so") if chains else 0
+    second=add_string(b"UTF-16//") if chains else 0
     strings=bytes(strings)
     if len(strings)%2:
         strings+=b"\0"
     hashes=16+len(strings)
     modules=hashes+12
-    extra=modules+12
-    return struct.pack("<I5H",0x20010324,16,hashes,3,modules,extra)+b"\0\0"+strings+struct.pack(
+    extra=modules+(24 if chains else 12)
+    raw=struct.pack("<I5H",0x20010324,16,hashes,3,modules,extra)+b"\0\0"+strings+struct.pack(
         "<6H",canon,0,0,0,0,0)+struct.pack("<6H",canon,directory,module,0,0,0)
+    if chains:
+        raw+=struct.pack("<6H",second,0,0,0,0,1)
+        raw+=struct.pack("<5H",1,0,directory,other_name,0)
+    return raw
 
 
 class CacheTests(unittest.TestCase):
@@ -66,6 +72,38 @@ class CacheTests(unittest.TestCase):
         struct.pack_into("<H",raw,hashes+2,9)
         with self.assertRaises(ValueError):
             parse_gconv(raw)
+    def test_gconv_extra_chain(self):
+        report=parse_gconv(gconv_cache(chains=True))
+        self.assertTrue(report["extra_chains_parsed"])
+        self.assertEqual(report["extra_chain_count"],1)
+        self.assertEqual(report["extra_step_count"],1)
+        self.assertEqual(report["extra_module_paths"],["/usr/lib/gconv/EXTRA.so"])
+        self.assertIn("/usr/lib/gconv/EXTRA.so",report["module_paths"])
+        self.assertFalse(report["hash_lookup_verified"])
+    def test_gconv_extra_bad_index(self):
+        raw=bytearray(gconv_cache(chains=True))
+        extra=struct.unpack_from("<H",raw,12)[0]
+        struct.pack_into("<H",raw,extra+2,2)
+        with self.assertRaises(ValueError):
+            parse_gconv(raw)
+    def test_gconv_extra_unterminated(self):
+        with self.assertRaises(ValueError):
+            parse_gconv(gconv_cache(chains=True)[:-2])
+    def test_gconv_extra_bad_offset(self):
+        raw=bytearray(gconv_cache(chains=True))
+        modules=struct.unpack_from("<H",raw,10)[0]
+        struct.pack_into("<H",raw,modules+12+10,3)
+        with self.assertRaises(ValueError):
+            parse_gconv(raw)
+    def test_gconv_extra_budget(self):
+        raw=bytearray(gconv_cache(chains=True))
+        extra=struct.unpack_from("<H",raw,12)[0]
+        struct.pack_into("<H",raw,extra,4097)
+        with self.assertRaises(ValueError):
+            parse_gconv(raw)
+    def test_gconv_unreferenced_tail(self):
+        with self.assertRaises(ValueError):
+            parse_gconv(gconv_cache()+b"\0\0")
     def test_classification(self):
         closure={"aliases":{"/lib/lib.so":"/usr/lib/lib.so"},
                  "files":{"/usr/lib/lib.so":{"sha256":"a"*64}}}

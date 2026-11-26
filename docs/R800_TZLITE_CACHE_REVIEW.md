@@ -46,3 +46,16 @@ Calculate offsets from appended strings, explicitly reject empty
 module name, validate fixture before building ext4 and run cache
 unit tests before real ELF tests. No production parser relaxation.
 Android HAL and synthetic ARM QEMU jobs passed. New CI pending.
+
+## Extra conversion list inventory
+
+Baseline c76c3d81f3126de0f672d41128678ea39a16b43e: 7/7 workflows.
+Host run 45805882534 job 139860878115 confirmed nine parser
+and two real ext4 cache tests. Parse one-based extra list offsets,
+zero-terminated chain records and output module indices per
+ glibc 2.24 iconv/gconv_cache.c and iconv/iconvconfig.c.
+Reject gaps, overlaps, duplicate offsets/destinations, truncation,
+out-of-range module indices and excessive steps. Include extra
+module paths in audited-subset comparison. Hash lookup and
+actual conversions remain unverified. Six new parser cases and
+one real ext4 case pending CI. No cache installation.

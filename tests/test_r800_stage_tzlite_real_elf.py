@@ -424,6 +424,21 @@ class RealStageTests(unittest.TestCase):
         self.assertFalse(result["cache_installation_authorized"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 
+    def test_cache_extra_chain_real_image(self):
+        from test_r800_tzlite_cache_review import new_cache, gconv_cache
+        (self.root/"etc/ld.so.cache").write_bytes(new_cache(path=b"/lib/libfixture.so.1"))
+        path=self.root/"usr/lib/gconv/gconv-modules.cache"
+        path.parent.mkdir()
+        path.write_bytes(gconv_cache(chains=True))
+        image,sha=self.image_fixture()
+        review=inspect_image(image,sha,review_caches=True)["cache_review"]
+        record=review["files"]["/usr/lib/gconv/gconv-modules.cache"]
+        self.assertEqual(record["status"],"STATIC_TABLE_INVENTORY_ONLY",review["problems"])
+        self.assertEqual(record["extra_step_count"],1)
+        self.assertEqual(record["outside_audited_subset_count"],2)
+        self.assertIn("GCONV_EXTRA_CHAIN_RUNTIME_UNVERIFIED",review["problems"])
+        self.assertFalse(review["cache_installation_authorized"])
+
     def test_cache_existing_donor_alias_not_staged(self):
         from test_r800_tzlite_cache_review import new_cache
         (self.root/"etc/ld.so.cache").write_bytes(new_cache(path=b"/usr/lib/libfixture.so.1"))
