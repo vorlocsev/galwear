@@ -184,6 +184,8 @@ def inspect_image(image,sha,*,audit_plugins=False,extended_manifest=False):
             plugin_report=report["extra_plugin_audit"]
             scope={k:v for k,v in report.items() if k!="extra_plugin_audit"}
             report["extended_manifest"]=build(sha,scope,plugin_report)
+            from r800_tzlite_metadata_plan import digest
+            report["extended_manifest_sha256"]=digest(report["extended_manifest"])
         st=image.lstat()
         if (st.st_dev,st.st_ino,st.st_mode,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=identity:
             raise ValueError("Donor image changed")

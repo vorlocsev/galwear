@@ -16,6 +16,7 @@ import r800_stage_tzlite as stage
 import r800_tzlite_manifest as manifest
 from r800_tzlite_image_binding import compare
 from r800_tzlite_legacy_image_scope import inspect_image
+from r800_stage_tzlite_extended import stage as stage_extended
 import r800_gnss_readiness as readiness
 
 PROVIDER="/usr/lib/libfixture-real.so"
@@ -314,6 +315,39 @@ class RealStageTests(unittest.TestCase):
         extra=inspect_image(image,sha,audit_plugins=True)["extra_plugin_audit"]
         self.assertEqual(extra["status"],"NO_ADDITIONAL_ELF_CANDIDATES_REPORTED")
         self.assertFalse(extra["plugin_completeness_verified"])
+
+    def test_extended_stage_subset(self):
+        plugin=self.root/"usr/lib/sensor/extra.so"
+        shutil.copyfile(self.root/audit.PLUGINS[0].lstrip("/"),plugin)
+        (self.root/"etc/info.ini").write_bytes(b"unreviewed")
+        image,sha=self.image_fixture()
+        review=inspect_image(image,sha,extended_manifest=True)
+        report=stage_extended(image,self.output,sha,review["extended_manifest_sha256"])
+        self.assertEqual(report["status"],"EXTENDED_STATIC_CANDIDATE_ONLY")
+        self.assertEqual((self.output/"usr/lib/sensor/extra.so").read_bytes(),plugin.read_bytes())
+        self.assertIn("/etc/info.ini",report["excluded_unreviewed_data"])
+        self.assertFalse((self.output/"etc/info.ini").exists())
+        self.assertFalse(report["safe_to_flash"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+        self.assertEqual(hashlib.sha256((self.output/manifest.MANIFEST).read_bytes()).hexdigest(),
+                         report["stage_manifest_sha256"])
+        with self.assertRaises(ValueError):
+            manifest.verify(self.output,report["stage_manifest_sha256"])
+
+    def test_extended_stage_wrong_review(self):
+        image,sha=self.image_fixture()
+        with self.assertRaisesRegex(ValueError,"review manifest SHA-256"):
+            stage_extended(image,self.output,sha,"0"*64)
+        self.assertFalse(self.output.exists())
+
+    def test_extended_stage_existing_output(self):
+        image,sha=self.image_fixture()
+        self.output.mkdir()
+        marker=self.output/"marker"
+        marker.write_bytes(b"keep")
+        with self.assertRaisesRegex(ValueError,"Output must be new"):
+            stage_extended(image,self.output,sha,"0"*64)
+        self.assertEqual(marker.read_bytes(),b"keep")
 
     def test_image_configuration_changed(self):
         digest=self.candidate_digest()
