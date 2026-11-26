@@ -66,8 +66,11 @@ def capture(root, qemu, bwrap):
     paths = {name: root / "lib" / name for name in DONORS}
     paths.update(probe=root / "probe", plugin=root / "probe_plugin.so",
                  qemu=qemu.resolve(strict=True), bwrap=bwrap.resolve(strict=True))
-    return {name: hashlib.sha256(read_regular(path, 128 * 1024**2)).hexdigest()
-            for name, path in paths.items()}
+    from r800_gps_probe_linked import check, LIMIT
+    result = {name: hashlib.sha256(read_regular(path, 128 * 1024**2)).hexdigest()
+              for name, path in paths.items() if name != "probe"}
+    result["probe"] = check(read_regular(paths["probe"], LIMIT))["sha256"]
+    return result
 
 
 def load_json(path):
