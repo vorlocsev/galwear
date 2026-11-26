@@ -14,7 +14,9 @@ REQUIRED = tuple(PREFIX+x for x in (
     "r800-stage10-provenance.yml","r800-stage12-power.yml","r800-gps-offline.yml"))
 STEPS = {
     "host": ("Record exact source",
-             "Complete GPS offline gate (native and ARM32 compile-only)"),
+             "Complete GPS offline gate (native and ARM32 compile-only)",
+             "Install SELinux policy compiler and SETools",
+             "Audit real compiled synthetic SELinux policy"),
     "android-gps-hal": ("Record exact source","Install pinned Android NDK r27c",
                         "Compile and link Android GPS HAL IPC v1 and v2"),
     "arm-qemu-synthetic": ("Install ARM soft-float compiler and QEMU",

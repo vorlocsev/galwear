@@ -44,6 +44,17 @@ jobs:
           echo 'DONOR_LINK_VERIFIED=false'
           echo 'GNSS_RUNTIME_VERIFIED=false'
           echo 'safe_to_flash=false'
+      - name: Install SELinux policy compiler and SETools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y secilc setools
+          dpkg-query -W secilc setools
+      - name: Audit real compiled synthetic SELinux policy
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_gnss_policy_real_checks.py
   android-gps-hal:
     if: github.repository == 'vorlocsev/galwear'
     runs-on: ubuntu-24.04
