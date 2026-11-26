@@ -10,6 +10,10 @@ on:
       - tests/test_r800_gps_build.py
       - build/r800_gps_link_gate.py
       - build/r800_gps_glibc_qemu.sh
+      - build/r800_gps_mock_qemu.sh
+      - build/r800_gps_mock_transcript.py
+      - tests/r800_mock_gps_hal.c
+      - tests/test_r800_gps_mock_transcript.py
       - build/r800_gps_probe_tls_object.sh
       - build/r800_gps_probe_linked.py
       - build/r800_gps_probe_plugin.py
@@ -214,3 +218,29 @@ jobs:
         run: |
           python3 -m py_compile build/r800_gps_qemu_evidence.py
           python3 -m unittest discover -s tests -p test_r800_gps_qemu_evidence.py -v
+
+      - name: Synthetic GPS HAL ARM32 compile and transcript tests
+        run: |
+          set -eu
+          export LC_ALL=C
+          sh -n build/r800_gps_mock_qemu.sh
+          python3 -m unittest discover -s tests -p test_r800_gps_mock_transcript.py -v
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          for stage in 0 1 2 3 4; do
+            output="$tmp/mock-$stage.so"
+            clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -Wall -Wextra -Werror -fPIC -fvisibility=hidden -shared -nostdlib -fuse-ld=lld -Wl,--hash-style=sysv,-z,noexecstack,-z,now,--no-undefined -DR800_XTRA_ABI=0 -DMOCK_FAIL="$stage" -o "$output" tests/r800_mock_gps_hal.c
+            readelf -h "$output" > "$tmp/header"
+            grep -Eq 'Class:[[:space:]]*ELF32' "$tmp/header"
+            grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$tmp/header"
+            grep -Eq 'Type:[[:space:]]*DYN' "$tmp/header"
+            grep -Eq 'Flags:.*Version5 EABI.*soft-float ABI' "$tmp/header"
+            readelf --dyn-syms -W "$output" > "$tmp/symbols"
+            test "$(awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" {print $8}' "$tmp/symbols")" = gps_get_hardware_interface
+            test -z "$(awk '$7 == "UND" && NF >= 8 {print $8}' "$tmp/symbols")"
+            readelf -d "$output" > "$tmp/dynamic"
+            if grep -Eq '\((NEEDED|RPATH|RUNPATH|RELA|RELR)\)' "$tmp/dynamic"; then exit 1; fi
+          done
+          echo "MOCK_HAL_COMPILE_ONLY=PASS"
+          echo "QEMU_EXECUTED=false"
+          echo "safe_to_flash=false"
