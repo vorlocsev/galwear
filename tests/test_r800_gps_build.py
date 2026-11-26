@@ -19,6 +19,7 @@ READ_ELF = '''#!/usr/bin/env python3
 import sys
 from pathlib import Path
 p = Path(sys.argv[-1])
+assert Path(sys.argv[0]).parent.name == 'tools'
 kind = p.read_text()
 if p.name != 'gpsbridge':
     assert p.parent.name == 'libs', 'readelf must inspect the snapshot'
@@ -37,9 +38,17 @@ assert not any(k in os.environ for k in ('CPATH', 'LIBRARY_PATH', 'CCC_OVERRIDE_
 Path(os.environ['TEST_MARKER']).touch()
 output = Path(sys.argv[sys.argv.index('-o') + 1])
 source = output.parent / 'sources/gpsbridge.c'
+assert Path(sys.argv[0]) == output.parent / 'tools/clang'
+assert '--ld-path=' + str(output.parent / 'tools/ld.lld') in sys.argv
+assert (output.parent / 'tools/ld.lld').stat().st_mode & 0o777 == 0o500
 assert str(source) in sys.argv
 assert source.read_text() == '/* synthetic fixture */'
 assert source.stat().st_mode & 0o777 == 0o400
+if os.environ.get('TEST_MODE') == 'tool-snapshot-mutate':
+    p = output.parent / 'tools/ld.lld'
+    p.chmod(0o600)
+    p.write_text('mutated linker')
+    p.chmod(0o500)
 if os.environ.get('TEST_MODE') == 'snapshot-compiler-mutate':
     p = source.parent / 'gps_abi.h'
     p.chmod(0o600)
@@ -81,6 +90,8 @@ if mode == 'snapshot-extra':
     (binary.parent / 'sources/extra.h').write_text('unexpected')
 if mode == 'header-mutate':
     (out.parent / 'src/tools/gps/gps_abi.h').write_text('changed header')
+if mode == 'tool-snapshot-extra':
+    (binary.parent / 'tools/extra').write_text('unexpected')
 if mode == 'tool-mutate':
     (out.parent / 'ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld').write_text('changed linker')
 if mode == 'mutate':
@@ -165,8 +176,10 @@ class BuildContract(unittest.TestCase):
         self.assertFalse(evidence[0]['safe_to_flash'])
         self.assertIsNone(evidence[0]['tizen_archive'])
         self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
-        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-snapshot-v2')
+        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-snapshot-v3')
         self.assertEqual(evidence[0]['inputs']['xtra_abi'], 0)
+        self.assertEqual(evidence[0]['inputs']['tool_snapshot'],
+                         {'clang': 'clang', 'ld.lld': 'lld', 'llvm-readelf': 'readelf'})
         for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h'):
             self.assertIn(name, evidence[0]['inputs']['inputs'])
 
@@ -201,6 +214,22 @@ class BuildContract(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertTrue(self.marker.exists())
                 self.assertFalse(self.out.exists())
+
+    def test_tool_snapshot_mutations(self):
+        for mode in ('tool-snapshot-mutate', 'tool-snapshot-extra'):
+            with self.subTest(mode=mode):
+                self.marker.unlink(missing_ok=True)
+                result = self.run_build(mode)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(self.marker.exists())
+                self.assertFalse(self.out.exists())
+
+    def test_missing_tool_blocks_compiler(self):
+        (self.ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld').unlink()
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
 
     def test_missing_header_blocks_compiler(self):
         (self.script.parent / 'gps_frame.h').unlink()
@@ -296,6 +325,9 @@ class BuildContract(unittest.TestCase):
     def test_provenance_changes(self):
         for mode in ('source-code-mutate', 'header-mutate', 'tool-mutate'):
             with self.subTest(mode=mode):
+                self.marker.unlink(missing_ok=True)
+                (self.script.parent / 'gpsbridge.c').write_text('/* synthetic fixture */')
+                (self.script.parent / 'gps_abi.h').write_text('/* synthetic header */')
                 self.assertNotEqual(self.run_build(mode).returncode, 0)
                 self.assertTrue(self.marker.exists())
                 self.assertFalse(self.out.exists())
