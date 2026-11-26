@@ -10,6 +10,7 @@ on:
       - tests/test_r800_gps_build.py
       - build/r800_gps_link_gate.py
       - build/r800_gps_glibc_qemu.sh
+      - build/r800_gps_probe_tls_object.sh
       - build/r800_gps_qemu_evidence.py
       - tests/test_r800_gps_qemu_evidence.py
       - tests/r800_glibc_probe.c
@@ -108,6 +109,14 @@ jobs:
             grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$output.header"
             grep -Eq 'Flags:.*Version5 EABI' "$output.header"
           done
+          # Explicit positive/negative TLS ABI checks. Neither object is run.
+          clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -mtp=cp15 -ftls-model=local-exec -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -Wall -Wextra -Werror -c tests/r800_glibc_probe.c -o "$tmp/tls-cp15.o"
+          sh build/r800_gps_probe_tls_object.sh readelf "$tmp/tls-cp15.o"
+          clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -mtp=soft -ftls-model=local-exec -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie -Wall -Wextra -Werror -c tests/r800_glibc_probe.c -o "$tmp/tls-soft.o"
+          if sh build/r800_gps_probe_tls_object.sh readelf "$tmp/tls-soft.o"; then
+            echo "Unexpected acceptance of software thread-pointer helper" >&2
+            exit 1
+          fi
           echo "ARM32_PROBE_COMPILE_ONLY=PASS"
           echo "QEMU_EXECUTED=false"
           echo "safe_to_flash=false"
