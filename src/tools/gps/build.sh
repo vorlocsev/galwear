@@ -39,9 +39,10 @@ set -- "$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-
     -DR800_XTRA_ABI="$XTRA_ABI" --no-default-config -nostdinc -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
     -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
     -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-e,_start \
-    -o "$TMP/gpsbridge" "$S/gpsbridge.c" "$TMP/libs/libc.so.6" "$TMP/libs/libdl.so.2" "$TMP/libs/libpthread.so.0"
+    -o "$TMP/gpsbridge" "$TMP/sources/gpsbridge.c" "$TMP/libs/libc.so.6" "$TMP/libs/libdl.so.2" "$TMP/libs/libpthread.so.0"
 PROVENANCE=$ROOT/build/r800_gps_provenance.py
 python3 "$PROVENANCE" capture "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
+python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
 # Do not inherit common compiler/loader injection variables.
 # The build contract is freestanding and uses only explicit local includes.
 (
