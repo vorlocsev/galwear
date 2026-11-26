@@ -293,5 +293,82 @@ class AutomaticCalleeTests(unittest.TestCase):
             target.audit(call_fixture(), callee_depth=2)
 
 
+def static_fixture(*, thumb=False, alias=False, flags=6, fileoff=0, extent=12, binding=0x02):
+    raw = bytearray(call_fixture(second_thumb=thumb))
+    # First callee absent from dynsym; the second is duplicated in symtab.
+    raw[0x4ec] = 0x10
+    raw.extend(bytes(0x200))
+    struct.pack_into("<I", raw, 32, 0x600)
+    struct.pack_into("<HHH", raw, 46, 40, 4, 0)
+    strings = b"\0first\0second\0alias\0"
+    raw[0x6a0:0x6a0+len(strings)] = strings
+    n = 4 if alias else 3
+    struct.pack_into("<10I", raw, 0x628, 0, 1, flags, 0x1000, fileoff, 0x200, 0, 0, 4, 0)
+    struct.pack_into("<10I", raw, 0x650, 0, 3, 0, 0, 0x6a0, len(strings), 0, 0, 1, 0)
+    struct.pack_into("<10I", raw, 0x678, 0, 2, 0, 0, 0x700, 16*n, 2, n, 4, 16)
+    struct.pack_into("<IIIBBH", raw, 0x710, 1, 0x11c0, extent, binding, 0, 1)
+    struct.pack_into("<IIIBBH", raw, 0x720, 7, 0x11e1 if thumb else 0x11e0, 2 if thumb else 4, 2, 0, 1)
+    if alias:
+        struct.pack_into("<IIIBBH", raw, 0x730, 14, 0x11c4, 4, 2, 0, 1)
+    return bytes(raw)
+
+
+class StaticCalleeTests(unittest.TestCase):
+    def analyze(self, raw):
+        return target.audit(raw, auto_callees=True, callee_depth=2, static_symbols=True)
+
+    def test_internal_callee_and_exact_dynamic_duplicate(self):
+        for thumb in (False, True):
+            with self.subTest(thumb=thumb):
+                raw = static_fixture(thumb=thumb)
+                self.assertEqual(target.audit(raw, auto_callees=True, callee_depth=2)["auto_callee_candidates"], [])
+                report = self.analyze(raw)
+                first, second = report["auto_callee_candidates"]
+                self.assertEqual(first["symbol_source"], "SHT_SYMTAB")
+                self.assertEqual(first["section_index"], 1)
+                self.assertEqual(second["isa"], "thumb" if thumb else "arm")
+                self.assertEqual(report["code_ranges"][0]["pic_flow"]["events"][0]["table_va"], 0x2100)
+                self.assertFalse(report["safe_to_flash"])
+
+    def test_stripped_fallback_and_opt_in(self):
+        report = self.analyze(call_fixture())
+        self.assertEqual(len(report["auto_callee_candidates"]), 2)
+        with self.assertRaises(ValueError):
+            target.audit(static_fixture(), static_symbols=True)
+
+    def test_ambiguous_static_alias(self):
+        self.assertEqual(self.analyze(static_fixture(alias=True))["auto_callee_candidates"], [])
+
+    def test_section_flags_mapping_and_extent(self):
+        for kwargs in ({"flags": 7}, {"flags": 2}, {"fileoff": 4}, {"extent": 0}, {"extent": 0x100}):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(self.analyze(static_fixture(**kwargs))["auto_callee_candidates"], [])
+
+    def test_bad_section_table_and_symbol_table(self):
+        for offset, fmt, value in ((32, "I", 0x7f0), (46, "H", 39), (48, "H", 0),
+                                   (0x690, "I", 4), (0x69c, "I", 8), (0x68c, "I", 0xffff)):
+            with self.subTest(offset=offset):
+                raw = bytearray(static_fixture())
+                struct.pack_into("<" + fmt, raw, offset, value)
+                with self.assertRaises(ValueError):
+                    self.analyze(bytes(raw))
+
+    def test_bad_name_partition_and_section_index(self):
+        for offset, fmt, value in ((0x710, "I", 0xffff), (0x71c, "B", 0x12), (0x71e, "H", 4)):
+            with self.subTest(offset=offset):
+                raw = bytearray(static_fixture())
+                struct.pack_into("<" + fmt, raw, offset, value)
+                with self.assertRaises(ValueError):
+                    self.analyze(bytes(raw))
+
+    def test_static_only_global_function_not_promoted(self):
+        raw = bytearray(static_fixture())
+        # Put both entries in the global partition, with no dynsym duplicate.
+        struct.pack_into("<I", raw, 0x694, 1)
+        raw[0x71c] = 0x12
+        raw[0x72c] = 0x12
+        self.assertEqual(self.analyze(bytes(raw))["auto_callee_candidates"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
