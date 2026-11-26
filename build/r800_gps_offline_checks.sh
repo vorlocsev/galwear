@@ -17,6 +17,10 @@ cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
     -fsanitize=undefined -fno-sanitize-recover=all \
     tests/test_r800_gps_hal_peer.c -o "$TMP/test-hal-peer"
 timeout 45s "$TMP/test-hal-peer"
+cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
+    -fsanitize=undefined -fno-sanitize-recover=all \
+    tests/test_r800_gps_hal_v2.c -o "$TMP/test-hal-v2"
+timeout 45s "$TMP/test-hal-v2"
 python3 build/r800_run_required_suite.py "test_r800_gps_bridge_integration.py"
 python3 build/r800_run_required_suite.py 'test_r800_gnss_registration.py'
 python3 build/r800_run_required_suite.py 'test_r800_gnss_ipc_layout.py'
