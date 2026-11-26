@@ -44,6 +44,35 @@ def parse_acl(raw,mode,*,default=False,kind="regular"):
             "effective_access_verified":False}
 
 
+def parse_disk_acl(raw,mode,*,default=False,kind="regular"):
+    # ext4 disk ACL version 1: base/mask entries are 4 bytes,
+    # named user/group entries 8 bytes. Normalize only in memory.
+    if not 16<=len(raw)<=4+8*MAX_ACL_ENTRIES or struct.unpack_from("<I",raw)[0]!=1:
+        raise ValueError("Invalid ext4 disk ACL version or size")
+    offset=4
+    entries=[]
+    while offset<len(raw):
+        if len(entries)>=MAX_ACL_ENTRIES or len(raw)-offset<4:
+            raise ValueError("Truncated or excessive ext4 disk ACL entries")
+        tag,perm=struct.unpack_from("<HH",raw,offset)
+        offset+=4
+        ident=UNDEFINED
+        if tag in (2,8):
+            if len(raw)-offset<4:
+                raise ValueError("Truncated ext4 disk ACL identity")
+            ident=struct.unpack_from("<I",raw,offset)[0]
+            offset+=4
+        elif tag not in (1,4,16,32):
+            raise ValueError("Unknown ext4 disk ACL tag")
+        entries.append((tag,perm,ident))
+    normalized=struct.pack("<I",2)+b"".join(struct.pack("<HHI",*entry) for entry in entries)
+    result=parse_acl(normalized,mode,default=default,kind=kind)
+    result["format"]="EXT4_DISK_ACL_V1"
+    result["sha256"]=hashlib.sha256(raw).hexdigest()
+    result["disk_bytes"]=len(raw)
+    return result
+
+
 def parse_capability(raw,kind):
     if kind!="regular" or len(raw)<4:
         raise ValueError("Capability attribute requires regular file")

@@ -225,7 +225,12 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual(result["status"],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",result)
         meta=result["original_metadata"]
         attrs=meta["entries"]["/usr/bin/lhd"]["xattr_inventory"]["attributes"]
-        self.assertTrue(attrs["system.posix_acl_access"]["structure"]["mode_consistent"])
+        acl_record=attrs["system.posix_acl_access"]
+        self.assertTrue(acl_record["structure"]["mode_consistent"])
+        self.assertEqual(acl_record["structure"]["format"],"EXT4_DISK_ACL_V1")
+        self.assertEqual(acl_record["reported_bytes"],28)
+        self.assertEqual(acl_record["structure"]["disk_bytes"],28)
+        self.assertEqual(acl_record["structure"]["entry_count"],5)
         self.assertEqual(attrs["security.capability"]["structure"]["permitted_count"],1)
         self.assertNotIn("security.capability",os.listxattr(self.output/"usr/bin/lhd"))
         self.assertFalse(meta["acl_verified"])

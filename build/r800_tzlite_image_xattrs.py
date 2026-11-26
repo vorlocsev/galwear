@@ -2,7 +2,7 @@
 import re
 import stat
 from r800_extract_ext4 import command
-from r800_tzlite_security_xattrs import SELECTED, ACL_NAMES, CAP_NAME, parse_acl, parse_capability
+from r800_tzlite_security_xattrs import SELECTED, ACL_NAMES, CAP_NAME, parse_disk_acl, parse_capability
 
 MAX_LIST=1024*1024
 MAX_ATTRS=128
@@ -62,7 +62,7 @@ def inspect_xattrs(resolver, inode, mode, kind):
             raise ValueError("Unexpected private attribute output")
         try:
             result=command(resolver.tool,resolver.snapshot,
-                           "ea_get -f security-attribute <%d> %s"%(inode,name),
+                           "ea_get -r -f security-attribute <%d> %s"%(inode,name),
                            cwd=resolver.scratch)
             check_diagnostics(result.stderr)
             if result.stdout.strip():
@@ -70,10 +70,10 @@ def inspect_xattrs(resolver, inode, mode, kind):
             st=target.lstat()
             if (not stat.S_ISREG(st.st_mode) or st.st_nlink!=1
                     or st.st_size!=item["reported_bytes"] or st.st_size>MAX_VALUE):
-                raise ValueError("Attribute extraction size mismatch")
+                raise ValueError("Attribute extraction size mismatch:"+name)
             raw=target.read_bytes()
             if name in ACL_NAMES:
-                item["structure"]=parse_acl(raw,mode,default=name==ACL_NAMES[1],kind=kind)
+                item["structure"]=parse_disk_acl(raw,mode,default=name==ACL_NAMES[1],kind=kind)
             elif name==CAP_NAME:
                 item["structure"]=parse_capability(raw,kind)
         finally:

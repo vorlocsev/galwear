@@ -1,11 +1,12 @@
 """Binary ACL and capability structural checks; never apply attributes."""
+import hashlib
 import struct
 from pathlib import Path
 import sys
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
-from r800_tzlite_security_xattrs import parse_acl, parse_capability, UNDEFINED
+from r800_tzlite_security_xattrs import parse_acl, parse_disk_acl, parse_capability, UNDEFINED
 
 
 def acl(entries,version=2):
@@ -48,6 +49,43 @@ class SecurityXattrsTests(unittest.TestCase):
                       acl([NAMED[0],(2,4,UNDEFINED),*NAMED[2:]])):
             with self.subTest(value=value.hex()),self.assertRaises(ValueError):
                 parse_acl(value,0o755)
+
+    def disk_acl(self,entries):
+        return struct.pack("<I",1)+b"".join(
+            struct.pack("<HHI",tag,perm,ident) if tag in (2,8) else struct.pack("<HH",tag,perm)
+            for tag,perm,ident in entries)
+
+    def test_disk_acl_base(self):
+        raw=self.disk_acl(BASE)
+        self.assertEqual(len(raw),16)
+        result=parse_disk_acl(raw,0o755)
+        self.assertTrue(result["mode_consistent"])
+        self.assertEqual(result["format"],"EXT4_DISK_ACL_V1")
+        self.assertEqual(result["sha256"],hashlib.sha256(raw).hexdigest())
+        self.assertEqual(result["disk_bytes"],len(raw))
+
+    def test_disk_acl_named(self):
+        raw=self.disk_acl(NAMED)
+        self.assertEqual(len(raw),36)
+        result=parse_disk_acl(raw,0o755)
+        self.assertTrue(result["mode_consistent"])
+        self.assertEqual(result["named_user_count"],1)
+        self.assertEqual(result["named_group_count"],1)
+        self.assertTrue(result["mask_present"])
+
+    def test_disk_acl_rejects_bad_encoding(self):
+        for raw in (acl(NAMED),self.disk_acl(NAMED)[:-1],
+                    self.disk_acl(NAMED[:2])[:-2],
+                    self.disk_acl([(64,7,UNDEFINED),*BASE]),
+                    self.disk_acl(BASE[::-1]),self.disk_acl([x for x in NAMED if x[0]!=16])):
+            with self.subTest(length=len(raw)),self.assertRaises(ValueError):
+                parse_disk_acl(raw,0o755)
+
+    def test_disk_acl_default(self):
+        raw=self.disk_acl(NAMED)
+        self.assertIsNone(parse_disk_acl(raw,0o700,default=True,kind="directory")["mode_consistent"])
+        with self.assertRaises(ValueError):
+            parse_disk_acl(raw,0o755,default=True)
 
     def test_capability_v1(self):
         r=parse_capability(struct.pack("<III",0x01000001,1,0),"regular")
