@@ -212,7 +212,7 @@ class RealStageTests(unittest.TestCase):
         image,_=self.image_fixture()
         # Synthetic values are written only to this disposable ext4 image.
         undefined=0xffffffff
-        entries=[(1,7,undefined),(2,4,123),(4,4,undefined),
+        entries=[(1,7,undefined),(2,4,5001),(4,4,undefined),
                  (16,5,undefined),(32,5,undefined)]
         acl=struct.pack("<I",2)+b"".join(struct.pack("<HHI",*entry) for entry in entries)
         cap=struct.pack("<IIIII",0x02000001,1,0,0,0)
@@ -231,6 +231,14 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual(acl_record["reported_bytes"],28)
         self.assertEqual(acl_record["structure"]["disk_bytes"],28)
         self.assertEqual(acl_record["structure"]["entry_count"],5)
+        dac=result["dac_candidates"]
+        self.assertEqual(dac["uid_candidate"],5001)
+        self.assertEqual(dac["primary_gid_candidate"],5002)
+        self.assertEqual(acl_record["structure"]["dac_candidate"]["selected_class"],"named_user")
+        self.assertEqual(dac["files"]["/usr/bin/lhd"]["execute"]["status"],"DENIED_CANDIDATE")
+        self.assertEqual(dac["files"]["/usr/bin/lhd"]["execute"]["denied_paths"],["/usr/bin/lhd"])
+        self.assertFalse(dac["process_identity_verified"])
+        self.assertFalse(dac["effective_access_verified"])
         self.assertEqual(attrs["security.capability"]["structure"]["permitted_count"],1)
         self.assertNotIn("security.capability",os.listxattr(self.output/"usr/bin/lhd"))
         self.assertFalse(meta["acl_verified"])

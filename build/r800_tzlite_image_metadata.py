@@ -4,6 +4,7 @@ from pathlib import PurePosixPath
 
 from r800_extract_ext4 import command
 from r800_tzlite_image_xattrs import inspect_xattrs
+from r800_tzlite_dac import inode_candidate
 
 
 def parse_inode(text, inode, kind):
@@ -25,7 +26,7 @@ def parse_inode(text, inode, kind):
     return {"inode":inode,"kind":kind,"uid":uid,"gid":gid,"mode":oct(mode),"links":count}
 
 
-def inspect_metadata(resolver,files):
+def inspect_metadata(resolver,files,identity):
     # Include only audited files, their canonical parents and the symlink
     # components actually encountered by the bounded image resolver.
     wanted=set(files)
@@ -52,7 +53,9 @@ def inspect_metadata(resolver,files):
             try:
                 cache[inode]=parse_inode(response.stdout,inode,kind)
                 cache[inode]["xattr_inventory"]=inspect_xattrs(
-                    resolver,inode,int(cache[inode]["mode"],8),kind)
+                    resolver,inode,int(cache[inode]["mode"],8),kind,
+                    principal=(identity,cache[inode]["uid"],cache[inode]["gid"]))
+                cache[inode]["dac_candidate"]=inode_candidate(cache[inode],identity)
             except ValueError as exc:
                 raise ValueError("Metadata parse failed:"+name+": "+str(exc)) from exc
         rec=cache[inode]

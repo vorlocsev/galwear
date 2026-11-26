@@ -1,6 +1,7 @@
 """Bounded structural interpretation of selected Linux security xattrs."""
 import hashlib
 import struct
+from r800_tzlite_dac import acl_bits
 
 UNDEFINED=0xffffffff
 ACL_NAMES=("system.posix_acl_access","system.posix_acl_default")
@@ -9,7 +10,7 @@ SELECTED=ACL_NAMES+(CAP_NAME,)
 MAX_ACL_ENTRIES=256
 
 
-def parse_acl(raw,mode,*,default=False,kind="regular"):
+def parse_acl(raw,mode,*,default=False,kind="regular",principal=None):
     if default and kind!="directory":
         raise ValueError("Default ACL on non-directory")
     if len(raw)<28 or (len(raw)-4)%8 or (len(raw)-4)//8>MAX_ACL_ENTRIES:
@@ -37,14 +38,19 @@ def parse_acl(raw,mode,*,default=False,kind="regular"):
     group=(groups[16] or groups[4])[0][0]
     other=groups[32][0][0]
     matches=(owner==(mode>>6)&7 and group==(mode>>3)&7 and other==mode&7)
-    return {"format":"POSIX_ACL_XATTR_V2","entry_count":len(entries),
+    result={"format":"POSIX_ACL_XATTR_V2","entry_count":len(entries),
             "named_user_count":len(groups[2]),"named_group_count":len(groups[8]),
             "mask_present":bool(groups[16]),"mode_consistent":None if default else matches,
             "default_acl":default,"sha256":hashlib.sha256(raw).hexdigest(),
             "effective_access_verified":False}
+    if principal is not None and not default:
+        identity,uid,gid=principal
+        bits,selected=acl_bits(groups,identity,uid,gid)
+        result["dac_candidate"]={"permission_bits":bits,"selected_class":selected}
+    return result
 
 
-def parse_disk_acl(raw,mode,*,default=False,kind="regular"):
+def parse_disk_acl(raw,mode,*,default=False,kind="regular",principal=None):
     # ext4 disk ACL version 1: base/mask entries are 4 bytes,
     # named user/group entries 8 bytes. Normalize only in memory.
     if not 16<=len(raw)<=4+8*MAX_ACL_ENTRIES or struct.unpack_from("<I",raw)[0]!=1:
@@ -66,7 +72,7 @@ def parse_disk_acl(raw,mode,*,default=False,kind="regular"):
             raise ValueError("Unknown ext4 disk ACL tag")
         entries.append((tag,perm,ident))
     normalized=struct.pack("<I",2)+b"".join(struct.pack("<HHI",*entry) for entry in entries)
-    result=parse_acl(normalized,mode,default=default,kind=kind)
+    result=parse_acl(normalized,mode,default=default,kind=kind,principal=principal)
     result["format"]="EXT4_DISK_ACL_V1"
     result["sha256"]=hashlib.sha256(raw).hexdigest()
     result["disk_bytes"]=len(raw)

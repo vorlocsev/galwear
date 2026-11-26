@@ -48,7 +48,7 @@ def parse_list(stdout,stderr):
     return {"status":"ATTRIBUTES_REPORTED","attributes":attrs,"absence_verified":False}
 
 
-def inspect_xattrs(resolver, inode, mode, kind):
+def inspect_xattrs(resolver, inode, mode, kind, principal=None):
     if type(inode) is not int or not 1<=inode<2**32:
         raise ValueError("Invalid xattr inode")
     response=command(resolver.tool,resolver.snapshot,"ea_list <%d>"%inode)
@@ -73,7 +73,7 @@ def inspect_xattrs(resolver, inode, mode, kind):
                 raise ValueError("Attribute extraction size mismatch:"+name)
             raw=target.read_bytes()
             if name in ACL_NAMES:
-                item["structure"]=parse_disk_acl(raw,mode,default=name==ACL_NAMES[1],kind=kind)
+                item["structure"]=parse_disk_acl(raw,mode,default=name==ACL_NAMES[1],kind=kind,principal=principal)
             elif name==CAP_NAME:
                 item["structure"]=parse_capability(raw,kind)
         finally:

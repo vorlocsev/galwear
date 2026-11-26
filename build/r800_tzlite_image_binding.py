@@ -15,9 +15,10 @@ from r800_extract_ext4 import command, snapshot_image, image_info
 from r800_gps_image_audit import ImageResolver
 from r800_tizen_dependencies import audit
 from r800_tizen_gnss_preflight import CONFIGS, CONFIG_LIMIT
-from r800_tzlite_audit import TARGETS, check, closure_problems
+from r800_tzlite_audit import TARGETS, PROGRAMS, check, closure_problems
 from r800_tzlite_manifest import verify, inventory
 from r800_tzlite_image_metadata import inspect_metadata
+from r800_tzlite_dac import identity_candidates, summarize
 
 
 def config_hashes(resolver):
@@ -94,7 +95,9 @@ def compare(root,image,image_sha,manifest_sha):
             if (len(raw)!=item["bytes"] or hashlib.sha256(raw).hexdigest()!=item["sha256"]
                     or closure["files"].get(name,{}).get("sha256")!=item["sha256"]):
                 raise ValueError("Extracted ELF changed or not audited:"+name)
-        original_metadata=inspect_metadata(resolver,expected_files)
+        principal=identity_candidates(candidate["configuration_evidence"]["location_account_candidates"])
+        original_metadata=inspect_metadata(resolver,expected_files,principal)
+        dac=summarize(original_metadata["entries"],closure,configs,PROGRAMS,principal)
         st=image.lstat()
         if (st.st_dev,st.st_ino,st.st_mode,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=identity:
             raise ValueError("Donor image changed")
@@ -109,6 +112,7 @@ def compare(root,image,image_sha,manifest_sha):
                 "elf_count":len(closure["files"]),"configuration_count":len(configs),
                 "alias_count":len(expected_aliases),
                 "original_metadata":original_metadata,
+                "dac_candidates":dac,
                 "donor_authenticity_verified":False,"original_ownership_verified":False,
                 "runtime_verified":False,"safe_to_flash":False}
 
