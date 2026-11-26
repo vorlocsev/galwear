@@ -30,12 +30,31 @@ from pathlib import Path
 Path(os.environ['TEST_MARKER']).touch()
 Path(sys.argv[sys.argv.index('-o') + 1]).write_text('bridge')
 '''
-GATE = '''import os, sys
+GATE = '''import hashlib, json, os, sys
 from pathlib import Path
 mode = os.environ['TEST_MODE']
 out = Path(os.environ['TEST_OUT'])
 if mode == 'reject':
     sys.exit(2)
+binary = Path(sys.argv[sys.argv.index('--binary') + 1])
+libs = Path(sys.argv[sys.argv.index('--libdir') + 1])
+report = {'status': 'STATIC_GLIBC_CLOSURE_ONLY', 'static_closure_pass': True,
+          'safe_to_flash': False, 'runtime_verified': False, 'problems': [],
+          'sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+          'donor_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                           for p in libs.iterdir()}}
+if mode == 'wrong-digest':
+    report['sha256'] = '0' * 64
+if mode == 'wrong-donor-digest':
+    report['donor_sha256']['libc.so.6'] = '0' * 64
+if mode == 'bad-scope':
+    report['safe_to_flash'] = True
+if mode == 'binary-mutate':
+    binary.write_bytes(b'changed')
+if mode == 'binary-symlink':
+    binary.unlink()
+    binary.symlink_to(libs / 'libc.so.6')
+print(json.dumps(report))
 if mode == 'mutate':
     (Path(sys.argv[sys.argv.index('--libdir') + 1]) / 'libc.so.6').write_text('changed')
 if mode == 'source-mutate':
@@ -72,7 +91,8 @@ class BuildContract(unittest.TestCase):
             path.write_text(body)
             path.chmod(0o755)
         (self.root / 'build').mkdir()
-        for name in ('r800_gps_donor_snapshot.py', 'r800_android_userspace_preflight.py'):
+        for name in ('r800_gps_donor_snapshot.py', 'r800_android_userspace_preflight.py',
+                     'r800_gps_publish.py'):
             shutil.copyfile(SCRIPT.parents[3] / 'build' / name,
                             self.root / 'build' / name)
         (self.root / 'build/r800_gps_link_gate.py').write_text(GATE)
@@ -155,6 +175,14 @@ class BuildContract(unittest.TestCase):
         self.assertNotEqual(self.run_build('source-replace').returncode, 0)
         self.assertTrue(self.marker.exists())
         self.assertFalse(self.out.exists())
+
+    def test_audit_digest_or_scope_mismatch(self):
+        for mode in ('wrong-digest', 'wrong-donor-digest', 'bad-scope',
+                     'binary-mutate', 'binary-symlink'):
+            with self.subTest(mode=mode):
+                self.assertNotEqual(self.run_build(mode).returncode, 0)
+                self.assertTrue(self.marker.exists())
+                self.assertFalse(self.out.exists())
 
     def test_gate_failure(self):
         self.assertNotEqual(self.run_build('reject').returncode, 0)
