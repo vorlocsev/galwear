@@ -145,7 +145,8 @@ def assumed_call(state, call, va, start, end, mapping, leaf=None):
                 state[0] = summary["r0"]
             row.update(callee_analyzed=True, modeled_return_r0=summary["r0"],
                        modeled_return_count=summary["return_count"],
-                       memory_preserved_by_model=True)
+                       memory_preserved_by_model=True,
+                       modeled_nested_depth=summary["nested_depth"])
             return row
     # Neither arbitrary memory nor the outgoing stack argument area is guaranteed
     # unchanged by an opaque callee. Do not preserve saved LR in memory either.
@@ -220,14 +221,17 @@ class Flow:
         if self.converged and self.end in self.incoming and self.incoming[self.end].get("sp") != 0:
             self.boundaries.append({"address": self.end, "reason": "unbalanced_range_end"})
         accepted = (self.converged and not self.boundaries and self.end not in self.incoming
-                    and not self.back_edges and bool(self.returns) and not self.calls)
+                    and not self.back_edges and bool(self.returns)
+                    and all(c["callee_analyzed"] for c in self.calls))
         r0 = self.returns[0].get(0) if accepted else None
         if r0 is not None and (r0[0] not in ("constant", "address") or any(r.get(0) != r0 for r in self.returns)):
             r0 = None
         preserved = [reg for reg in (4, 5, 6, 7, 8, 10, 11)
                      if accepted and all(r.get(reg) == ("callee_saved", reg) for r in self.returns)]
         return {"leaf_summary": {"accepted": accepted, "r0": r0,
-                                 "preserved_registers": preserved, "return_count": len(self.returns)},
+                                 "preserved_registers": preserved, "return_count": len(self.returns),
+                                 "nested_depth": max((c.get("modeled_nested_depth", 0) + 1
+                                                      for c in self.calls), default=0)},
                 "status": "PARTIAL_FLOW_REVIEW_REQUIRED" if self.boundaries or not self.converged else "CONDITIONAL_FIXED_POINT_FLOW_ONLY",
                 "events": self.events if self.converged and not self.boundaries else [],
                 "boundaries": self.boundaries,
@@ -469,27 +473,40 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
     return flow.report()
 
 
-def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges):
-    """One-level explicit leaf ranges; no inferred entry points or recursive calls."""
+def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges, *, max_depth=1):
+    """Explicit bounded callee ranges, no inferred entry points or recursion."""
+    if type(max_depth) is not int or not 1 <= max_depth <= 4:
+        raise ValueError("Callee depth must be between 1 and 4")
     cache = {}
-    def resolve(target, isa, state):
-        if (target, isa) not in ranges:
-            return None
+    rejected = {"accepted": False}
+
+    def resolve(target, isa, state, path=()):
+        entry = (target, isa)
+        if entry not in ranges:
+            return rejected if path else None
+        if entry in path or len(path) >= max_depth:
+            return rejected
         initial = {reg: state[reg] for reg in range(4)
                    if reg in state and state[reg][0] in ("constant", "address")}
         initial.update({reg: ("callee_saved", reg) for reg in (4, 5, 6, 7, 8, 10, 11)})
         initial["memory_unchanged"] = bool(state.get("memory_unchanged"))
-        key = (target, isa, tuple(sorted((r, v) for r, v in initial.items() if type(r) is int)), initial["memory_unchanged"])
+        key = (path, entry, tuple(sorted((r, v) for r, v in initial.items() if type(r) is int)), initial["memory_unchanged"])
         if key not in cache:
             if len(cache) >= 32:
-                return {"accepted": False}
-            size = ranges[(target, isa)]
-            off, _ = mapping(target, size)
+                return rejected
+            # Reserve the context before descent; nested analysis shares the budget.
+            cache[key] = rejected
+            size = ranges[entry]
             try:
+                off, _ = mapping(target, size)
+                def nested(t, i, st):
+                    return resolve(t, i, st, path + (entry,))
                 report = (audit if isa == "arm" else audit_thumb)(
-                    raw, off, target, size, relocations, tables, direct, initial=initial)
+                    raw, off, target, size, relocations, tables, direct,
+                    initial=initial, assume_aapcs=len(path) + 1 < max_depth,
+                    mapping=mapping, leaf=nested)
             except (ValueError, struct.error):
-                return {"accepted": False}
+                return rejected
             cache[key] = report["leaf_summary"]
         return cache[key]
     return resolve
