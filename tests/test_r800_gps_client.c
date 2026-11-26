@@ -192,6 +192,46 @@ static void session_boundaries(void)
     close(f[0]); close(f[1]);
 }
 
+static pthread_barrier_t epoch_barrier;
+static void epoch_wait(void)
+{
+    int r = pthread_barrier_wait(&epoch_barrier);
+    assert(r == 0 || r == PTHREAD_BARRIER_SERIAL_THREAD);
+}
+
+static void *old_callback(void *arg)
+{
+    (void)arg;
+    gps_client_epoch epoch = gps_client_ticket(&c, 0);
+    assert(epoch);
+    epoch_wait();
+    epoch_wait();
+    gps_client_send(&c, epoch, "OLD\n", 4);
+    return NULL;
+}
+
+static void concurrent_restart(void)
+{
+    for (int i = 0; i < 32; ++i) {
+        int f[2];
+        pthread_t worker;
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0);
+        assert(gps_client_attach(&c, f[0]) && gps_client_begin(&c));
+        assert(pthread_barrier_init(&epoch_barrier, NULL, 2) == 0);
+        assert(pthread_create(&worker, NULL, old_callback, NULL) == 0);
+        epoch_wait();
+        gps_client_stopping(&c);
+        gps_client_end(&c);
+        assert(gps_client_begin(&c));
+        epoch_wait();
+        assert(pthread_join(worker, NULL) == 0);
+        expect_silence(f[1]);
+        assert(pthread_barrier_destroy(&epoch_barrier) == 0);
+        gps_client_detach(&c, f[0]);
+        close(f[0]); close(f[1]);
+    }
+}
+
 int main(void)
 {
     concurrent_frames(); puts("CONCURRENT_FRAMES=PASS");
@@ -200,5 +240,6 @@ int main(void)
     saturated_peer(); puts("SATURATED_PEER=PASS");
     detach_and_reconnect(); puts("RECONNECT_64=PASS");
     session_boundaries(); puts("SESSION_BOUNDARIES=PASS");
+    concurrent_restart(); puts("CONCURRENT_RESTART_32=PASS");
     return 0;
 }
