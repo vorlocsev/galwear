@@ -230,6 +230,22 @@ class BridgeIntegration(unittest.TestCase):
         self.assertEqual(log.read_text().count("MOCK_ASYNC_DATA\n"),2)
         self.assertIsNone(proc.poll())
 
+    def test_seed_age_uses_bounded_unsigned_minutes(self):
+        cwd,proc,log=self.launch("normal")
+        # A synthetic position two minutes old, not a real location history.
+        (cwd/"gps.last").write_text("52 5 "+str(int(time.time()*1000)-125000)+"\n")
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
+            s.settimeout(5); s.connect(str(cwd/"gps.sock"))
+            with s.makefile("rb") as lines:
+                s.sendall(b"START\n")
+                self.assertEqual(lines.readline(),b"STATUS 1\n")
+                self.assertTrue(lines.readline().startswith(b"FIX "))
+                self.assertTrue(lines.readline().startswith(b"NMEA "))
+                s.sendall(b"STOP\n")
+                self.assertEqual(lines.readline(),b"STATUS 2\n")
+        self.assertIn("inject_location (last fix, 2 min old) acc 2000",log.read_text())
+        self.assertIsNone(proc.poll())
+
     def test_existing_file_preserved(self):
         with tempfile.TemporaryDirectory(prefix="r800-gps-existing-") as temp:
             cwd=Path(temp)

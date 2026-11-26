@@ -50,6 +50,11 @@ check_arm() {
 for abi in 0 1 2; do
     arm_compile -DR800_XTRA_ABI="$abi" -c src/tools/gps/gpsbridge.c -o "$TMP/bridge-$abi.o"
     check_arm "$TMP/bridge-$abi.o"
+    readelf -Ws "$TMP/bridge-$abi.o" > "$TMP/bridge-symbols.txt"
+    if grep -Eq 'UND[[:space:]]+__aeabi_(l|ul)divmod([[:space:]]|$)' "$TMP/bridge-symbols.txt"; then
+        echo "unexpected freestanding ARM 64-bit division helper" >&2; exit 1
+    fi
+    echo "ARM32_NO_LONG_DIV_HELPER_$abi=PASS"
     echo "ARM32_GPS_OBJECT_ABI_$abi=PASS"
 done
 arm_compile -c tests/r800_glibc_probe.c -o "$TMP/glibc-probe.o"

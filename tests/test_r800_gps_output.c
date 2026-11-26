@@ -31,6 +31,17 @@ int main(void) {
     char nmea[253]; memset(nmea,'A',sizeof nmea); nmea[0]='$';
     assert(gps_nmea_length(nmea,250)==250);
     assert(gps_nmea_length(nmea,251)==-1);
-    puts("GPS_OUTPUT_TESTS=18 PASS");
+    unsigned int minutes=99, accuracy=99;
+    assert(gps_seed_age(1,1,&minutes,&accuracy) && minutes==0 && accuracy==2000);
+    assert(gps_seed_age(60001,1,&minutes,&accuracy) && minutes==1 && accuracy==2000);
+    assert(gps_seed_age(86400000,1,&minutes,&accuracy) && minutes==1439 && accuracy==2000);
+    assert(gps_seed_age(86400001,1,&minutes,&accuracy) && minutes==1440 && accuracy==25000);
+    assert(gps_seed_age(2147483649LL,1,&minutes,&accuracy) && minutes==35791 && accuracy==25000);
+    assert(gps_seed_age(2592000001LL,1,&minutes,&accuracy) && minutes==43200 && accuracy==25000);
+    assert(!gps_seed_age(2592000002LL,1,&minutes,&accuracy));
+    assert(!gps_seed_age(1,2,&minutes,&accuracy));
+    assert(!gps_seed_age(1,0,&minutes,&accuracy));
+    assert(!gps_seed_age(GPS_UTC_MAX+1,GPS_UTC_MAX,&minutes,&accuracy));
+    puts("GPS_OUTPUT_TESTS=28 PASS");
     return 0;
 }

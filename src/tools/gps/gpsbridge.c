@@ -481,7 +481,8 @@ static void inject_last(void)
 {
 	char b[96];
 	double lat, lon;
-	GpsUtcTime t, age, now;
+	GpsUtcTime t, now;
+	unsigned int minutes, accuracy;
 	float acc;
 	int fd = open(LAST_PATH, O_RDONLY | O_NONBLOCK | O_NOFOLLOW), r, n;
 	if (fd < 0)
@@ -491,14 +492,11 @@ static void inject_last(void)
 	if (n <= 0 || !gps_parse_seed(b, n, &lat, &lon, &t))
 		return;
 	now = clk_ms(0);
-	if (now < t)
+	if ((lat == 0 && lon == 0) || !gps_seed_age(now, t, &minutes, &accuracy))
 		return;
-	age = now - t;
-	if (age > 30LL * 86400000 || (lat == 0 && lon == 0))
-		return;
-	acc = age < 86400000 ? 2000.0f : 25000.0f;
+	acc = (float)accuracy;
 	r = gps->inject_location(lat, lon, acc);
-	printf("inject_location (last fix, %lld min old) acc %.0f -> %d\n", age / 60000,
+	printf("inject_location (last fix, %u min old) acc %.0f -> %d\n", minutes,
 	       (double)acc, r);
 	fflush(0);
 }
