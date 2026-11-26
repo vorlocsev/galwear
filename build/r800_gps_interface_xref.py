@@ -137,9 +137,9 @@ def callback_inventory(raw, mapping, relocations, tags, tables, *, symbolic=Fals
     return slots
 
 
-def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(), callee_depth=1, data_by_range=None, callback_calls=False):
-    discovery = discover(raw, symbolic=symbolic)
-    mapping, relocations, tags = parse_elf(raw, include_tags=True)
+def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(), callee_depth=1, data_by_range=None, callback_calls=False, strict_pages=False):
+    discovery = discover(raw, symbolic=symbolic, strict_pages=strict_pages)
+    mapping, relocations, tags = parse_elf(raw, include_tags=True, strict_pages=strict_pages)
     tables = {r["table_va"]: r for r in discovery["candidates"]}
     relative = {}
     for slot, reloc in relocations.items():
@@ -296,7 +296,7 @@ def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False, callee_ranges=(
             "sha256": discovery["sha256"], "table_candidates": list(tables.values()),
             "relative_data_references": [relative[k] for k in sorted(relative)],
             "symbolic_data_references": [symbolic_refs[k] for k in sorted(symbolic_refs)],
-            "symbolic_mode": symbolic, "got_membership_verified": False,
+            "symbolic_mode": symbolic, "strict_4k_page_review": strict_pages, "got_membership_verified": False,
             "callback_call_mode": callback_calls, "callback_slot_count": len(callbacks),
             "callback_identity_verified": False,
             "symbolic_callback_slot_count": sum("symbolic_evidence" in r for r in callbacks.values()),
@@ -333,9 +333,10 @@ def main():
     parser.add_argument("--callee", action="append", type=parse_callee, default=[])
     parser.add_argument("--callee-depth", type=int, default=1, help="Maximum explicit call depth (1-4)")
     parser.add_argument("--callback-calls", action="store_true", help="Model callback pointers with explicit callee ranges (symbolic with --symbolic)")
+    parser.add_argument("--strict-pages", action="store_true", help="Conservative 4 KiB PT_LOAD page review")
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs, callee_ranges=args.callee, callee_depth=args.callee_depth, callback_calls=args.callback_calls)
+        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs, callee_ranges=args.callee, callee_depth=args.callee_depth, callback_calls=args.callback_calls, strict_pages=args.strict_pages)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
