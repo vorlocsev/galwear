@@ -40,6 +40,14 @@ class Ext4ServiceTests(unittest.TestCase):
         self.assertFalse(result["android_init_started"])
         self.assertFalse(result["stock_policy"])
 
+    def test_missing_or_duplicate_bionic_diagnostics(self):
+        for marker in bionic.markers(PROVIDER):
+            for replacement in (b"", marker+b"\n"+marker):
+                with self.subTest(marker=marker,replacement=replacement):
+                    mutated=LOG.replace(marker,replacement)
+                    with self.assertRaisesRegex(ValueError,"Missing or duplicate Bionic diagnostics"):
+                        a.inspect_console(mutated,D,L)
+
     def test_fixture_not_stock(self):
         with self.assertRaisesRegex(ValueError,"fixture policy"):
             a.inspect_console(LOG.replace(a.START,a.labels.START),D,L)
