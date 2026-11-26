@@ -80,6 +80,8 @@ on:
       - src/tools/gps/gps_frame.h
       - src/tools/gps/gps_lto.h
       - src/tools/gps/gps_lto_file.h
+      - src/tools/gps/gps_xtra.h
+      - tests/test_r800_gps_xtra_submit.c
       - tests/test_r800_gps_lto_file.c
       - src/tools/gps/gps_output.h
       - src/tools/gps/gps_client.h
@@ -282,4 +284,21 @@ jobs:
           timeout 15 "$tmp/gps-cache-read-test"
           cc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -Isrc/tools/gps tests/test_r800_gps_lto_file.c -o "$tmp/gps-lto-file-test"
           timeout 15 "$tmp/gps-lto-file-test"
+          echo "ARM32_RUNTIME_VERIFIED=false"
+
+      - name: Explicit XTRA ABI submission behavior and ARM32 layout
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          for abi in 0 1 2; do
+            cc -O2 -Wall -Wextra -Werror -pthread -DR800_XTRA_ABI="$abi" -Isrc/tools/gps tests/test_r800_gps_xtra_submit.c -o "$tmp/native-$abi"
+            timeout 10 "$tmp/native-$abi"
+            clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -Wall -Wextra -Werror -DR800_XTRA_ABI="$abi" -Isrc/tools/gps -c tests/test_r800_gps_xtra_submit.c -o "$tmp/arm-$abi.o"
+            readelf -h "$tmp/arm-$abi.o" > "$tmp/header"
+            grep -Eq 'Class:[[:space:]]*ELF32' "$tmp/header"
+            grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$tmp/header"
+            echo "XTRA_ABI=$abi HOST_BEHAVIOR_AND_ARM_COMPILE=PASS"
+          done
+          echo "VENDOR_ABI_VERIFIED=false"
           echo "ARM32_RUNTIME_VERIFIED=false"
