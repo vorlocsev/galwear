@@ -666,6 +666,24 @@ class SymbolicCallbackTests(unittest.TestCase):
         self.assertEqual(report["symbolic_callback_slot_count"], 0)
         self.assertEqual(report["code_ranges"][0]["pic_flow"]["assumed_calls"], [])
 
+    def test_explicit_callback_extent_at_same_address(self):
+        from r800_gps_interface_xref import audit
+        for got in (False, True):
+            raw = bytes(self.fixture(got=got))
+            for extent in (4, 8, 12, 16):
+                with self.subTest(got=got, extent=extent):
+                    report = audit(raw, [("factory", "arm", 0x1100, 28)],
+                                   symbolic=True, callback_calls=True, assume_aapcs=True,
+                                   callee_ranges=[("arm", 0x11c0, extent)])
+                    expected = int(extent == 12)
+                    self.assertEqual(report["symbolic_callback_slot_count"], expected)
+                    self.assertEqual(report["function_got_slot_candidate_count"],
+                                     expected if got else 0)
+                    if not expected:
+                        self.assertEqual(report["code_ranges"][0]["pic_flow"]["assumed_calls"], [])
+                    self.assertFalse(report["callback_identity_verified"])
+                    self.assertFalse(report["safe_to_flash"])
+
     def test_symbolic_thumb_callback(self):
         raw = self.fixture(thumb=True)
         struct.pack_into("<I", raw, 0x404, 0x302)
