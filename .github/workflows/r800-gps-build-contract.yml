@@ -11,6 +11,8 @@ on:
       - build/r800_gps_link_gate.py
       - build/r800_gps_glibc_qemu.sh
       - build/r800_gps_probe_tls_object.sh
+      - build/r800_gps_probe_linked.py
+      - tests/r800_probe_linked_regressions.py
       - build/r800_gps_qemu_evidence.py
       - tests/test_r800_gps_qemu_evidence.py
       - tests/r800_glibc_probe.c
@@ -117,6 +119,22 @@ jobs:
             echo "Unexpected acceptance of software thread-pointer helper" >&2
             exit 1
           fi
+          # Synthetic link-only providers: every function traps if executed.
+          for spec in 'libc.so.6 __libc_start_main puts fflush gnu_get_libc_version strcmp' 'libdl.so.2 dlopen dlsym dlclose' 'libpthread.so.0 pthread_create pthread_join'; do
+            set -- $spec
+            name=$1
+            shift
+            : > "$tmp/$name.c"
+            for sym in "$@"; do
+              printf '%s\n' "__attribute__((noreturn)) void $sym(void) { __asm__ volatile(\"udf #0\"); __builtin_unreachable(); }" >> "$tmp/$name.c"
+            done
+            printf 'GLIBC_2.4 { global: %s; local: *; };\n' "$(printf '%s; ' "$@" | sed 's/; $//')" > "$tmp/$name.map"
+            clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -nostdlib -ffreestanding -fno-builtin -fPIC -shared -fuse-ld=lld -Wl,--hash-style=sysv,-soname,"$name",--version-script="$tmp/$name.map" -o "$tmp/$name" "$tmp/$name.c"
+          done
+          clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 --no-default-config -nostdlib -no-pie -fuse-ld=lld -Wl,--hash-style=sysv,-z,noexecstack,-z,now,--no-undefined -Wl,--dynamic-linker=/lib/ld-linux.so.3,-e,_start -o "$tmp/probe" "$tmp/tls-cp15.o" "$tmp/libc.so.6" "$tmp/libdl.so.2" "$tmp/libpthread.so.0"
+          python3 build/r800_gps_probe_linked.py "$tmp/probe"
+          python3 tests/r800_probe_linked_regressions.py "$tmp/probe" -v
+          echo "ARM32_SYNTHETIC_LINK_ONLY=PASS"
           echo "ARM32_PROBE_COMPILE_ONLY=PASS"
           echo "QEMU_EXECUTED=false"
           echo "safe_to_flash=false"
