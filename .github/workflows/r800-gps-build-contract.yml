@@ -12,6 +12,7 @@ on:
       - build/r800_gps_donor_snapshot.py
       - build/r800_gps_publish.py
       - build/r800_gps_provenance.py
+      - build/r800_gps_repeatability.py
       - build/r800_android_linker_audit.py
       - build/r800_tizen_dependencies.py
       - src/tools/gps/gpsbridge.c
@@ -34,12 +35,12 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git log -1 --format='%H'
-          git hash-object build/r800_gps_provenance.py build/r800_gps_publish.py build/r800_gps_donor_snapshot.py src/tools/gps/build.sh tests/test_r800_gps_build.py build/r800_android_userspace_preflight.py tests/test_android_userspace_preflight.py
+          git hash-object build/r800_gps_repeatability.py build/r800_gps_provenance.py build/r800_gps_publish.py build/r800_gps_donor_snapshot.py src/tools/gps/build.sh tests/test_r800_gps_build.py build/r800_android_userspace_preflight.py tests/test_android_userspace_preflight.py
           echo "HOST-ONLY synthetic contract; safe_to_flash=false"
       - name: Shell and Python syntax
         run: |
           sh -n src/tools/gps/build.sh
-          python3 -m py_compile build/r800_gps_provenance.py build/r800_gps_publish.py build/r800_gps_donor_snapshot.py tests/test_r800_gps_build.py build/r800_android_userspace_preflight.py tests/test_android_userspace_preflight.py
+          python3 -m py_compile build/r800_gps_repeatability.py build/r800_gps_provenance.py build/r800_gps_publish.py build/r800_gps_donor_snapshot.py tests/test_r800_gps_build.py build/r800_android_userspace_preflight.py tests/test_android_userspace_preflight.py
       - name: Synthetic builder regression tests
         run: python3 -m unittest discover -s tests -p test_r800_gps_build.py -v
 
