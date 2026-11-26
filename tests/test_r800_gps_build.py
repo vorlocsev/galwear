@@ -150,6 +150,15 @@ class BuildContract(unittest.TestCase):
         self.assertIsNone(evidence[0]['tizen_archive'])
         self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
 
+    def test_invalid_archive_blocks_compiler(self):
+        archive = self.root / "invalid.tar"
+        archive.write_bytes(b"invalid archive")
+        with mock.patch.dict(os.environ, {"R800_TIZEN_ARCHIVE": str(archive)}):
+            result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
+
     def test_repeatability(self):
         env = dict(TEST_MODE='ok', TEST_OUT=str(self.out), TEST_MARKER=str(self.marker))
         with mock.patch.dict(os.environ, env):
