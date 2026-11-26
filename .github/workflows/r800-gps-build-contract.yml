@@ -164,7 +164,8 @@ jobs:
           clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 --no-default-config -nostdlib -no-pie -fuse-ld=lld -Wl,--hash-style=sysv,-z,noexecstack,-z,now,--no-undefined -Wl,--dynamic-linker=/lib/ld-linux.so.3,-e,_start -o "$tmp/probe" "$tmp/tls-cp15.o" "$tmp/libc.so.6" "$tmp/libdl.so.2" "$tmp/libpthread.so.0"
           python3 build/r800_gps_probe_linked.py "$tmp/probe"
           python3 tests/r800_probe_linked_regressions.py "$tmp/probe" -v
-          clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -fPIC -shared -nostdlib -fuse-ld=lld -Wl,--hash-style=sysv,-z,noexecstack,--no-undefined -o "$tmp/probe_plugin.so" tests/r800_glibc_probe_plugin.c
+          clang --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -fPIC -shared -nostdlib -fuse-ld=lld -Wl,--build-id=none,--hash-style=sysv,-z,noexecstack,--no-undefined -o "$tmp/probe_plugin.so" tests/r800_glibc_probe_plugin.c
+          readelf -lW "$tmp/probe_plugin.so"
           python3 build/r800_gps_probe_plugin.py "$tmp/probe_plugin.so"
           python3 tests/r800_probe_plugin_regressions.py "$tmp/probe_plugin.so" -v
           echo "ARM32_SYNTHETIC_LINK_ONLY=PASS"
