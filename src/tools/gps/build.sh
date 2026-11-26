@@ -41,7 +41,7 @@ python3 "$PROVENANCE" capture "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
 python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
 run_tool() {
     if [ "$HOST_MODE" = 1 ]; then
-        "$TMP/host/loader" --inhibit-cache --glibc-hwcaps-mask "" --library-path "$TMP/host/lib" "$@"
+        env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC "$TMP/host/loader" --inhibit-cache --glibc-hwcaps-mask "" --library-path "$TMP/host/lib" "$@"
     else
         "$@"
     fi
