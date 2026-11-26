@@ -190,6 +190,12 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual(differences["mode"],{"original":"0o4755","staged":"0o755"})
         self.assertEqual(differences["uid"]["original"],12345)
         self.assertFalse(comparison["permission_changes_applied"])
+        plan=result["metadata_review_plan"]
+        self.assertEqual(plan["image_sha256"],sha)
+        self.assertEqual(plan["manifest_sha256"],digest)
+        self.assertTrue(any(i["path"]=="/usr/bin/lhd" and i["category"]=="PRIVILEGE_REVIEW"
+                            for i in plan["items"]))
+        self.assertFalse(plan["execution_authorized"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 
     def test_original_xattr_inventory_not_restored(self):
@@ -277,8 +283,10 @@ class RealStageTests(unittest.TestCase):
         digest=self.candidate_digest()
         (self.root/"etc/lhd/lhd.conf").write_bytes(b"different synthetic config\n")
         image,sha=self.image_fixture()
-        self.assertIn("IMAGE_CONFIGURATION_HASH_MISMATCH",
-                      compare(self.output,image,sha,digest)["problems"])
+        result=compare(self.output,image,sha,digest)
+        self.assertIn("IMAGE_CONFIGURATION_HASH_MISMATCH",result["problems"])
+        self.assertEqual(result["metadata_review_plan"]["status"],"BLOCKED_CONTENT_MISMATCH")
+        self.assertEqual(result["metadata_review_plan"]["items"],[])
 
     def test_image_elf_changed(self):
         digest=self.candidate_digest()

@@ -20,6 +20,7 @@ from r800_tzlite_manifest import verify, inventory
 from r800_tzlite_image_metadata import inspect_metadata
 from r800_tzlite_dac import identity_candidates, summarize
 from r800_tzlite_metadata_compare import staged_metadata, compare_access
+from r800_tzlite_metadata_plan import plan
 
 
 def config_hashes(resolver):
@@ -118,6 +119,7 @@ def compare(root,image,image_sha,manifest_sha):
                 "original_metadata":original_metadata,
                 "dac_candidates":dac,
                 "permission_comparison":permission_comparison,
+                "metadata_review_plan":plan(image_sha,manifest_sha,problems,original_metadata,permission_comparison),
                 "donor_authenticity_verified":False,"original_ownership_verified":False,
                 "runtime_verified":False,"safe_to_flash":False}
 
