@@ -116,6 +116,40 @@ def thumb_call(a, b, width, va):
     return base + sign_extend(delta, 25), isa, kind
 
 
+def thumb_branch(a, b, width, va):
+    """Decode only immediate B/B.W, not BL, BLX or reserved conditions."""
+    if width == 2:
+        if a & 0xf000 == 0xd000 and (a >> 8) & 15 < 14:
+            return va + 4 + 2 * sign_extend(a & 255, 8), True
+        if a & 0xf800 == 0xe000:
+            return va + 4 + 2 * sign_extend(a & 2047, 11), False
+        return None
+    if width != 4 or a & 0xf800 != 0xf000:
+        return None
+    kind = b & 0xd000
+    s = (a >> 10) & 1
+    j1, j2 = (b >> 13) & 1, (b >> 11) & 1
+    if kind == 0x8000 and (a >> 6) & 15 < 14:
+        delta = (s << 20) | (j2 << 19) | (j1 << 18) | ((a & 63) << 12) | ((b & 2047) << 1)
+        return va + 4 + sign_extend(delta, 21), True
+    if kind == 0x9000:
+        i1, i2 = 1 ^ (j1 ^ s), 1 ^ (j2 ^ s)
+        delta = (s << 24) | (i1 << 23) | (i2 << 22) | ((a & 1023) << 12) | ((b & 2047) << 1)
+        return va + 4 + sign_extend(delta, 25), False
+    return None
+
+
+def thumb_literal(a, b, width, va):
+    """T16 and T32 word LDR literal to ordinary registers, no PC/SP/LR writes."""
+    base = (va + 4) & ~3
+    if width == 2 and a & 0xf800 == 0x4800:
+        return (a >> 8) & 7, base + 4 * (a & 255)
+    if width == 4 and a & 0xff7f == 0xf85f and b >> 12 <= 12:
+        delta = b & 4095
+        return b >> 12, base + (delta if a & 128 else -delta)
+    return None
+
+
 def assumed_call(state, call, va, start, end, mapping, leaf=None):
     target, isa, kind = call
     align = 4 if isa == "arm" else 2
@@ -446,14 +480,9 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
                 flow.calls.append(row)
                 enqueue(va + width, state)
             continue
-        conditional = width == 2 and a & 0xf000 == 0xd000 and (a >> 8) & 15 < 14
-        unconditional = width == 2 and a & 0xf800 == 0xe000
-        if conditional or unconditional:
-            bits = 8 if conditional else 11
-            delta = a & ((1 << bits) - 1)
-            if delta & (1 << (bits - 1)):
-                delta -= 1 << bits
-            target = va + 4 + 2 * delta
+        branch = thumb_branch(a, b, width, va)
+        if branch is not None:
+            target, conditional = branch
             if target not in nodes:
                 boundary("invalid_branch")
             else:
@@ -501,9 +530,8 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
             if address in tables:
                 events.append({"address": va, "register": "r" + str(rd), "table_va": address,
                                "kind": "COMPUTED_TABLE_ADDRESS"})
-        elif data_ranges and width == 2 and a & 0xf800 == 0x4800:
-            rd = (a >> 8) & 7
-            slot = ((va + 4) & ~3) + 4 * (a & 255)
+        elif data_ranges and thumb_literal(a, b, width, va) is not None:
+            rd, slot = thumb_literal(a, b, width, va)
             if not in_data(slot, data_ranges):
                 boundary("literal_outside_marked_data")
                 continue
