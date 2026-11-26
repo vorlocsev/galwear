@@ -20,7 +20,8 @@ def check(raw):
     require((typ, machine, version, entry, ehsize, phsize) == (3, 40, 1, 0, 52, 32) and flags & 0xff000400 == 0x05000000, "Expected ARM EABI5 ET_DYN with no entry")
     require(52 <= phoff and 1 <= phnum <= 64 and phoff+phnum*32 <= len(raw), "Invalid program headers")
     headers = [struct.unpack_from("<8I", raw, phoff+i*32) for i in range(phnum)]
-    require(all(h[0] in (0, 1, 2, 6, 0x6474e551, 0x6474e552, 0x70000001) for h in headers), "Unexpected plugin segment")
+    unexpected = [hex(h[0]) for h in headers if h[0] not in (0, 1, 2, 6, 0x6474e551, 0x6474e552, 0x70000001)]
+    require(not unexpected, "Unexpected plugin segment: " + ", ".join(unexpected))
     loads = [h for h in headers if h[0] == 1]
     for h in loads:
         _, off, va, _, fs, ms, perm, align = h
