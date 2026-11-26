@@ -11,7 +11,7 @@ from r800_android_userspace_preflight import read_regular
 from r800_gps_donor_snapshot import DONORS, LIMIT
 
 
-def publish(binary, report_path, manifest_path, output, evidence=None):
+def publish(binary, report_path, manifest_path, output, evidence=None, *, archive=None, archive_record=None):
     report_raw = read_regular(report_path, 4 * 1024**2)
     manifest_raw = read_regular(manifest_path, 4096)
     report = json.loads(report_raw)
@@ -29,6 +29,20 @@ def publish(binary, report_path, manifest_path, output, evidence=None):
     if (set(manifest["sha256"]) != set(DONORS)
             or report["donor_sha256"] != manifest["sha256"]):
         raise ValueError("Audit donor hashes do not match the snapshot manifest")
+    if (archive is None) != (archive_record is None):
+        raise ValueError("Archive and pre-link record must be provided together")
+    if archive is not None:
+        from r800_pack_tizen_stage import verify_archive
+        from r800_verify_tizen_stage import unique_keys
+        before = json.loads(read_regular(archive_record, 64 * 1024),
+                            object_pairs_hook=unique_keys)
+        current = verify_archive(archive, donor_hashes=manifest["sha256"])
+        if current != before:
+            raise ValueError("Tizen archive changed since pre-link review")
+        if evidence is not None:
+            evidence["tizen_archive"] = current
+    elif evidence is not None:
+        evidence["tizen_archive"] = None
     data = read_regular(binary, LIMIT)
     digest = hashlib.sha256(data).hexdigest()
     if digest != report["sha256"]:
@@ -54,6 +68,8 @@ def main():
     for name in ("binary", "report", "manifest", "output"):
         p.add_argument(name, type=Path)
     p.add_argument('provenance', type=Path, nargs='?')
+    p.add_argument("--archive", type=Path)
+    p.add_argument("--archive-record", type=Path)
     args = p.parse_args()
     try:
         evidence = None
@@ -68,7 +84,8 @@ def main():
                         "inputs": inputs,
                         "inputs_sha256": hashlib.sha256(raw).hexdigest(),
                         "safe_to_flash": False, "signed_attestation": False}
-        digest = publish(args.binary, args.report, args.manifest, args.output, evidence)
+        digest = publish(args.binary, args.report, args.manifest, args.output, evidence,
+                         archive=args.archive, archive_record=args.archive_record)
         if evidence is not None:
             evidence["binary_sha256"] = digest
             print(json.dumps(evidence, sort_keys=True))
