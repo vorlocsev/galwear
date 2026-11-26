@@ -9,7 +9,7 @@ import stat
 
 from r800_android_userspace_preflight import guest_path, read_regular
 from r800_init_inventory import audit as init_audit
-from r800_gnss_registration import select_service
+from r800_gnss_registration import SERVICE, SEC_SERVICE, select_service
 
 ANDROID_DIR = "/oem/r800dev"
 TIZEN_DIR = "/opt/usr/r800dev"
@@ -69,6 +69,7 @@ def identity(init, users, groups):
     if len(set(gids)) != len(gids):
         raise ValueError("Duplicate GNSS group")
     return {"service":service["name"],"source":service["source"],
+            "executable":service["executable"],
             "uid_candidate":uid,"primary_gid_candidate":gids[0],
             "supplementary_gid_candidates":gids[1:]}
 
@@ -105,6 +106,32 @@ def mapping(android, tizen):
             "same_directory_in_snapshot":True}
 
 
+def context_candidates(raw,kind):
+    """Literal GNSS records only; never evaluate Android PCRE or policy."""
+    result=[]
+    for number,line in enumerate(raw.decode("utf-8").splitlines(),1):
+        fields=line.split("#",1)[0].split()
+        if not fields:
+            continue
+        pattern=fields[0]
+        # Normalize escaped dots for textual discovery only, not matching.
+        literal=pattern.replace(r"\.",".")
+        terms=("android.hardware.gnss","vendor.samsung.hardware.gnss",
+               "/oem/r800dev","/opt/usr/r800dev","gps.sock","gps.r800.so")
+        if not any(term in literal for term in terms):
+            continue
+        if len(fields) not in ((2,3) if kind=="file_contexts" else (2,)):
+            raise ValueError("Malformed GNSS context record at line "+str(number))
+        context=fields[-1]
+        if not re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0(?::[A-Za-z0-9_,.-]+)?",context) and context!="<<none>>":
+            raise ValueError("Unrecognized GNSS context at line "+str(number))
+        if len(result)>=4096:
+            raise ValueError("GNSS context record limit exceeded")
+        result.append({"line":number,"pattern":pattern,"context":context,
+                       "file_kind":fields[1] if len(fields)==3 else None})
+    return result
+
+
 def label_evidence(root):
     # Evidence only. PCRE rules, precedence, type transitions and policy
     # access cannot be inferred by matching strings in a contexts file.
@@ -117,9 +144,27 @@ def label_evidence(root):
             except FileNotFoundError:
                 continue
             out[name] = {"sha256":hashlib.sha256(raw).hexdigest(),
-                "gnss_literal_mentioned":b"android.hardware.gnss" in raw,
-                "ipc_path_literal_mentioned":b"/oem/r800dev" in raw}
+                "gnss_literal_mentioned":b"android.hardware.gnss" in raw or b"vendor.samsung.hardware.gnss" in raw,
+                "ipc_path_literal_mentioned":b"/oem/r800dev" in raw,
+                "kind":kind,"candidates":context_candidates(raw,kind)}
     return out
+
+
+def label_review(evidence, executable):
+    """Require identifiable hwservice names; file patterns remain unevaluated."""
+    names=["android.hardware.gnss::IGnss"]
+    if executable==SEC_SERVICE:
+        names.append("vendor.samsung.hardware.gnss::ISecGnss")
+    records=[item for file in evidence.values() if file["kind"]=="hwservice_contexts"
+             for item in file["candidates"]]
+    issues=[]
+    for name in names:
+        matches=[r for r in records if r["pattern"]==name]
+        if not matches:
+            issues.append("HWSERVICE_CONTEXT_NOT_IDENTIFIED:"+name)
+        elif len({r["context"] for r in matches})!=1 or matches[0]["context"]=="<<none>>":
+            issues.append("HWSERVICE_CONTEXT_CONFLICT:"+name)
+    return issues
 
 
 def audit(android, tizen):
@@ -142,6 +187,8 @@ def audit(android, tizen):
         problems.append("MAPPING: "+str(exc))
     try:
         report["label_evidence"]=label_evidence(android)
+        if report["identity"] is not None:
+            problems.extend(label_review(report["label_evidence"],report["identity"]["executable"]))
     except (OSError,ValueError) as exc:
         problems.append("LABEL_EVIDENCE: "+str(exc))
     # Candidate IDs and static directory identity never authorize a daemon build.
