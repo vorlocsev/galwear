@@ -80,20 +80,14 @@ int pthread_mutex_unlock(void *);
 #define SHUT_RDWR 2
 #define SOCK_PATH "/opt/usr/r800dev/gps.sock"
 
-/* daemon: the connected gps.r800.so, or -1 */
-static int client = -1;
-static int mtx[8];   /* glibc pthread_mutex_t (24 bytes), zero = default mutex */
+/* glibc ARM32 pthread_mutex_t (24 bytes), zero = default mutex. */
+typedef int gps_client_mutex_t[8];
+#define GPS_CLIENT_MUTEX_INIT {0}
+#include "gps_client.h"
+static struct gps_client connection = GPS_CLIENT_INIT;
 static void out(const char *line, int len)
 {
-	pthread_mutex_lock(mtx);
-	if (client >= 0 && len > 0 &&
-	    send(client, line, (size_t)len, MSG_DONTWAIT | MSG_NOSIGNAL) != len) {
-		/* Only the serve loop owns close(c). Shutdown wakes its reader
-		 * and prevents another callback from writing a partial frame. */
-		shutdown(client, SHUT_RDWR);
-		client = -1;
-	}
-	pthread_mutex_unlock(mtx);
+	gps_client_send(&connection, line, len);
 }
 static int daemon_mode;
 
@@ -420,9 +414,12 @@ static int serve(void)
 		int c = accept(ls, 0, 0);
 		if (c < 0)
 			continue;
-		pthread_mutex_lock(mtx);
-		client = c;
-		pthread_mutex_unlock(mtx);
+		if (!gps_client_attach(&connection, c)) {
+			close(c);
+			close(ls);
+			unlink(SOCK_PATH);
+			return 1;
+		}
 		printf("client connected\n");
 		fflush(0);
 		for (;;) {
@@ -436,6 +433,9 @@ static int serve(void)
 					goto disconnected;
 				if (state == 0)
 					continue;
+				/* Do not dispatch another buffered command after output shutdown. */
+				if (!gps_client_matches(&connection, c))
+					goto disconnected;
 				if (!strcmp(s, "START") && !on) {
 					if (session(1) != 0) {
 						fatal = 1;
@@ -469,10 +469,7 @@ static int serve(void)
 			}
 		}
 disconnected:
-		pthread_mutex_lock(mtx);
-		if (client == c)
-			client = -1;
-		pthread_mutex_unlock(mtx);
+		gps_client_detach(&connection, c);
 		close(c);
 		if (fatal || (on && session(0) != 0)) {
 			/* Unknown engine state: fail closed rather than accept a new client. */
