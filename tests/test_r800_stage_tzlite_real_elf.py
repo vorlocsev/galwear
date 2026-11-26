@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -203,6 +204,31 @@ class RealStageTests(unittest.TestCase):
         self.assertNotIn("fixture-label",str(result))
         self.assertNotIn("user.fixture",os.listxattr(self.output/"usr/bin/lhd"))
         self.assertFalse(meta["xattrs_verified"])
+        self.assertFalse(meta["capabilities_verified"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
+    def test_binary_security_attributes_not_restored(self):
+        digest=self.candidate_digest()
+        image,_=self.image_fixture()
+        # Synthetic values are written only to this disposable ext4 image.
+        undefined=0xffffffff
+        entries=[(1,7,undefined),(2,4,123),(4,4,undefined),
+                 (16,5,undefined),(32,5,undefined)]
+        acl=struct.pack("<I",2)+b"".join(struct.pack("<HHI",*entry) for entry in entries)
+        cap=struct.pack("<IIIII",0x02000001,1,0,0,0)
+        for name,value in (("system.posix_acl_access",acl),("security.capability",cap)):
+            (self.parent/"value").write_bytes(value)
+            subprocess.run(["debugfs","-w","-R","ea_set -f value /usr/bin/lhd "+name,str(image)],
+                           cwd=self.parent,check=True,timeout=30,capture_output=True)
+        sha=hashlib.sha256(image.read_bytes()).hexdigest()
+        result=compare(self.output,image,sha,digest)
+        self.assertEqual(result["status"],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",result)
+        meta=result["original_metadata"]
+        attrs=meta["entries"]["/usr/bin/lhd"]["xattr_inventory"]["attributes"]
+        self.assertTrue(attrs["system.posix_acl_access"]["structure"]["mode_consistent"])
+        self.assertEqual(attrs["security.capability"]["structure"]["permitted_count"],1)
+        self.assertNotIn("security.capability",os.listxattr(self.output/"usr/bin/lhd"))
+        self.assertFalse(meta["acl_verified"])
         self.assertFalse(meta["capabilities_verified"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 

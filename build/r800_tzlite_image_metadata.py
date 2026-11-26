@@ -51,7 +51,8 @@ def inspect_metadata(resolver,files):
             response=command(resolver.tool,resolver.snapshot,"stat <%d>"%inode)
             try:
                 cache[inode]=parse_inode(response.stdout,inode,kind)
-                cache[inode]["xattr_inventory"]=inspect_xattrs(resolver,inode)
+                cache[inode]["xattr_inventory"]=inspect_xattrs(
+                    resolver,inode,int(cache[inode]["mode"],8),kind)
             except ValueError as exc:
                 raise ValueError("Metadata parse failed:"+name+": "+str(exc)) from exc
         rec=cache[inode]
@@ -62,6 +63,8 @@ def inspect_metadata(resolver,files):
         for attr,entry in rec["xattr_inventory"]["attributes"].items():
             if entry["category"] in ("posix_acl","linux_capability","selinux_label","security_other"):
                 reviews.append("SECURITY_XATTR_REVIEW:"+name+":"+attr)
+            if entry.get("structure",{}).get("mode_consistent") is False:
+                reviews.append("ACL_MODE_MISMATCH:"+name+":"+attr)
         if kind!="symlink":
             if mode&0o6000:
                 reviews.append("SPECIAL_PRIVILEGE_MODE:"+name)
@@ -71,7 +74,7 @@ def inspect_metadata(resolver,files):
             reviews.append("MULTIPLE_HARDLINKS:"+name)
     return {"status":"ORIGINAL_METADATA_INVENTORY_ONLY",
             "entries":result,"review_candidates":reviews,
-            "xattr_inventory_scope":"REPORTED_NAMES_AND_SIZES_ONLY",
+            "xattr_inventory_scope":"REPORTED_NAMES_SIZES_AND_SELECTED_BINARY_STRUCTURES",
             "acl_verified":False,"xattrs_verified":False,"capabilities_verified":False,
             "effective_access_verified":False,
             "ownership_restored":False,"permissions_restored":False}
