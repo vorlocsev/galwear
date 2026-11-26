@@ -453,3 +453,64 @@ class WideThumbTests(unittest.TestCase):
         r = self.literal_report([0xf8df, 0x8005, 0xe002, 0xbf00, 0x2100, 0, 0x4770], [(0x1108, 0x110c)])
         self.assertEqual(r['pic_flow']['events'], [])
         self.assertEqual(r['pic_flow']['boundaries'][0]['reason'], 'literal_outside_marked_data')
+
+
+class ThumbITTests(unittest.TestCase):
+    def evaluate(self, words, initial=None, relocations=None, data_ranges=()):
+        from r800_gps_pic_flow import audit_thumb
+        raw = struct.pack('<' + 'H'*len(words), *words)
+        return audit_thumb(raw, 0, 0x1100, len(raw), relocations or {}, {}, {},
+                           initial=initial, data_ranges=data_ranges)
+
+    def test_single_it_unknown_condition_drops_conflict(self):
+        r = self.evaluate([0xbf08, 0xf240, 1, 0x4770], {0: ('constant', 0)})
+        self.assertEqual(r['boundaries'], [])
+        self.assertIsNone(r['leaf_summary']['r0'])
+        self.assertEqual(r['modeled_it_blocks'], 1)
+        self.assertFalse(r['flags_verified'])
+
+    def test_ite_correlated_paths_equal(self):
+        for header in (0xbf0c, 0xbf14):  # ITE EQ / ITE NE
+            r = self.evaluate([header, 0xf240, 7, 0xf240, 7, 0x4770])
+            self.assertTrue(r['leaf_summary']['accepted'])
+            self.assertEqual(r['leaf_summary']['r0'], ('constant', 7))
+
+    def test_itt_preserves_restored_fact(self):
+        r = self.evaluate([0xbf04, 0xf240, 1, 0xf240, 0, 0x4770], {0: ('constant', 0)})
+        self.assertEqual(r['leaf_summary']['r0'], ('constant', 0))
+        self.assertEqual(r['boundaries'], [])
+
+    def test_three_and_four_instruction_blocks(self):
+        for words in ([0xbf06, 0xf240, 1, 0xf240, 7, 0xf240, 7, 0x4770],
+                      [0xbf01, 0xf240, 1, 0xf240, 2, 0xf240, 3, 0xf240, 7, 0x4770]):
+            r = self.evaluate(words, {0: ('constant', 7)})
+            self.assertEqual(r['leaf_summary']['r0'], ('constant', 7))
+
+    def test_branch_into_body_rejected(self):
+        r = self.evaluate([0xe000, 0xbf08, 0xbf00, 0x4770])
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+        self.assertEqual(r['events'], [])
+        r = self.evaluate([0xe7ff, 0xbf08, 0xbf00, 0x4770])
+        self.assertEqual(r['boundaries'], [])
+
+    def test_unsupported_body_and_invalid_header(self):
+        for words in ([0xbf08, 0x2001, 0x4770], [0xbf08, 0x4770], [0xbf04, 0xbf00],
+                      [0xbf08, 0xbf08, 0xbf00, 0x4770], [0xbfe8, 0xbf00, 0x4770],
+                      [0xbf08, 0xb401, 0x4770]):
+            with self.subTest(words=words):
+                r = self.evaluate(words)
+                self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+                self.assertEqual(r['events'], [])
+
+    def test_relocated_or_data_body_rejected(self):
+        r = self.evaluate([0xbf08, 0xf240, 7, 0x4770], relocations={0x1104: (23, 0)})
+        self.assertEqual(r['boundaries'][0]['reason'], 'relocated_it_body')
+        r = self.evaluate([0xbf08, 0xbf00, 0x4770], data_ranges=[(0x1102, 0x1104)])
+        self.assertEqual(r['boundaries'][0]['reason'], 'unsupported_it_body')
+
+    def test_equal_it_result_reaches_pic_reference(self):
+        # ADD at 0x110a, architectural PC 0x110e, delta 0xff2.
+        r = ThumbFlowTests().run_flow([0xbf0c, 0xf640, 0x70f2, 0xf640, 0x70f2, 0x4478, 0x4770])
+        self.assertEqual(r['boundaries'], [])
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
+        self.assertEqual(r['events'][0]['address'], 0x110a)
