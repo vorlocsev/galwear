@@ -39,10 +39,12 @@ done
 grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
 grep -Fq '/lib/ld-linux.so.3' "$TMP/elf.txt"
-python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "$TMP/libs"
+python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "$TMP/libs" > "$TMP/audit.json" || {
+    cat "$TMP/audit.json" >&2
+    exit 2
+}
+cat "$TMP/audit.json"
 python3 "$SNAPSHOT" verify "$SR" "$TMP/libs" "$TMP/input.json"
-# Do not treat a concurrently created directory or directory symlink as a destination.
-ln -T -- "$TMP/gpsbridge" "$OUT"
-sha256sum "$OUT"
+python3 "$ROOT/build/r800_gps_publish.py" "$TMP/gpsbridge" "$TMP/audit.json" "$TMP/input.json" "$OUT"
 echo "R800_XTRA_ABI=$XTRA_ABI (0=disabled; 1=legacy; 2=sized vendor candidate)"
 echo "NON-RELEASE Tizen GPS bridge; glibc compatibility and GNSS runtime NOT verified."
