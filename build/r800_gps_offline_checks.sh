@@ -23,6 +23,7 @@ python3 build/r800_run_required_suite.py 'test_r800_gnss_ipc_layout.py'
 python3 build/r800_run_required_suite.py 'test_r800_gps_link_gate.py'
 python3 build/r800_run_required_suite.py 'test_r800_gps_binary_elf.py'
 python3 build/r800_run_required_suite.py 'test_r800_stage_gps_donors.py'
+python3 build/r800_run_required_suite.py 'test_r800_broadcom_export.py'
 python3 build/r800_run_required_suite.py 'test_r800_extract_ext4.py'
 python3 build/r800_run_required_suite.py 'test_android_linker_audit.py'
 for script in src/tools/gps/build.sh build/r800_gps_glibc_qemu.sh payload/android-helper.sh; do
