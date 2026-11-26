@@ -8,7 +8,8 @@ from pathlib import Path
 import stat
 from r800_gps_donor_snapshot import pinned_directory
 from r800_gps_host_elf import audit as host_audit
-from r800_gps_host_snapshot import snapshot as host_snapshot, plan as host_plan, WRAPPER
+from r800_gps_host_snapshot import snapshot as host_snapshot, plan as host_plan, WRAPPER, check_loader
+import subprocess
 
 from r800_android_userspace_preflight import read_regular
 
@@ -143,6 +144,11 @@ def collect(root, ndk, command):
     fingerprints["host_elf"] = host_audit({name: tc / name for name in TOOLS})
     staging = Path(command[command.index("-o") + 1]).parent
     captured = "--ld-path=" + str(staging / "host/ld.lld") in command
+    if captured and fingerprints["host_elf"]["status"] == "HOST_STATIC_CANDIDATES_ONLY":
+        host = fingerprints["host_elf"]
+        for name, key in TOOLS.items():
+            if host["objects"][host["bindings"][name]]["sha256"] != fingerprints[key]["sha256"]:
+                raise ValueError("Host tool inventory differs from fingerprint: " + name)
     fingerprints["host_snapshot"] = ({"mode": "captured-loader-experimental",
         "providers": host_plan(fingerprints["host_elf"]),
         "wrapper_sha256": hashlib.sha256(WRAPPER).hexdigest(),
@@ -185,7 +191,8 @@ def main():
             tool_snapshot(args.ndk, staging, record)
             if record["inputs"]["host_snapshot"] is not None:
                 host_snapshot(staging, record["inputs"]["host_elf"])
-    except (OSError, ValueError) as exc:
+                check_loader(staging, record["inputs"]["host_elf"])
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         parser.exit(2, "Provenance rejected: " + str(exc) + "\n")
 
 
