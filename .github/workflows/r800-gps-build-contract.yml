@@ -12,6 +12,9 @@ on:
       - build/r800_gps_glibc_qemu.sh
       - build/r800_gps_mock_qemu.sh
       - build/r800_gps_acceptance.py
+      - build/r800_gps_verify_report.py
+      - tests/test_r800_gps_acceptance.py
+      - build/README.r800-gps-acceptance.md
       - build/r800_gps_mock_xtra_qemu.sh
       - build/r800_gps_mock_xtra_transcript.py
       - tests/test_r800_gps_mock_xtra_transcript.py
@@ -241,12 +244,14 @@ jobs:
           python3 -m unittest discover -s tests -p test_r800_gps_qemu_evidence.py -v
 
       - name: Consolidated GNSS synthetic host acceptance
+        id: acceptance
         run: |
           set -eu
           sh -n build/r800_gps_mock_qemu.sh
           sh -n build/r800_gps_mock_xtra_qemu.sh
-          evidence=$(mktemp -d)
-          trap 'rm -rf "$evidence"' EXIT
+          evidence="$RUNNER_TEMP/r800-gnss-evidence"
+          mkdir -m 700 "$evidence"
+          printf '%s\n' "$GITHUB_SHA" > "$evidence/checkout-sha.txt"
           rc=0
           python3 build/r800_gps_acceptance.py --out "$evidence/report" || rc=$?
           if [ -f "$evidence/report/report.json" ]; then
@@ -254,9 +259,28 @@ jobs:
           fi
           if [ "$rc" -ne 0 ]; then
             for log in "$evidence/report/"*.log; do
-              [ -f "$log" ] && { printf '\n=== %s ===\n' "$log"; cat "$log"; }
+              [ ! -f "$log" ] || { printf '\n=== %s ===\n' "$log"; cat "$log"; }
             done
             exit "$rc"
           fi
+
+      - name: Revalidate saved host evidence against exact checkout
+        if: steps.acceptance.outcome == 'success'
+        run: |
+          set -eu
+          evidence="$RUNNER_TEMP/r800-gnss-evidence"
+          test "$(cat "$evidence/checkout-sha.txt")" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_gps_verify_report.py "$evidence/report" --mode host --check-sources > "$evidence/verification.json"
+          cat "$evidence/verification.json"
           echo "QEMU_EXECUTED=false"
           echo "safe_to_flash=false"
+
+      - name: Preserve GNSS evidence (including failed acceptance)
+        if: always() && steps.acceptance.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-gnss-host-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/r800-gnss-evidence/
+          if-no-files-found: error
+          retention-days: 14
