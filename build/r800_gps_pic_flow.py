@@ -217,9 +217,58 @@ def thumb_compare(state, a, width):
     return False
 
 
+def shift_with_carry(value, kind, amount, carry):
+    """ARM Shift_C for 32-bit operands; None denotes an unknown fact."""
+    if amount is None:
+        return None, None
+    if kind == "rrx":
+        return (None if value is None or carry is None else
+                (int(carry) << 31) | (value >> 1)), (None if value is None else bool(value & 1))
+    if amount == 0:
+        return value, carry
+    if kind == "lsl":
+        if amount > 32:
+            return 0, False
+        if value is None:
+            return (0 if amount == 32 else None), None
+        return (value << amount) & 0xffffffff, bool(value & (1 << (32 - amount)))
+    if kind == "lsr":
+        if amount > 32:
+            return 0, False
+        if value is None:
+            return (0 if amount == 32 else None), None
+        return value >> amount, bool(value & (1 << (amount - 1)))
+    if value is None:
+        return None, None
+    if kind == "asr":
+        n = min(amount, 32)
+        return (sign_extend(value, 32) >> n) & 0xffffffff, bool(value & (1 << (n - 1)))
+    if kind == "ror":
+        n = amount % 32
+        result = ((value >> n) | (value << (32 - n))) & 0xffffffff
+        return result, bool(result & 0x80000000)
+    raise ValueError("Unknown shift kind")
+
+
+def immediate_shift(kind, amount):
+    if amount == 0 and kind in ("lsr", "asr"):
+        return kind, 32
+    if amount == 0 and kind == "ror":
+        return "rrx", 1
+    return kind, amount
+
+
+def shifted_mov(state, rd, value, kind, amount):
+    rhs, carry = shift_with_carry(value, kind, amount, state.get("C"))
+    alu_flags(state, "mov", rd, None, rhs, carry)
+    if carry is None:
+        state.pop("C", None)
+
+
 def alu_flags(state, op, rd, lhs, rhs, carry=None):
     """32-bit constant ALU; address-valued arithmetic remains unknown."""
-    arithmetic = op in ("add", "sub")
+    arithmetic = op in ("add", "sub", "adc", "sbc")
+    carry_in = state.get("C")
     for key in (FLAG_KEYS if arithmetic else ("N", "Z")):
         state.pop(key, None)
     if not arithmetic and carry is not None:
@@ -235,6 +284,15 @@ def alu_flags(state, op, rd, lhs, rhs, carry=None):
     elif op == "sub":
         result = (lhs - rhs) & 0xffffffff
         state.update(C=lhs >= rhs, V=bool((lhs ^ rhs) & (lhs ^ result) & 0x80000000))
+    elif op in ("adc", "sbc"):
+        if carry_in is None:
+            return
+        delta = int(carry_in) if op == "adc" else int(carry_in) - 1
+        total = lhs + rhs + delta if op == "adc" else lhs - rhs + delta
+        signed = sign_extend(lhs, 32) + (sign_extend(rhs, 32) if op == "adc" else -sign_extend(rhs, 32)) + delta
+        result = total & 0xffffffff
+        state.update(C=total > 0xffffffff if op == "adc" else total >= 0,
+                     V=not -(1 << 31) <= signed < (1 << 31))
     elif op == "and":
         result = lhs & rhs
     elif op == "orr":
@@ -248,33 +306,39 @@ def alu_flags(state, op, rd, lhs, rhs, carry=None):
 
 
 def arm_alu(state, word):
-    # A32 unconditional data processing, S=1; immediate or unshifted register.
+    # A32 unconditional data processing, S=1; immediate or immediate-shifted register.
     if word & 0xfc100000 != 0xe0100000:
         return False
-    op = {0: "and", 1: "eor", 2: "sub", 4: "add", 12: "orr", 13: "mov"}.get((word >> 21) & 15)
+    op = {0: "and", 1: "eor", 2: "sub", 4: "add", 5: "adc", 6: "sbc", 12: "orr", 13: "mov"}.get((word >> 21) & 15)
     rn, rd = (word >> 16) & 15, (word >> 12) & 15
     if op is None or rd > 12 or rn > 12 or (op == "mov" and rn != 0):
         return False
     carry = None
+    shifted = False
     if word & (1 << 25):
         imm, shift = word & 255, 2 * ((word >> 8) & 15)
         rhs = ((imm >> shift) | (imm << (32 - shift))) & 0xffffffff
         if shift:
             carry = bool(rhs & 0x80000000)
-    elif word & 0xff0 == 0 and word & 15 <= 12:
-        rhs = constant(state, word & 15)
+    elif word & 0x10 == 0 and word & 15 <= 12:
+        kind, amount = immediate_shift(("lsl", "lsr", "asr", "ror")[(word >> 5) & 3], (word >> 7) & 31)
+        rhs, carry = shift_with_carry(constant(state, word & 15), kind, amount, state.get("C"))
+        shifted = True
     else:
         return False
     alu_flags(state, op, rd, constant(state, rn), rhs, carry)
+    if shifted and op in ("mov", "and", "orr", "eor") and carry is None:
+        state.pop("C", None)
     return True
 
 
 def thumb_alu(state, a, width):
-    # T16 flag-setting encodings outside IT; no shifted operands except LSL #0.
+    # T16 flag-setting encodings outside IT; immediate and register shift encodings.
     if width != 2:
         return False
-    if a & 0xffc0 == 0:  # MOVS register alias (LSLS #0)
-        alu_flags(state, "mov", a & 7, None, constant(state, (a >> 3) & 7))
+    if a & 0xf800 in (0x0000, 0x0800, 0x1000):
+        kind, amount = immediate_shift(("lsl", "lsr", "asr")[a >> 11], (a >> 6) & 31)
+        shifted_mov(state, a & 7, constant(state, (a >> 3) & 7), kind, amount)
     elif a & 0xf800 == 0x2000:
         alu_flags(state, "mov", (a >> 8) & 7, None, a & 255)
     elif a & 0xf800 == 0x1800:
@@ -284,8 +348,13 @@ def thumb_alu(state, a, width):
     elif a & 0xf800 in (0x3000, 0x3800):
         rd = (a >> 8) & 7
         alu_flags(state, "sub" if a & 0x800 else "add", rd, constant(state, rd), a & 255)
-    elif a & 0xffc0 in (0x4000, 0x4040, 0x4300):
-        op = {0x4000: "and", 0x4040: "eor", 0x4300: "orr"}[a & 0xffc0]
+    elif a & 0xffc0 in (0x4080, 0x40c0, 0x4100, 0x41c0):
+        kind = {0x4080: "lsl", 0x40c0: "lsr", 0x4100: "asr", 0x41c0: "ror"}[a & 0xffc0]
+        rd = a & 7
+        amount = constant(state, (a >> 3) & 7)
+        shifted_mov(state, rd, constant(state, rd), kind, None if amount is None else amount & 255)
+    elif a & 0xffc0 in (0x4000, 0x4040, 0x4140, 0x4180, 0x4300):
+        op = {0x4000: "and", 0x4040: "eor", 0x4140: "adc", 0x4180: "sbc", 0x4300: "orr"}[a & 0xffc0]
         rd = a & 7
         alu_flags(state, op, rd, constant(state, rd), constant(state, (a >> 3) & 7))
     else:
