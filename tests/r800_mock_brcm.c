@@ -8,6 +8,7 @@
 #define R800_GPS_BRIDGE_HOST_TEST 1
 #include "../src/tools/gps/gps_abi.h"
 static GpsCallbacks callbacks;
+#include "r800_mock_async.h"
 static int inits, active;
 static const char *mode(void) {
     const char *m=getenv("R800_MOCK_MODE");
@@ -26,6 +27,7 @@ static int start(void)
     puts("MOCK_START"); fflush(stdout);
     if (!strcmp(mode(),"fail-start")) return -1;
     if (active) return -1;
+    if (!strcmp(mode(),"async-data") && async_begin()) return -1;
     active=1;
     GpsStatus status={sizeof(status),1};
     GpsLocation fix={.size=sizeof(fix),.flags=31,.latitude=52.25,.longitude=5.5,
@@ -51,12 +53,14 @@ static int stop(void)
     if (!strcmp(mode(),"fail-stop")) return -1;
     if (!active) return -1;
     if (!strcmp(mode(),"late-data")) late_data();
+    async_end();
     active=0;
     GpsStatus status={sizeof(status),2};
     callbacks.status_cb(&status);
     return 0;
 }
 static void cleanup(void) {
+    async_end();
     puts("MOCK_CLEANUP"); fflush(stdout); active=0;
 }
 static int time_in(GpsUtcTime t,GpsUtcTime ref,int unc)
@@ -68,6 +72,7 @@ static int time_in(GpsUtcTime t,GpsUtcTime ref,int unc)
 static int loc_in(double lat,double lon,float acc)
 {
     if (lat!=52 || lon!=5 || acc!=0.25f) return -1;
+    if (active && !strcmp(mode(),"async-data")) async_trigger();
     puts("MOCK_LOC"); fflush(stdout); return 0;
 }
 static int position(uint32_t m,uint32_t r,uint32_t i,uint32_t a,uint32_t t)
