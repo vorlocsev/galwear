@@ -8,6 +8,7 @@ on:
       - 'src/tools/gps/**'
       - 'tests/**'
       - 'build/r800_gps*'
+      - 'build/r800_build_hals.sh'
       - '.github/workflows/r800-gps-host-integration.yml'
   workflow_dispatch:
 permissions:
@@ -43,3 +44,28 @@ jobs:
           echo 'DONOR_LINK_VERIFIED=false'
           echo 'GNSS_RUNTIME_VERIFIED=false'
           echo 'safe_to_flash=false'
+  android-gps-hal:
+    if: github.repository == 'vorlocsev/galwear'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record exact source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "SOURCE_SHA=$GITHUB_SHA"
+          sh -n build/r800_build_hals.sh
+          sh -n build/r800_gps_hal_ndk_checks.sh
+          rc=0
+          R800_GPS_IPC_V2=2 sh build/r800_build_hals.sh || rc=$?
+          test "$rc" -eq 2
+      - name: Install pinned Android NDK r27c
+        run: |
+          set -eu
+          archive="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o "$archive"
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e "$archive" | sha1sum -c -
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+      - name: Compile and link Android GPS HAL IPC v1 and v2
+        run: sh build/r800_gps_hal_ndk_checks.sh "$RUNNER_TEMP/android-ndk-r27c"
