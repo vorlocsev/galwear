@@ -86,8 +86,24 @@ def parse_log(raw, staging, report, *, tool, shell=False):
             transferred = True
     if not started or not transferred or (not shell and not finished):
         raise ValueError("Incomplete host loader diagnostics")
-    if not shell and "loader" not in observed:
-        raise ValueError("Captured loader missing from diagnostics")
+    if not shell:
+        from r800_gps_host_elf import LOADER
+        bindings, objects = report["bindings"], report["objects"]
+        pending = [bindings[tool], bindings[LOADER]]
+        seen, required = set(), {"loader"}
+        while pending:
+            source = pending.pop()
+            if source in seen:
+                continue
+            seen.add(source)
+            for name in objects[source]["needed"]:
+                provider = bindings[name]
+                # The loader may satisfy its own DT_NEEDED alias.
+                if provider != bindings[LOADER]:
+                    required.add("lib/" + name)
+                pending.append(provider)
+        if not required <= observed:
+            raise ValueError("Expected captured host dependencies missing from diagnostics")
     return sorted(observed)
 
 
