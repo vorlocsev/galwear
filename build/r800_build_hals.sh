@@ -2,6 +2,8 @@
 # Compile legacy Android ARM32 HAL candidates; never load or execute them.
 # Usage: sh build/r800_build_hals.sh <Android NDK r27c> <new-output-dir>
 set -eu
+GPS_IPC_V2=${R800_GPS_IPC_V2-0}
+case "$GPS_IPC_V2" in 0|1) ;; *) echo "invalid R800_GPS_IPC_V2 (expected 0 or 1)" >&2; exit 2;; esac
 [ "$#" -eq 2 ] || { echo "usage: $0 <NDK r27c> <new-output-dir>" >&2; exit 2; }
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 NDK=$(CDPATH= cd -- "$1" && pwd)
@@ -27,7 +29,8 @@ build() {
     sha256sum "$OUT/$module"
 }
 build lights_r800.c lights.r800.so
-build gps_r800.c gps.r800.so
+build gps_r800.c gps.r800.so -DR800_GPS_IPC_V2="$GPS_IPC_V2"
+printf 'R800_GPS_IPC_V2=%s\n' "$GPS_IPC_V2" > "$OUT/gps-ipc-evidence.txt"
 build sensors_r800.c sensors.r800.so
 build hwcomposer_r800.c hwcomposer.r800.so
 # Fetch only the exact public tinyalsa base into disposable output.
