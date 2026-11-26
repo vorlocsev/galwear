@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 from r800_gps_mock_peer import Peer, START, LIMIT, wait_log
+from r800_gps_mock_resources import locate, sample, review as review_resources
 
 STAGES = (2, 3, 4, 5, 6)
 CYCLES = 8
@@ -46,10 +47,16 @@ def review(raw, stage, rc):
             'vendor_abi_verified': False, 'safe_to_flash': False}
 
 
-def drive(path, log, stage):
+def drive(path, log, stage, *, launcher_pid=None, qemu=None):
     if stage not in STAGES:
         raise ValueError('Unsupported recovery stage')
     wait_log(log, rb'listening on /opt/usr/r800dev/gps\.sock')
+    target = None
+    samples = []
+    if stage == 5:
+        if launcher_pid is None or qemu is None:
+            raise ValueError('Resource measurement requires launcher PID and QEMU executable')
+        target = locate(launcher_pid, qemu)
     for i in range(CYCLES if stage == 5 else 1):
         with Peer(path) as peer:
             peer.send(b'START\n')
@@ -65,6 +72,10 @@ def drive(path, log, stage):
                 peer.eof()
         if stage == 5:
             wait_log(log, b'client gone', i + 1)
+            if locate(launcher_pid, qemu) != target:
+                raise ValueError('Daemon process replaced between cycles')
+            samples.append(sample(target))
+    return review_resources(samples, CYCLES) if stage == 5 else None
 
 
 def main():
@@ -74,21 +85,27 @@ def main():
     parser.add_argument('--log', type=Path, required=True)
     parser.add_argument('--socket', type=Path)
     parser.add_argument('--exit-code', type=int)
+    parser.add_argument('--launcher-pid', type=int)
+    parser.add_argument('--qemu', type=Path)
     args = parser.parse_args()
     try:
         if args.mode == 'drive':
             if args.socket is None:
                 raise ValueError('Socket required')
-            drive(args.socket, args.log, args.stage)
+            resources = drive(args.socket, args.log, args.stage, launcher_pid=args.launcher_pid, qemu=args.qemu)
             result = {'status': 'MOCK_DAEMON_RECOVERY_DRIVE_COMPLETE', 'safe_to_flash': False}
+            if resources is not None:
+                result['resources'] = resources
+                if resources['problems']:
+                    result['status'] = 'REVIEW_REQUIRED'
         else:
             with args.log.open('rb') as stream:
                 result = review(stream.read(LIMIT+1), args.stage, args.exit_code)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, KeyError) as exc:
         print(json.dumps({'status': 'REVIEW_REQUIRED', 'problems': [str(exc)], 'safe_to_flash': False}))
         return 2
     print(json.dumps(result, sort_keys=True))
-    return 0
+    return 2 if result['status'] == 'REVIEW_REQUIRED' else 0
 
 
 if __name__ == '__main__':
