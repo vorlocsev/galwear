@@ -13,6 +13,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
 import r800_tzlite_audit as audit
 import r800_stage_tzlite as stage
 import r800_tzlite_manifest as manifest
+from r800_tzlite_image_binding import compare
 
 PROVIDER="/usr/lib/libfixture-real.so"
 ALIAS="/usr/lib/libfixture.so.1"
@@ -109,6 +110,60 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual(audit.check(self.output)["status"],"TZLITE_KNOWN_STATIC_CANDIDATES_ONLY")
         digest=hashlib.sha256((self.output/manifest.MANIFEST).read_bytes()).hexdigest()
         self.assertEqual(manifest.verify(self.output,digest)["status"],"STATIC_TREE_INTEGRITY_ONLY")
+
+    def image_fixture(self):
+        image=self.parent/"rootfs.img"
+        with image.open("wb") as f:
+            f.truncate(16*1024**2)
+        subprocess.run(["mkfs.ext4","-q","-F","-d",str(self.root),str(image)],
+                       check=True,timeout=30)
+        return image,hashlib.sha256(image.read_bytes()).hexdigest()
+
+    def candidate_digest(self):
+        stage.stage(self.root,self.output)
+        return hashlib.sha256((self.output/manifest.MANIFEST).read_bytes()).hexdigest()
+
+    def test_image_component_binding(self):
+        digest=self.candidate_digest()
+        image,sha=self.image_fixture()
+        result=compare(self.output,image,sha,digest)
+        self.assertEqual(result["status"],"STATIC_IMAGE_COMPONENT_MATCH_ONLY",result)
+        self.assertEqual(result["configuration_count"],4)
+        self.assertGreaterEqual(result["elf_count"],24)
+        self.assertEqual(result["image_sha256"],sha)
+        self.assertEqual(result["manifest_sha256"],digest)
+        self.assertFalse(result["donor_authenticity_verified"])
+        self.assertFalse(result["safe_to_flash"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
+    def test_image_configuration_changed(self):
+        digest=self.candidate_digest()
+        (self.root/"etc/lhd/lhd.conf").write_bytes(b"different synthetic config\n")
+        image,sha=self.image_fixture()
+        self.assertIn("IMAGE_CONFIGURATION_HASH_MISMATCH",
+                      compare(self.output,image,sha,digest)["problems"])
+
+    def test_image_elf_changed(self):
+        digest=self.candidate_digest()
+        path=self.root/PROVIDER.lstrip("/")
+        with path.open("ab") as f:
+            f.write(b"synthetic trailing bytes")
+        image,sha=self.image_fixture()
+        self.assertIn("IMAGE_ELF_CLOSURE_MISMATCH",
+                      compare(self.output,image,sha,digest)["problems"])
+
+    def test_image_digest_mismatch(self):
+        digest=self.candidate_digest()
+        image,_=self.image_fixture()
+        with self.assertRaisesRegex(ValueError,"SHA-256"):
+            compare(self.output,image,"0"*64,digest)
+
+    def test_candidate_mutated(self):
+        digest=self.candidate_digest()
+        image,sha=self.image_fixture()
+        (self.output/"extra").write_bytes(b"unexpected")
+        with self.assertRaises(ValueError):
+            compare(self.output,image,sha,digest)
 
     def test_missing_real_dependency(self):
         (self.root/PROVIDER.lstrip("/")).unlink()
