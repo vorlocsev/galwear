@@ -323,3 +323,66 @@ class LeafFlowTests(unittest.TestCase):
                 self.evaluate([0xe12fff1e], ranges=ranges)
         with self.assertRaises(ValueError):
             self.evaluate([0xe12fff1e], enabled=False)
+
+
+class NestedLeafTests(unittest.TestCase):
+    def evaluate(self, second, *, depth=2, first=None, second_isa='arm', include_second=True):
+        raw = bytearray(pic_image(0x2100))
+        caller = [0xe3000070, 0xe3400000, 0xe08f0000, 0xe92d4010,
+                  0xeb00002a, 0xe5901000, 0xe8bd8010]
+        if first is None:
+            first = [0xe92d4010, 0xeb000005 if second_isa == 'arm' else 0xfa000005, 0xe8bd8010]
+        struct.pack_into('<7I', raw, 0x100, *caller)
+        struct.pack_into('<' + 'I'*len(first), raw, 0x1c0, *first)
+        fmt, width = ('I', 4) if second_isa == 'arm' else ('H', 2)
+        struct.pack_into('<' + fmt*len(second), raw, 0x1e0, *second)
+        ranges = [('arm', 0x11c0, 4*len(first))]
+        if include_second:
+            ranges.append((second_isa, 0x11e0, width*len(second)))
+        return audit(bytes(raw), [('factory', 'arm', 0x1100, 4*len(caller))],
+                     assume_aapcs=True, callee_ranges=ranges, callee_depth=depth)['code_ranges'][0]['pic_flow']
+
+    def test_nested_arm_and_interworking(self):
+        for isa, body in (('arm', [0xe12fff1e]), ('thumb', [0x4770])):
+            with self.subTest(isa=isa):
+                r = self.evaluate(body, second_isa=isa)
+                self.assertEqual(r['boundaries'], [])
+                self.assertEqual(r['events'][0]['table_va'], 0x2100)
+                self.assertEqual(r['assumed_calls'][0]['modeled_return_r0'], ('address', 0x1180))
+                self.assertEqual(r['assumed_calls'][0]['modeled_nested_depth'], 1)
+
+    def test_depth_and_unlisted_nested_target(self):
+        for kwargs in ({'depth': 1}, {'include_second': False}):
+            r = self.evaluate([0xe12fff1e], **kwargs)
+            self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+            self.assertEqual(r['events'], [])
+
+    def test_mutual_recursion(self):
+        r = self.evaluate([0xe92d4010, 0xebfffff5, 0xe8bd8010], depth=4)
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+        self.assertEqual(r['events'], [])
+
+    def test_nested_conflicting_r0(self):
+        r = self.evaluate([0x0a000000, 0xe3000000, 0xe12fff1e])
+        self.assertEqual(r['boundaries'], [])
+        self.assertIsNone(r['assumed_calls'][0]['modeled_return_r0'])
+        self.assertEqual(r['events'], [])
+
+    def test_nested_unsaved_lr(self):
+        r = self.evaluate([0xe12fff1e], first=[0xe320f000, 0xeb000005, 0xe12fff1e])
+        self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+        self.assertEqual(r['events'], [])
+
+    def test_invalid_depth(self):
+        for depth in (0, 5, True):
+            with self.subTest(depth=depth), self.assertRaises(ValueError):
+                self.evaluate([0xe12fff1e], depth=depth)
+
+    def test_context_budget(self):
+        from r800_gps_pic_flow import leaf_analyzer
+        raw = struct.pack('<I', 0xe12fff1e)
+        resolve = leaf_analyzer(raw, lambda va, size: (0, 5), {}, {}, {}, {(0x1000, 'arm'): 4})
+        for i in range(32):
+            self.assertTrue(resolve(0x1000, 'arm', {0: ('constant', i)})['accepted'])
+        self.assertFalse(resolve(0x1000, 'arm', {0: ('constant', 32)})['accepted'])
+        self.assertTrue(resolve(0x1000, 'arm', {0: ('constant', 0)})['accepted'])
