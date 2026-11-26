@@ -47,6 +47,67 @@ class ReadinessTests(unittest.TestCase):
                 report=json.loads(output.call_args.args[0])
                 self.assertEqual(report["decision"],"REJECT_EVIDENCE")
                 self.assertFalse(report["safe_to_flash"])
+    def image_gate(self, changes=None, code=0):
+        expected={"schema":"r800-gnss-image-audit-v1","image_sha256":"c"*64,
+                  "snapshot_verified":True,"runtime_paths_verified":False,
+                  "donor_authenticity_verified":False,"hardware_interface_abi_verified":False,
+                  "gnss_runtime_verified":False}
+        data=dict(expected,status="STATIC_IMAGE_GNSS_CLOSURE_ONLY",problems=[],safe_to_flash=False)
+        data.update(changes or {})
+        result=subprocess.CompletedProcess([],code,json.dumps(data).encode(),b"")
+        with patch.object(r.subprocess,"run",return_value=result):
+            return r.static_gate("tizen_image_closure","unused.py",["x"],
+                "STATIC_IMAGE_GNSS_CLOSURE_ONLY",bindings=expected,timeout=600)
+
+    def test_image_evidence_bound(self):
+        self.assertEqual(self.image_gate()["status"],"STATIC_PASS")
+
+    def test_image_wrong_hash(self):
+        gate=self.image_gate({"image_sha256":"d"*64})
+        self.assertEqual(gate["status"],"REVIEW_REQUIRED")
+        self.assertIn("EVIDENCE_BINDING_MISMATCH:image_sha256",gate["problems"])
+
+    def test_image_snapshot_boolean(self):
+        for value in (False,1,None):
+            self.assertEqual(self.image_gate({"snapshot_verified":value})["status"],"REVIEW_REQUIRED")
+
+    def test_image_no_runtime_claim(self):
+        for key in ("runtime_paths_verified","donor_authenticity_verified",
+                    "hardware_interface_abi_verified","gnss_runtime_verified"):
+            self.assertEqual(self.image_gate({key:True})["status"],"REVIEW_REQUIRED")
+
+    def test_image_failure(self):
+        self.assertEqual(self.image_gate(code=2)["status"],"REVIEW_REQUIRED")
+
+    def test_image_inputs_pair_required(self):
+        for args in (["--tizen-image","unused"],["--tizen-image-sha256","c"*64],
+                     ["--tizen-image","unused","--tizen-image-sha256","bad"]):
+            with patch.object(sys,"argv",["readiness"]+args), \
+                 patch.object(r,"git_state",return_value=("a"*40,True)), \
+                 patch.object(r,"static_gate") as gate, patch("builtins.print") as output:
+                self.assertEqual(r.main(),2)
+                gate.assert_not_called()
+                self.assertEqual(json.loads(output.call_args.args[0])["decision"],"REJECT_EVIDENCE")
+
+    def test_image_main_routes_gate_without_claiming_runtime(self):
+        sha="a"*40
+        digest="c"*64
+        with patch.object(sys,"argv",["readiness","--tizen-image","unused",
+                                     "--tizen-image-sha256",digest]), \
+             patch.object(r,"git_state",return_value=(sha,True)), \
+             patch.object(r,"static_gate",side_effect=lambda name,*a,**kw:
+                 r.outcome(name,"STATIC_PASS" if name=="tizen_image_closure" else "NOT_TESTED")) as gate, \
+             patch("builtins.print") as output:
+            self.assertEqual(r.main(),0)
+            report=json.loads(output.call_args.args[0])
+            image_call=next(c for c in gate.call_args_list if c.args[0]=="tizen_image_closure")
+            self.assertEqual(image_call.kwargs["bindings"]["image_sha256"],digest)
+            self.assertEqual(image_call.kwargs["timeout"],600)
+            self.assertNotIn("tizen_image_closure",report["blockers"])
+            self.assertTrue(set(r.RUNTIME).issubset(report["blockers"]))
+            self.assertIn("tizen_preflight",report["blockers"])
+            self.assertFalse(report["safe_to_flash"])
+
     def test_hold_even_when_static_passes(self):
         report=r.summarize("a"*40,True,[r.outcome("link","STATIC_PASS")])
         self.assertFalse(report["safe_to_flash"])

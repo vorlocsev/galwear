@@ -28,12 +28,12 @@ def git_state():
     return sha, not git("status", "--porcelain", "--untracked-files=all")
 
 
-def static_gate(name, script, args, expected):
+def static_gate(name, script, args, expected, *, bindings=None, timeout=120):
     if args is None:
         return outcome(name, "NOT_TESTED", reason="Required offline inputs absent")
     try:
         p = subprocess.run([sys.executable, str(ROOT/"build"/script), *map(str,args)],
-                           cwd=ROOT, capture_output=True, timeout=120)
+                           cwd=ROOT, capture_output=True, timeout=timeout)
         raw = p.stdout
         data = json.loads(raw)
         if not isinstance(data, dict):
@@ -44,6 +44,12 @@ def static_gate(name, script, args, expected):
         if data.get("safe_to_flash") is not False:
             raise ValueError("Missing non-release safety marker")
         passed = p.returncode == 0 and data.get("status") == expected and not problems
+        if passed and bindings:
+            for key, value in bindings.items():
+                actual = data.get(key)
+                if type(actual) is not type(value) or actual != value:
+                    problems = problems + ["EVIDENCE_BINDING_MISMATCH:"+key]
+            passed = not problems
         return outcome(name, "STATIC_PASS" if passed else "REVIEW_REQUIRED",
                        exit_code=p.returncode, report_status=data.get("status"),
                        report_sha256=hashlib.sha256(raw).hexdigest(),
@@ -93,6 +99,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ("android-root","tizen-root","binary","libdir"):
         p.add_argument("--"+name,type=Path)
+    p.add_argument("--tizen-image",type=Path)
+    p.add_argument("--tizen-image-sha256")
     p.add_argument("--run-offline",action="store_true")
     a=p.parse_args()
     try:
@@ -101,6 +109,10 @@ def main():
             raise ValueError("Use a clean checkout; cannot bind dirty source to HEAD")
         if (a.binary is None) != (a.libdir is None):
             raise ValueError("--binary and --libdir must be supplied together")
+        if (a.tizen_image is None) != (a.tizen_image_sha256 is None):
+            raise ValueError("--tizen-image and --tizen-image-sha256 must be supplied together")
+        if a.tizen_image_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}",a.tizen_image_sha256):
+            raise ValueError("Expected lowercase image SHA-256")
         for root in (a.android_root,a.tizen_root):
             if root is not None and (not root.is_dir() or root.resolve()==Path("/")):
                 raise ValueError("Use isolated, prepared offline roots")
@@ -111,6 +123,16 @@ def main():
                static_gate("tizen_preflight","r800_tizen_gnss_preflight.py",
                            ["--root",a.tizen_root] if a.tizen_root else None,
                            "TIZEN_GNSS_STATIC_ONLY"),
+               static_gate("tizen_image_closure","r800_gps_image_audit.py",
+                           ["--image",a.tizen_image,"--sha256",a.tizen_image_sha256]
+                           if a.tizen_image else None,"STATIC_IMAGE_GNSS_CLOSURE_ONLY",
+                           bindings={"schema":"r800-gnss-image-audit-v1",
+                                     "image_sha256":a.tizen_image_sha256,
+                                     "snapshot_verified":True,
+                                     "runtime_paths_verified":False,
+                                     "donor_authenticity_verified":False,
+                                     "hardware_interface_abi_verified":False,
+                                     "gnss_runtime_verified":False},timeout=600),
                static_gate("ipc_layout","r800_gnss_ipc_layout.py",
                            ["--android-root",a.android_root,"--tizen-root",a.tizen_root]
                            if a.android_root and a.tizen_root else None,"STATIC_CANDIDATES_ONLY"),
