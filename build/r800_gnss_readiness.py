@@ -67,6 +67,34 @@ def static_gate(name, script, args, expected, *, bindings=None, timeout=120):
         return outcome(name,"ERROR",reason=str(exc))
 
 
+def tzlite_integrity_gate(root, digest):
+    name="tzlite_manifest_integrity"
+    if digest is None:
+        return outcome(name,"NOT_TESTED",reason="External manifest SHA-256 not supplied")
+    gate=static_gate(name,"r800_tzlite_manifest.py",
+                     ["--root",root,"--sha256",digest],"STATIC_TREE_INTEGRITY_ONLY",
+                     bindings={"schema":"r800-tzlite-manifest-check-v1",
+                               "manifest_sha256":digest,
+                               "donor_authenticity_verified":False,
+                               "runtime_verified":False},timeout=600)
+    if gate["status"]=="STATIC_PASS":
+        detail=gate["detail"]
+        for key in ("entries","total_bytes"):
+            if type(detail.get(key)) is not int or detail[key]<1:
+                return outcome(name,"REVIEW_REQUIRED",problems=["INVALID_MANIFEST_COUNT:"+key])
+    return gate
+
+
+def tzlite_recheck(first, root, digest):
+    if first["status"]!="STATIC_PASS":
+        return first
+    after=tzlite_integrity_gate(root,digest)
+    if after["status"]!="STATIC_PASS" or after["detail"]!=first["detail"]:
+        return outcome(first["gate"],"REVIEW_REQUIRED",
+                       problems=["TZLITE_INTEGRITY_RECHECK_FAILED"],before=first,after=after)
+    return dict(first,recheck_report_sha256=after["report_sha256"],recheck_passed=True)
+
+
 def offline_gate(enabled, sha, clean):
     if not enabled:
         return outcome("offline_regression","NOT_TESTED",reason="Local execution not requested")
@@ -191,6 +219,7 @@ def main():
     for name in ("android-root","tizen-root","binary","libdir"):
         p.add_argument("--"+name,type=Path)
     p.add_argument("--tzlite-root",type=Path)
+    p.add_argument("--tzlite-manifest-sha256",help="Externally recorded SHA-256 of the static candidate v2 manifest")
     p.add_argument("--tizen-image",type=Path)
     p.add_argument("--tizen-image-sha256")
     p.add_argument("--donor-ndk",type=Path)
@@ -222,6 +251,9 @@ def main():
                 raise ValueError("SELinux audit requires Android root, policy path, SHA-256 and type candidates")
             if not re.fullmatch(r"[0-9a-f]{64}",a.selinux_policy_sha256):
                 raise ValueError("Expected lowercase policy SHA-256")
+        if a.tzlite_manifest_sha256 is not None:
+            if a.tzlite_root is None or not re.fullmatch(r"[0-9a-f]{64}",a.tzlite_manifest_sha256):
+                raise ValueError("Manifest audit requires --tzlite-root and lowercase manifest SHA-256")
         for root in (a.android_root,a.tizen_root,a.tzlite_root):
             if root is not None and (not root.is_dir() or root.resolve()==Path("/")):
                 raise ValueError("Use isolated, prepared offline roots")
@@ -232,6 +264,7 @@ def main():
                static_gate("tizen_preflight","r800_tizen_gnss_preflight.py",
                            ["--root",a.tizen_root] if a.tizen_root else None,
                            "TIZEN_GNSS_STATIC_ONLY"),
+               tzlite_integrity_gate(a.tzlite_root,a.tzlite_manifest_sha256),
                static_gate("tzlite_known_components","r800_tzlite_audit.py",
                            ["--root",a.tzlite_root] if a.tzlite_root else None,
                            "TZLITE_KNOWN_STATIC_CANDIDATES_ONLY",
@@ -260,6 +293,10 @@ def main():
         donor=donor_gate(sha,a.tizen_image,a.tizen_image_sha256,a.donor_ndk,a.donor_output,a.donor_qemu)
         donor["qemu_requested"]=a.donor_qemu
         gates.append(donor)
+        for index,gate in enumerate(gates):
+            if gate["gate"]=="tzlite_manifest_integrity":
+                gates[index]=tzlite_recheck(gate,a.tzlite_root,a.tzlite_manifest_sha256)
+                break
         end_sha,end_clean=git_state()
         if end_sha!=sha or not end_clean:
             raise ValueError("Checkout changed during audit")
