@@ -101,33 +101,16 @@ static int daemon_mode;
 #define LAST_PATH "/opt/usr/r800dev/gps.last"
 #define LAST_TMP LAST_PATH ".XXXXXX"
 
-static int64_t last_saved;   /* utc ms of the last fix written to LAST_PATH */
-static int save_mtx[8];
+#include "gps_cache.h"
+static struct gps_cache position_cache = GPS_CACHE_INIT;
 
-static void save_fix(const GpsLocation *l)
+static void save_fix(const GpsLocation *l, gps_client_epoch epoch)
 {
-	char b[80], tmp[] = LAST_TMP;
-	int fd, n, ok;
-	if (!(l->flags & 1) || !gps_valid_seed(l->latitude, l->longitude, l->timestamp))
+	char tmp[] = LAST_TMP;
+	if (!(l->flags & 1))
 		return;
-	pthread_mutex_lock(save_mtx);
-	if (l->timestamp <= last_saved || l->timestamp - last_saved < 60000)
-		goto done;
-	n = snprintf(b, sizeof(b), "%.6f %.6f %lld\n", l->latitude, l->longitude, l->timestamp);
-	if (n <= 0 || n >= (int)sizeof(b))
-		goto done;
-	fd = mkstemp(tmp); /* unique regular file, mode 0600 */
-	if (fd < 0)
-		goto done;
-	ok = write(fd, b, n) == n && fsync(fd) == 0;
-	if (close(fd) != 0)
-		ok = 0;
-	if (ok && rename(tmp, LAST_PATH) == 0)
-		last_saved = l->timestamp;
-	else
-		unlink(tmp);
-done:
-	pthread_mutex_unlock(save_mtx);
+	gps_cache_save(&position_cache, &connection, epoch, daemon_mode,
+	               LAST_PATH, tmp, l->latitude, l->longitude, l->timestamp);
 }
 
 static void location_cb(GpsLocation *l)
@@ -144,7 +127,7 @@ static void location_cb(GpsLocation *l)
 			 (double)l->bearing, (double)l->accuracy, l->timestamp);
 	if (n > 0 && n < (int)sizeof(b))
 		out(epoch, b, n);
-	save_fix(l);
+	save_fix(l, epoch);
 	if (daemon_mode)
 		return;
 	printf("FIX flags=%x lat=%.7f lon=%.7f alt=%.1f spd=%.2f brg=%.1f acc=%.1f t=%lld\n",
