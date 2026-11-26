@@ -48,7 +48,8 @@ def record(stdout, binary):
         raise ValueError("Invalid input evidence scope")
     return {"binary_sha256": digest, "donor_sha256": obj["donor_sha256"],
             "input_fingerprints": inputs["inputs"],
-            "compiler_argv": normalize_argv(inputs["argv"])}
+            "compiler_argv": normalize_argv(inputs["argv"]),
+            "tizen_archive": obj.get("tizen_archive")}
 
 
 def compare(builder, ndk, donor, abi, timeout=300):
