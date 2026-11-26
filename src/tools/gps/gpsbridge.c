@@ -141,6 +141,17 @@ static int daemon_mode;
 #include "gps_standalone.h"
 #include "gps_daemon.h"
 #include "gps_shutdown.h"
+#include "gps_callback_gate.h"
+
+GPS_MUTEX(callback_mtx);
+static enum gps_callback_phase callback_phase = GPS_CALLBACK_CLOSED;
+
+static void set_callback_phase(enum gps_callback_phase phase)
+{
+	pthread_mutex_lock(&callback_mtx);
+	callback_phase = phase;
+	pthread_mutex_unlock(&callback_mtx);
+}
 
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
@@ -183,7 +194,7 @@ done:
 	pthread_mutex_unlock(&save_mtx);
 }
 
-static void location_cb(GpsLocation *l)
+static void emit_location(GpsLocation *l)
 {
 	char b[200];
 	int n;
@@ -202,7 +213,7 @@ static void location_cb(GpsLocation *l)
 	       (double)l->bearing, (double)l->accuracy, l->timestamp);
 	fflush(0);
 }
-static void status_cb(GpsStatus *s)
+static void emit_status(GpsStatus *s)
 {
 	char b[32];
 	if (!s || s->size < sizeof(*s))
@@ -217,7 +228,7 @@ static void sv_status_cb(void *sv)
 {
 	(void)sv;
 }
-static void nmea_cb(GpsUtcTime t, const char *nmea, int len)
+static void emit_nmea(GpsUtcTime t, const char *nmea, int len)
 {
 	char b[300];
 	int n;
@@ -231,6 +242,33 @@ static void nmea_cb(GpsUtcTime t, const char *nmea, int len)
 		printf("NMEA %.*s\n", len, nmea);
 		fflush(0);
 	}
+}
+
+/* Drain in-flight output before a phase transition. These functions never
+ * invoke vendor slots while holding callback_mtx. Lock order: callback,
+ * then output/save mutex; the session owner never takes the reverse order. */
+static void location_cb(GpsLocation *l)
+{
+	pthread_mutex_lock(&callback_mtx);
+	if (gps_callback_allowed(callback_phase, 0))
+		emit_location(l);
+	pthread_mutex_unlock(&callback_mtx);
+}
+
+static void status_cb(GpsStatus *s)
+{
+	pthread_mutex_lock(&callback_mtx);
+	if (gps_callback_allowed(callback_phase, 1))
+		emit_status(s);
+	pthread_mutex_unlock(&callback_mtx);
+}
+
+static void nmea_cb(GpsUtcTime t, const char *nmea, int len)
+{
+	pthread_mutex_lock(&callback_mtx);
+	if (gps_callback_allowed(callback_phase, 0))
+		emit_nmea(t, nmea, len);
+	pthread_mutex_unlock(&callback_mtx);
 }
 
 static void caps_cb(uint32_t c)
@@ -278,6 +316,24 @@ static GpsCallbacks cbs = {
 };
 
 static const GpsInterface *gps;
+
+static int guarded_start(void)
+{
+	/* Vendor may deliver callbacks synchronously from START. */
+	set_callback_phase(GPS_CALLBACK_ACTIVE);
+	int rc = gps->start();
+	if (rc != 0)
+		set_callback_phase(GPS_CALLBACK_CLOSED);
+	return rc;
+}
+
+static int guarded_stop(void)
+{
+	set_callback_phase(GPS_CALLBACK_STOPPING);
+	int rc = gps->stop();
+	set_callback_phase(GPS_CALLBACK_CLOSED);
+	return rc;
+}
 
 /* clock in ms: 0 = REALTIME, 1 = MONOTONIC (libbrcm's elapsed clock), 7 = BOOTTIME
  * (Android's elapsedRealtime) */
@@ -412,6 +468,7 @@ static int standalone_configure(void);
 
 static void daemon_cleanup(void)
 {
+	set_callback_phase(GPS_CALLBACK_CLOSED);
 	xtra = 0;
 	gps->cleanup();
 }
@@ -616,7 +673,7 @@ int main(int argc, char **argv, char **envp)
 		return 1;
 	if (daemon_mode) {
 		daemon_ops = (struct gps_daemon_ops){
-			aid, standalone_configure, gps->start, gps->stop,
+			aid, standalone_configure, guarded_start, guarded_stop,
 			daemon_cleanup, daemon_reinit
 		};
 		r = 0;
@@ -631,7 +688,7 @@ int main(int argc, char **argv, char **envp)
 		return r;
 	}
 	const struct gps_standalone_ops ops = {
-		aid, standalone_configure, gps->start, sleep, gps->stop, gps->cleanup
+		aid, standalone_configure, guarded_start, sleep, guarded_stop, daemon_cleanup
 	};
 	r = gps_standalone_run(&ops, secs);
 	printf("standalone result %d\n", r);
