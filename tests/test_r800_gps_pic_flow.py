@@ -194,3 +194,71 @@ class StackFlowTests(unittest.TestCase):
         for r in (run([0xe92d0001, 0xe8bd8000]), ThumbFlowTests().run_flow([0xb401, 0xbd00])):
             self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
             self.assertEqual(r['events'], [])
+
+
+class CallFlowTests(unittest.TestCase):
+    def arm(self, words, enabled=True):
+        raw = bytearray(pic_image(0x2100))
+        struct.pack_into('<' + 'I'*len(words), raw, 0x100, *words)
+        return audit(bytes(raw), [('factory', 'arm', 0x1100, 4*len(words))],
+                     assume_aapcs=enabled)['code_ranges'][0]['pic_flow']
+
+    def thumb(self, words):
+        raw = bytearray(pic_image(0x2100))
+        struct.pack_into('<' + 'H'*len(words), raw, 0x100, *words)
+        return audit(bytes(raw), [('factory', 'thumb', 0x1100, 2*len(words))],
+                     assume_aapcs=True)['code_ranges'][0]['pic_flow']
+
+    def test_opt_in_and_preserved_register(self):
+        words = [0xe3004fe4, 0xe3404000, 0xe1a00004, 0xe1a0500e,
+                 0xeb00002a, 0xe08f1004, 0xe1a0e005, 0xe12fff1e]
+        self.assertEqual(self.arm(words, False)['events'], [])
+        r = self.arm(words)
+        self.assertEqual(r['boundaries'], [])
+        self.assertEqual(r['events'][0]['table_va'], 0x2100)
+        self.assertEqual(r['assumed_calls'][0]['arguments']['r0'], {'kind': 'constant', 'value': 0xfe4})
+        self.assertEqual(r['assumed_calls'][0]['target_va'], 0x11c0)
+        self.assertFalse(r['callee_execution_verified'])
+
+    def test_caller_saved_and_platform_registers_lost(self):
+        for reg in (0, 9, 12):
+            words = [0xe3000fe4 | (reg << 12), 0xe3400000 | (reg << 12), 0xe320f000,
+                     0xe1a0500e, 0xeb00002a, 0xe08f1000 | reg, 0xe1a0e005, 0xe12fff1e]
+            r = self.arm(words)
+            self.assertEqual(r['boundaries'], [])
+            self.assertEqual(r['events'], [])
+
+    def test_arm_blx_target_and_argument_address(self):
+        r = self.arm([0xe3000ff0, 0xe3400000, 0xe08f0000, 0xe1a0500e,
+                      0xfb00002a, 0xe1a0e005, 0xe12fff1e])
+        call = r['assumed_calls'][0]
+        self.assertEqual((call['target_va'], call['target_isa'], call['instruction']), (0x11c2, 'thumb', 'BLX'))
+        self.assertEqual(call['arguments']['r0'], {'kind': 'address', 'value': 0x2100})
+
+    def test_thumb_bl_and_blx(self):
+        for tail, isa in ((0xf85d, 'thumb'), (0xe85e, 'arm')):
+            r = self.thumb([0x4675, 0xf000, tail, 0x46ae, 0x4770])
+            self.assertEqual(r['boundaries'], [])
+            self.assertEqual(r['assumed_calls'][0]['target_va'], 0x11c0)
+            self.assertEqual(r['assumed_calls'][0]['target_isa'], isa)
+
+    def test_stack_and_lr_not_preserved(self):
+        for words in ([0xe92d4010, 0xeb00002d, 0xe8bd8010],
+                      [0xe92d4000, 0xeb00002d, 0xe8bd8000],
+                      [0xeb00002e, 0xe12fff1e]):
+            r = self.arm(words)
+            self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+            self.assertEqual(r['assumed_calls'], [])
+
+    def test_call_target_must_be_external_executable(self):
+        for op in (0xebffffff, 0xeb000400, 0xe12fff30):
+            r = self.arm([op, 0xe12fff1e])
+            self.assertEqual(r['status'], 'PARTIAL_FLOW_REVIEW_REQUIRED')
+            self.assertEqual(r['assumed_calls'], [])
+
+    def test_memory_clobber_blocks_load(self):
+        r = self.arm([0xe3004070, 0xe3404000, 0xe08f4004, 0xe1a0500e,
+                      0xeb00002a, 0xe5941000, 0xe1a0e005, 0xe12fff1e])
+        self.assertEqual(r['boundaries'], [])
+        self.assertEqual(len(r['assumed_calls']), 1)
+        self.assertEqual(r['events'], [])
