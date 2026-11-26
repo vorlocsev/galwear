@@ -28,23 +28,18 @@ jobs:
           echo "SOURCE_SHA=$GITHUB_SHA"
           cc --version
           clang --version
-      - name: Core regression
-        run: sh build/r800_gps_core_checks.sh
-      - name: Native HAL and both endpoints
+      - name: Verify synthetic ext4 fixture tools
+        run: |
+          command -v debugfs
+          command -v mkfs.ext4
+          command -v readelf
+      - name: Complete GPS offline gate (native and ARM32 compile-only)
         shell: bash
         run: |
           set -euo pipefail
-          export PYTHONDONTWRITEBYTECODE=1
-          temp=$(mktemp -d)
-          trap 'rm -rf "$temp"' EXIT
-          for test in lifecycle peer v2; do
-            cc -std=gnu11 -O2 -Wall -Wextra -Werror -UNDEBUG -pthread \
-              -fsanitize=undefined -fno-sanitize-recover=all \
-              "tests/test_r800_gps_hal_${test}.c" -o "$temp/$test"
-            timeout 60s "$temp/$test"
-          done
-          python3 build/r800_run_required_suite.py 'test_r800_gps_bridge_integration.py'
+          sh build/r800_gps_offline_checks.sh
           echo 'HOST_ENDPOINTS=PASS'
+          echo 'ARM32_COMPILE_ONLY_VERIFIED=true'
           echo 'DONOR_LINK_VERIFIED=false'
           echo 'GNSS_RUNTIME_VERIFIED=false'
           echo 'safe_to_flash=false'
