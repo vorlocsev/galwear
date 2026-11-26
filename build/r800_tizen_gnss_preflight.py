@@ -41,11 +41,11 @@ def metadata(root, guest):
     return {"status":"PRESENT","kind":kind,"mode":oct(stat.S_IMODE(st.st_mode))}
 
 
-def check(root):
+def check(root, *, strict_pages=False):
     root = Path(root).resolve(strict=True)
     if not root.is_dir() or root == Path("/"):
         raise ValueError("Expected isolated offline donor directory")
-    closure = audit(root, TARGETS)
+    closure = audit(root, TARGETS, strict_pages=strict_pages)
     problems = []
     if closure["problems"]:
         problems.append("DEPENDENCY_CLOSURE_REVIEW")
@@ -62,6 +62,7 @@ def check(root):
                    and not s["version_hidden"]]
         library = {"status":"EXPORT_CANDIDATE" if matches else "EXPORT_NOT_CONFIRMED",
                    "sha256":recorded["sha256"],"export":BRIDGE_EXPORT,
+                   "load_review":recorded["load_review"],
                    "dynamic_symbol_count":info["dynamic_symbol_count"],
                    "candidate_count":len(matches)}
         if not matches:
@@ -82,7 +83,8 @@ def check(root):
         if item["status"] != "MISSING" and item.get("kind") != "regular":
             problems.append("OPTIONAL_FILE_PATH_REVIEW:"+p)
     return {"status":"TIZEN_GNSS_REVIEW_REQUIRED" if problems else "TIZEN_GNSS_STATIC_ONLY",
-            "problems":problems,"closure_status":closure["status"],"bridge_library":library,
+            "problems":problems,"closure_status":closure["status"],
+            "strict_4k_page_review":strict_pages,"closure_problems":closure["problems"],"bridge_library":library,
             "directories":directories,"socket_path":SOCKET,"socket_metadata":socket,
             "optional_metadata":optional,"runtime_mounts_verified":False,
             "socket_permissions_verified":False,"bridge_protocol_verified":False,
@@ -93,8 +95,9 @@ def check(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root",type=Path,required=True)
+    parser.add_argument("--strict-pages",action="store_true",help="Conservative 4 KiB PT_LOAD page review")
     args = parser.parse_args()
-    report = check(args.root)
+    report = check(args.root,strict_pages=args.strict_pages)
     print(json.dumps(report,indent=2,sort_keys=True))
     return 2 if report["problems"] else 0
 
