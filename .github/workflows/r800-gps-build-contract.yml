@@ -10,6 +10,8 @@ on:
       - tests/test_r800_gps_build.py
       - build/r800_gps_link_gate.py
       - build/r800_gps_glibc_qemu.sh
+      - build/r800_gps_qemu_evidence.py
+      - tests/test_r800_gps_qemu_evidence.py
       - tests/r800_glibc_probe.c
       - tests/r800_glibc_probe_plugin.c
       - build/r800_gps_donor_snapshot.py
@@ -175,3 +177,8 @@ jobs:
         run: |
           python3 -m py_compile build/r800_gps_host_trace.py
           python3 -m unittest discover -s tests -p test_r800_gps_host_trace.py -v
+
+      - name: QEMU glibc probe evidence regressions (no guest execution)
+        run: |
+          python3 -m py_compile build/r800_gps_qemu_evidence.py
+          python3 -m unittest discover -s tests -p test_r800_gps_qemu_evidence.py -v
