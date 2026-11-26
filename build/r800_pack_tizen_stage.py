@@ -48,7 +48,28 @@ def members(report):
         yield name, row
 
 
-def verify_archive(path, *, expected=None):
+def bind_donors(report, donor_hashes):
+    """Match the four exact linker inputs against verified guest library paths."""
+    from r800_gps_donor_snapshot import DONORS
+    if not isinstance(donor_hashes, dict) or set(donor_hashes) != set(DONORS):
+        raise ValueError("Invalid archive donor hash set")
+    files = report["files"]
+    bound = {}
+    for name in DONORS:
+        paths = [p for p in ("/lib/" + name, "/usr/lib/" + name) if p in files]
+        if not paths:
+            raise ValueError("Archive donor missing: " + name)
+        sources = {files[p]["source"] for p in paths}
+        if len(sources) != 1:
+            raise ValueError("Ambiguous archive donor: " + name)
+        if any(files[p]["sha256"] != donor_hashes[name] for p in paths):
+            raise ValueError("Archive donor digest mismatch: " + name)
+        bound[name] = {"paths": paths, "source": next(iter(sources)),
+                       "sha256": donor_hashes[name]}
+    return bound
+
+
+def verify_archive(path, *, expected=None, donor_hashes=None):
     """Check exact canonical bytes; never use tar extraction APIs."""
     raw = read_regular(Path(path), MAX_ARCHIVE)
     pos = 0
@@ -102,7 +123,9 @@ def verify_archive(path, *, expected=None):
         if len(raw) != expected_size or any(raw[pos:]):
             raise ValueError("Unexpected archive trailer or additional members")
         result = verify(tree, expected=report)
+    bound = bind_donors(report, donor_hashes) if donor_hashes is not None else None
     return {"status": "TIZEN_ELF_ARCHIVE_STATIC_ONLY",
+            "donor_bindings": bound,
             "sha256": hashlib.sha256(raw).hexdigest(),
             "archive_bytes": len(raw), "file_count": result["file_count"],
             "manifest_matches_expected": expected is not None,
@@ -156,10 +179,18 @@ def main():
     create.add_argument("--output", required=True, type=Path)
     check = sub.add_parser("verify")
     check.add_argument("--archive", required=True, type=Path)
+    check.add_argument("--donor-manifest", type=Path)
     args = parser.parse_args()
     try:
-        report = pack(args.root, args.output) if args.command == "pack" else verify_archive(args.archive)
-    except (OSError, ValueError, RecursionError, tarfile.TarError) as exc:
+        if args.command == "pack":
+            report = pack(args.root, args.output)
+        else:
+            hashes = None
+            if args.donor_manifest is not None:
+                hashes = json.loads(read_regular(args.donor_manifest, 4096),
+                                    object_pairs_hook=unique_keys)["sha256"]
+            report = verify_archive(args.archive, donor_hashes=hashes)
+    except (OSError, ValueError, KeyError, TypeError, RecursionError, tarfile.TarError) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["status"] == "TIZEN_ELF_ARCHIVE_STATIC_ONLY" else 2
