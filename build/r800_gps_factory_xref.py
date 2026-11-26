@@ -280,7 +280,7 @@ def static_function_spans(raw, mapping, dynamic_keys, markers=None):
     return spans
 
 
-def require_mapped_code(row, markers):
+def require_mapped_code(row, markers, *, literal_pools=False):
     """Strict opt-in: the complete declared range must have one matching ISA."""
     from bisect import bisect_right
     section = markers.get(row["section_index"])
@@ -291,14 +291,21 @@ def require_mapped_code(row, markers):
     addresses = sorted(entries)
     first = bisect_right(addresses, start) - 1
     last = bisect_right(addresses, end - 1)
-    if first < 0 or any(entries[a] != row["isa"] for a in addresses[first:last]):
+    if first < 0 or entries[addresses[first]] != row["isa"] or any(
+            entries[a] not in ((row["isa"], "data") if literal_pools else (row["isa"],))
+            for a in addresses[first:last]):
         raise ValueError("ARM mapping range contains data, unknown mode or mismatched ISA")
-    row["mapping_symbol_coverage"] = "UNIFORM_ISA_METADATA_ONLY"
+    from r800_gps_pic_flow import code_spans
+    data = [(max(start, addresses[i]), min(end, addresses[i+1] if i+1 < len(addresses) else end))
+            for i in range(first, last) if entries[addresses[i]] == "data"]
+    code_spans(start, row["size"], row["isa"], data)
+    row["data_ranges"] = data
+    row["mapping_symbol_coverage"] = "CODE_AND_DATA_METADATA_ONLY" if data else "UNIFORM_ISA_METADATA_ONLY"
 
 
-def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symbols=False):
+def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symbols=False, literal_pools=False):
     """Find nonpreemptible dynamic function ranges at direct call candidates."""
-    from r800_gps_pic_flow import arm_call, thumb_call
+    from r800_gps_pic_flow import arm_call, thumb_call, code_spans
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
     from r800_android_linker_audit import inspect
 
@@ -364,7 +371,7 @@ def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symb
     if static_symbols:
         spans.extend(static_function_spans(raw, mapping, dynamic_keys, markers))
     if mapping_symbols:
-        require_mapped_code(factory, markers)
+        require_mapped_code(factory, markers, literal_pools=literal_pools)
     spans.sort(key=lambda s: (s[0], s[1], s[2]))
     candidates = {}
     previous_end = 0
@@ -383,34 +390,35 @@ def automatic_callees(raw, factory, depth, *, static_symbols=False, mapping_symb
             continue
         start, size, isa = function["start_va"], function["size"], function["isa"]
         off, _ = mapping(start, size)
-        pos = 0
-        while pos < size:
-            va = start + pos
-            if isa == "arm":
-                width = 4
-                call = arm_call(struct.unpack_from("<I", raw, off + pos)[0], va)
-            else:
-                a, = struct.unpack_from("<H", raw, off + pos)
-                width = 4 if a >> 11 in (29, 30, 31) else 2
-                if pos + width > size:
-                    break
-                b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
-                call = thumb_call(a, b, width, va)
-            pos += width
-            if call is None or any(slot in relocations for slot in range(va & ~3, ((va + width - 1) & ~3) + 1, 4)):
-                continue
-            entry = call[:2]
-            if entry in candidates and entry not in selected:
-                if len(selected) >= 16:
-                    raise ValueError("Automatic callee range budget exceeded")
-                if mapping_symbols:
-                    require_mapped_code(candidates[entry], markers)
-                selected[entry] = candidates[entry]
-                pending.append((candidates[entry], level + 1))
+        for lo, hi in code_spans(start, size, isa, function.get("data_ranges", ())):
+            pos = lo - start
+            while pos < hi - start:
+                va = start + pos
+                if isa == "arm":
+                    width = 4
+                    call = arm_call(struct.unpack_from("<I", raw, off + pos)[0], va)
+                else:
+                    a, = struct.unpack_from("<H", raw, off + pos)
+                    width = 4 if a >> 11 in (29, 30, 31) else 2
+                    if pos + width > hi - start:
+                        raise ValueError("Truncated Thumb call scan")
+                    b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
+                    call = thumb_call(a, b, width, va)
+                pos += width
+                if call is None or any(slot in relocations for slot in range(va & ~3, ((va + width - 1) & ~3) + 1, 4)):
+                    continue
+                entry = call[:2]
+                if entry in candidates and entry not in selected:
+                    if len(selected) >= 16:
+                        raise ValueError("Automatic callee range budget exceeded")
+                    if mapping_symbols:
+                        require_mapped_code(candidates[entry], markers, literal_pools=literal_pools)
+                    selected[entry] = candidates[entry]
+                    pending.append((candidates[entry], level + 1))
     return list(selected.values())
 
 
-def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False, mapping_symbols=False):
+def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False, mapping_symbols=False, literal_pools=False):
     symbol = factory_range(raw)
     if type(callee_depth) is not int or not 1 <= callee_depth <= 4 or (callee_depth != 1 and not auto_callees):
         raise ValueError("Callee depth requires automatic mode and must be between 1 and 4")
@@ -418,12 +426,15 @@ def audit(raw, *, auto_callees=False, callee_depth=1, static_symbols=False, mapp
         raise ValueError("Static symbol mode requires automatic callee mode")
     if mapping_symbols and not static_symbols:
         raise ValueError("Mapping symbol mode requires static symbols")
-    callees = automatic_callees(raw, symbol, callee_depth, static_symbols=static_symbols, mapping_symbols=mapping_symbols) if auto_callees else []
+    if literal_pools and not mapping_symbols:
+        raise ValueError("Literal pool mode requires mapping symbols")
+    callees = automatic_callees(raw, symbol, callee_depth, static_symbols=static_symbols, mapping_symbols=mapping_symbols, literal_pools=literal_pools) if auto_callees else []
     report = xref(raw, [("factory", symbol["isa"], symbol["start_va"], symbol["size"])],
                   assume_aapcs=auto_callees, callee_ranges=[(r["isa"], r["start_va"], r["size"]) for r in callees],
-                  callee_depth=callee_depth if callees else 1)
+                  callee_depth=callee_depth if callees else 1,
+                  data_by_range={(r["start_va"], r["isa"]): r.get("data_ranges", ()) for r in [symbol, *callees]})
     report.update(auto_callee_mode=auto_callees, auto_callee_candidates=callees,
-                  requested_callee_depth=callee_depth, static_symbol_mode=static_symbols, mapping_symbol_mode=mapping_symbols, callee_discovery_complete=False)
+                  requested_callee_depth=callee_depth, static_symbol_mode=static_symbols, mapping_symbol_mode=mapping_symbols, literal_pool_mode=literal_pools, callee_discovery_complete=False)
     report.update(schema="galwear-r800-gps-factory-xref-v1", factory_symbol=symbol,
                   symbol_range_from_metadata=True, function_boundaries_verified=False,
                   factory_signature_verified=False)
@@ -438,9 +449,10 @@ def main():
     parser.add_argument("--callee-depth", type=int, default=1)
     parser.add_argument("--static-symbols", action="store_true", help="Include section-backed local function symbols")
     parser.add_argument("--mapping-symbols", action="store_true", help="Require uniform ARM/Thumb mapping metadata for every analyzed range")
+    parser.add_argument("--literal-pools", action="store_true", help="Allow explicitly mapped data islands within code ranges")
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth, static_symbols=args.static_symbols, mapping_symbols=args.mapping_symbols)
+        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth, static_symbols=args.static_symbols, mapping_symbols=args.mapping_symbols, literal_pools=args.literal_pools)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc),
                   "selected_abi": None, "safe_to_flash": False}
