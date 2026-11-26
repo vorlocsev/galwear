@@ -122,5 +122,62 @@ class DisassemblyTests(unittest.TestCase):
         self.assertFalse(trace["full_control_flow_analyzed"])
 
 
+
+    def test_push_pop_restores_argument(self):
+        trace = self.trace("  1000: push {r0, r4, lr}\n"
+                           "  1002: mov r0, r1\n"
+                           "  1004: pop.w {r2, r4, lr}\n"
+                           "  1008: ldr r3, [r2, #8]\n"
+                           "  100c: blx r3")
+        self.assertEqual([e["offset"] for e in trace["events"]], [8, 8])
+        self.assertEqual(trace["stack_delta_at_stop"], 0)
+
+    def test_prologue_and_stack_spill(self):
+        trace = self.trace("  1000: push {r4-r7, lr}\n"
+                           "  1002: sub sp, #12\n"
+                           "  1004: str r0, [sp, #4]\n"
+                           "  1006: mov r0, r1\n"
+                           "  1008: ldr r4, [sp, #4]\n"
+                           "  100a: ldr r3, [r4, #8]\n"
+                           "  100c: blx r3")
+        self.assertEqual([e["offset"] for e in trace["events"]], [8, 8])
+        self.assertEqual(trace["stack_delta_at_stop"], -32)
+
+    def test_unknown_store_clears_saved_argument(self):
+        trace = self.trace("  1000: sub sp, #8\n"
+                           "  1002: str r0, [sp]\n"
+                           "  1004: str r1, [sp]\n"
+                           "  1006: ldr r4, [sp]\n"
+                           "  1008: ldr r3, [r4, #8]\n"
+                           "  100a: blx r3")
+        self.assertEqual(trace["events"], [])
+
+    def test_reallocation_does_not_restore_stale_slot(self):
+        trace = self.trace("  1000: sub sp, #4\n"
+                           "  1002: str r0, [sp]\n"
+                           "  1004: add sp, #4\n"
+                           "  1006: sub sp, #4\n"
+                           "  1008: ldr r4, [sp]\n"
+                           "  100a: ldr r3, [r4, #8]")
+        self.assertEqual(trace["events"], [])
+
+    def test_stack_bounds(self):
+        for instruction in ("pop {r4}", "add sp, #4", "sub sp, #4097",
+                            "str r0, [sp]", "sub sp, #2"):
+            with self.subTest(instruction=instruction):
+                trace = self.trace("  1000: " + instruction)
+                self.assertEqual(trace["stop_reason"], "stack_bounds")
+                self.assertEqual(trace["events"], [])
+
+    def test_unsupported_stack_forms(self):
+        for instruction in ("pop {pc}", "push {r4, r4}", "push {r7-r4}"):
+            with self.subTest(instruction=instruction):
+                trace = self.trace("  1000: " + instruction)
+                self.assertEqual(trace["stop_reason"], "unsupported_stack_register_list")
+        trace = self.trace("  1000: str r0, [sp, #-4]!\n"
+                           "  1004: ldr r3, [r0, #8]")
+        self.assertEqual(trace["events"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
