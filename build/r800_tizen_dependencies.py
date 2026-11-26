@@ -81,6 +81,40 @@ def interpreter(raw):
         raise ValueError("Unexpected Tizen ARM soft-float interpreter")
     return paths[0] if paths else None
 
+def review_loads(raw, *, strict_pages=False):
+    """Conservative ARM32 load geometry, independent of relocation formats."""
+    if len(raw) < 52 or raw[:7] != b"\x7fELF\x01\x01\x01":
+        raise ValueError("Expected ARM32 ELF")
+    if struct.unpack_from("<HH", raw, 16) not in ((2, 40), (3, 40)):
+        raise ValueError("Expected Tizen ARM32 executable or shared object")
+    phoff = struct.unpack_from("<I", raw, 28)[0]
+    entry, count = struct.unpack_from("<HH", raw, 42)
+    if entry != 32 or not 1 <= count <= 128 or phoff + entry * count > len(raw):
+        raise ValueError("Invalid program headers")
+    ranges = []
+    for i in range(count):
+        typ, off, va, _, fs, ms, flags, align = struct.unpack_from("<8I", raw, phoff + i * entry)
+        if typ != 1:
+            continue
+        if fs > ms or off + fs > len(raw) or va + ms > 2**32:
+            raise ValueError("Invalid PT_LOAD bounds")
+        if align > 1 and (align & (align - 1) or va % align != off % align):
+            raise ValueError("Invalid PT_LOAD alignment")
+        if strict_pages and (va & 4095) != (off & 4095):
+            raise ValueError("PT_LOAD page offset mismatch")
+        if ms:
+            lo, hi = va, va + ms
+            if strict_pages:
+                lo, hi = lo & ~4095, (hi + 4095) & ~4095
+            if any(lo < end and start < hi for start, end in ranges):
+                raise ValueError("PT_LOAD shared memory page requires review" if strict_pages
+                                 else "Overlapping PT_LOAD memory ranges")
+            ranges.append((lo, hi))
+    if not ranges:
+        raise ValueError("Missing nonempty PT_LOAD")
+    return {"nonempty_load_count": len(ranges), "strict_4k_page_review": strict_pages}
+
+
 def audit_symbols(targets, aliases, objects, edges):
     """Potential glibc providers within each target's static closure.
 
@@ -158,7 +192,7 @@ def audit_symbols(targets, aliases, objects, edges):
     return {"targets":reports,"limit_exceeded":False}
 
 
-def audit(root, targets=TARGETS):
+def audit(root, targets=TARGETS, *, strict_pages=False):
     root = root.resolve(strict=True)
     targets = tuple(targets)
     queue = deque(targets)
@@ -182,6 +216,7 @@ def audit(root, targets=TARGETS):
             total += len(raw)
             if total > MAX_TOTAL:
                 raise ValueError("Tizen dependency byte budget exceeded")
+            load_review = review_loads(raw, strict_pages=strict_pages)
             info = inspect(raw)
             if info["abi"] != "arm":
                 raise ValueError("Expected Tizen ARM32 ABI")
@@ -200,6 +235,7 @@ def audit(root, targets=TARGETS):
                 problems.append({"path":guest,"reason":"RPATH/RUNPATH requires review"})
             files[canonical] = {"bytes":len(raw), "sha256":hashlib.sha256(raw).hexdigest(),
                                 "needed":info["needed"], "interpreter":interp,
+                                "load_review":load_review,
                                 "elf_type":info["elf_type"], "has_dynamic":info["has_dynamic"],
                                 "soname":info["soname"], "arm_flags":flags,
                                 "dynamic_symbol_count":info["dynamic_symbol_count"],
@@ -275,7 +311,7 @@ def audit(root, targets=TARGETS):
         or not info["relocations"]["symbol_indices_checked"]
         or not info["relocations"]["tls_symbol_types_checked"])
     return {"status":"TIZEN_DEPENDENCY_REVIEW_REQUIRED" if problems else "TIZEN_STATIC_CLOSURE_ONLY",
-            "symbol_candidates":symbol_report,"relocation_review_objects":relocation_review,
+            "strict_4k_page_review":strict_pages,"symbol_candidates":symbol_report,"relocation_review_objects":relocation_review,
             "files":files,"edges":edges,"problems":problems,"aliases":aliases,
             "version_records_checked":versions_checked,"weak_versions_missing":weak_missing,
             "dlopen_plugins_verified":False,"symbol_resolution_verified":False,
@@ -284,8 +320,9 @@ def audit(root, targets=TARGETS):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root",type=Path,required=True)
+    p.add_argument("--strict-pages",action="store_true",help="Conservative 4 KiB PT_LOAD page review")
     a=p.parse_args()
-    report=audit(a.root)
+    report=audit(a.root,strict_pages=a.strict_pages)
     print(json.dumps(report,indent=2,sort_keys=True))
     return 2 if report["problems"] else 0
 
