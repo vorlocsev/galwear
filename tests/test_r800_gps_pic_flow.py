@@ -454,7 +454,6 @@ class WideThumbTests(unittest.TestCase):
         self.assertEqual(r['pic_flow']['events'], [])
         self.assertEqual(r['pic_flow']['boundaries'][0]['reason'], 'literal_outside_marked_data')
 
-
 class ThumbITTests(unittest.TestCase):
     def evaluate(self, words, initial=None, relocations=None, data_ranges=()):
         from r800_gps_pic_flow import audit_thumb
