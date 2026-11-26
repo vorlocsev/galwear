@@ -118,22 +118,63 @@ int pthread_mutex_unlock(void *);
 #endif
 
 #include "gps_ipc.h"
+#include "gps_server_v2.h"
 
 /* daemon: the connected gps.r800.so, or -1 */
 static int client = -1;
+static enum gps_server_mode client_mode;
+static unsigned int client_data_id;
 GPS_MUTEX(mtx);   /* target glibc default mutex; native pthread in fixture */
+
+/* Caller holds mtx. Only the serve loop closes the descriptor. */
+static int send_locked(const char *line, int len)
+{
+	if (client < 0) return -1;
+	if (len <= 0 || send(client, line, (size_t)len, MSG_DONTWAIT | MSG_NOSIGNAL) != len) {
+		shutdown(client, SHUT_RDWR);
+		client = -1;
+		client_data_id = 0;
+		return -1;
+	}
+	return 0;
+}
+
 static void out(const char *line, int len)
 {
 	pthread_mutex_lock(&mtx);
-	if (client >= 0 && len > 0 &&
-	    send(client, line, (size_t)len, MSG_DONTWAIT | MSG_NOSIGNAL) != len) {
-		/* Only the serve loop owns close(c). Shutdown wakes its reader
-		 * and prevents another callback from writing a partial frame. */
-		shutdown(client, SHUT_RDWR);
-		client = -1;
+	if (client >= 0 && len > 0) {
+		if (client_mode == GPS_SERVER_V1) {
+			send_locked(line, len);
+		} else if (client_mode == GPS_SERVER_V2 && client_data_id) {
+			char framed[GPS_FRAME_CAPACITY];
+			int n = snprintf(framed, sizeof(framed), "DATA %u %.*s",
+					 client_data_id, len, line);
+			if (n <= 0 || n >= (int)sizeof(framed) || n > GPS_FRAME_CAPACITY-1)
+				send_locked("", 0);
+			else
+				send_locked(framed, n);
+		}
 	}
 	pthread_mutex_unlock(&mtx);
 }
+
+/* Publish v2 data ID only after successful ACK START, in the same lock
+ * as callback writes. STOP closes the channel before the vendor call. */
+static int protocol_publish(enum gps_server_mode mode, unsigned int id,
+                            const char *reply, int len)
+{
+	int r = 0;
+	pthread_mutex_lock(&mtx);
+	client_mode = mode;
+	client_data_id = 0;
+	if (client < 0 || (reply && send_locked(reply, len) != 0))
+		r = -1;
+	else
+		client_data_id = id;
+	pthread_mutex_unlock(&mtx);
+	return r;
+}
+
 static int daemon_mode;
 
 #include "gps_abi.h"
@@ -536,7 +577,8 @@ static int serve(int dirfd)
 	for (;;) {
 		char buf[256];
 		struct gps_frame frame = {{0}, 0};
-		int on = 0, fatal = 0;
+		struct gps_v2_server protocol = {0};
+		int fatal = 0;
 		int ready = gps_wait_readable(ls);
 		if (ready <= 0) { close(ls); return ready < 0 ? 1 : 0; }
 		int c = accept(ls, 0, 0);
@@ -548,6 +590,8 @@ static int serve(int dirfd)
 		if (!peer_allowed(c)) { close(c); continue; }
 		pthread_mutex_lock(&mtx);
 		client = c;
+		client_mode = GPS_SERVER_UNDECIDED;
+		client_data_id = 0;
 		pthread_mutex_unlock(&mtx);
 		printf("client connected\n");
 		fflush(0);
@@ -565,25 +609,40 @@ static int serve(int dirfd)
 					goto disconnected;
 				if (state == 0)
 					continue;
-				if (!strcmp(s, "START") && !on) {
-					if (session(1) != 0) {
+				unsigned int id;
+				enum gps_server_action action = gps_server_plan(&protocol, s, &id);
+				if (action == GPS_SERVER_REJECT)
+					goto disconnected;
+				if (action == GPS_SERVER_READY) {
+					if (protocol_publish(GPS_SERVER_V2, 0, GPS_V2_READY "\n",
+							     sizeof(GPS_V2_READY "\n")-1))
+						goto disconnected;
+				} else if (action == GPS_SERVER_START || action == GPS_SERVER_STOP) {
+					int start = action == GPS_SERVER_START;
+					/* v1 permits synchronous callbacks. v2 discards
+					 * callbacks until ACK START, and during STOP. */
+					if (protocol_publish(protocol.mode, 0, 0, 0))
+						goto disconnected;
+					if (session(start) != 0) {
 						fatal = 1;
 						goto disconnected;
 					}
-					on = 1;
-				} else if (!strcmp(s, "STOP") && on) {
-					if (session(0) != 0) {
-						fatal = 1;
-						goto disconnected;
+					gps_server_commit(&protocol, action, id);
+					if (protocol.mode == GPS_SERVER_V2) {
+						char ack[40];
+						int len = snprintf(ack, sizeof(ack), "ACK %s %u\n",
+								   start ? "START" : "STOP", id);
+						if (len <= 0 || len >= (int)sizeof(ack) ||
+						    protocol_publish(GPS_SERVER_V2, start ? id : 0, ack, len))
+							goto disconnected;
 					}
-					on = 0;
-				} else if (!strncmp(s, "TIME ", 5)) {
+				} else if (action == GPS_SERVER_TIME) {
 					/* TIME <utc_ms> [<elapsedRealtime_ms> <unc_ms>] */
 					struct gps_time_command t;
 					if (!gps_parse_time(s + 5, &t))
 						goto disconnected;
 					inject_utc(t.utc, t.elapsed, t.uncertainty);
-				} else if (!strncmp(s, "LOC ", 4)) {
+				} else if (action == GPS_SERVER_LOC) {
 					/* LOC <lat> <lon> <acc_m>: Android's network location */
 					struct gps_loc_command loc;
 					if (!gps_parse_loc(s + 4, &loc))
@@ -601,9 +660,11 @@ disconnected:
 		pthread_mutex_lock(&mtx);
 		if (client == c)
 			client = -1;
+		client_data_id = 0;
+		client_mode = GPS_SERVER_UNDECIDED;
 		pthread_mutex_unlock(&mtx);
 		close(c);
-		if (fatal || (on && session(0) != 0)) {
+		if (fatal || (protocol.active && session(0) != 0)) {
 			/* Unknown engine state: fail closed rather than accept a new client. */
 			close(ls);
 			return 1;
