@@ -7,6 +7,8 @@ import struct
 
 from r800_gps_interface_table import discover, parse_elf, symbolic_code_targets, LIMIT
 
+from r800_gps_pic_flow import audit as pic_flow
+
 MAX_RANGE = 65536
 MAX_REFS = 4096
 ROLES = ("factory", "get_extension")
@@ -230,9 +232,12 @@ def audit(raw, ranges=(), *, symbolic=False):
         code.append({"role_assumption": role, "isa_assumption": isa, "start_va": start,
                      "size": size, "get_extension_entry_matches": matches,
                      "literal_load_clues": refs,
+                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct)
+                     if isa == "arm" else None,
                      "pic_clues": arm_pic_clues(raw, off, start, size, relocations, tables, direct)
                      if isa == "arm" else thumb_pic_clues(raw, off, start, size, relocations, tables, direct)})
-        if sum(len(r["literal_load_clues"]) + len(r["pic_clues"]) for r in code) > MAX_REFS:
+        if sum(len(r["literal_load_clues"]) + len(r["pic_clues"])
+               + len((r["pic_flow"] or {}).get("events", [])) for r in code) > MAX_REFS:
             raise ValueError("Code reference budget exceeded")
     return {"schema": "galwear-r800-gps-interface-xref-v1", "status": "STATIC_XREF_CLUES_ONLY",
             "sha256": discovery["sha256"], "table_candidates": list(tables.values()),
