@@ -98,10 +98,10 @@ def parse_elf(raw, *, include_tags=False):
     return (mapping, relocations, tags) if include_tags else (mapping, relocations)
 
 
-def symbolic_code_targets(raw, mapping, relocations, tags):
-    """Conservative zero-addend REL function references; never apply relocations."""
+def symbolic_code_targets(raw, mapping, relocations, tags, *, objects=False):
+    """Conservative zero-addend REL references; never apply relocations."""
     wanted = {slot: (typ, sym) for slot, (typ, sym) in relocations.items()
-              if typ in (2, 21, 22) and sym}
+              if typ in ((2, 21) if objects else (2, 21, 22)) and sym}
     if not wanted:
         return {}
     # This optional mode deliberately excludes versioned and GNU-only symbol
@@ -155,25 +155,29 @@ def symbolic_code_targets(raw, mapping, relocations, tags):
         if end < 0:
             raise ValueError("Unterminated relocation symbol name")
         binding, visibility = info >> 4, other & 3
-        if (info & 15 != 2 or not 0 < section < 0xff00 or not value or not size
+        if (info & 15 != (1 if objects else 2) or not 0 < section < 0xff00 or not value or not size
                 or not (binding == 0 or binding in (1, 2) and visibility in (1, 2, 3))):
             continue
         try:
             off, _ = mapping(slot, 4)
             if struct.unpack_from("<I", raw, off)[0] != 0:
                 continue
-            start = value & ~1
-            align = 2 if value & 1 else 4
+            start = value if objects else value & ~1
+            align = 4 if objects else (2 if value & 1 else 4)
             if start % align or size % align:
                 continue
             _, flags = mapping(start, size)
-            if not flags & 1 or flags & 2:
+            if objects:
+                if not flags & 4 or flags & 1:
+                    continue
+            elif not flags & 1 or flags & 2:
                 continue
         except ValueError:
             continue
         targets[slot] = {"value": value, "symbol_index": sym,
                          "symbol_name": strings[name:end].decode("utf-8", "replace"),
-                         "relocation_type": typ, "zero_addend_only": True}
+                         "relocation_type": typ, "zero_addend_only": True,
+                         "symbol_size": size}
     return targets
 
 
