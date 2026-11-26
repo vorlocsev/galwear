@@ -15,7 +15,8 @@ command -v timeout >/dev/null
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 trap 'exit 1' HUP INT TERM
-mkdir -p "$TMP/guest/lib" "$TMP/guest/usr/lib" "$TMP/guest/dev" "$TMP/guest/proc"
+mkdir -p "$TMP/guest/lib" "$TMP/guest/usr/lib" "$TMP/guest/dev" "$TMP/guest/proc" "$TMP/guest/opt/usr/r800dev"
+mkdir -m 700 "$TMP/daemon-runtime"
 : > "$TMP/guest/qemu"
 python3 "$ROOT/build/r800_gps_donor_snapshot.py" create "$SRC" "$TMP/guest/lib" "$TMP/donor.json"
 R800_XTRA_ABI=0 R800_TIZEN_ARCHIVE='' sh "$ROOT/src/tools/gps/build.sh" "$NDK" "$TMP/guest/lib" "$TMP/guest/gpsbridge"
@@ -39,6 +40,28 @@ for stage in 0 1 2 3 4; do
     sha256sum -c "$TMP/stage.sha"
     python3 "$ROOT/build/r800_gps_donor_snapshot.py" verify "$SRC" "$TMP/guest/lib" "$TMP/donor.json"
     python3 "$ROOT/build/r800_gps_mock_transcript.py" --stage "$stage" --exit-code "$rc" --log "$TMP/run-$stage.log"
+    if [ "$stage" = 0 ]; then
+        # Only the fresh private runtime directory is writable by the guest.
+        # Pathname UNIX sockets can be reached from the host via this mount.
+        (
+            timeout -k 5s 45s "$BWRAP" --unshare-all --die-with-parent --new-session \
+                --clearenv --ro-bind "$TMP/guest" / --ro-bind "$QEMU" /qemu \
+                --bind "$TMP/daemon-runtime" /opt/usr/r800dev \
+                --dev /dev --proc /proc --chdir / \
+                /qemu -cpu cortex-a15 -L / -E LD_LIBRARY_PATH=/lib /gpsbridge daemon \
+                > "$TMP/daemon.log" 2>&1 &
+            daemon_pid=$!
+            trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
+            trap 'exit 1' HUP INT TERM
+            timeout -k 2s 35s python3 "$ROOT/build/r800_gps_mock_peer.py" \
+                --socket "$TMP/daemon-runtime/gps.sock" --log "$TMP/daemon.log"
+            kill -0 "$daemon_pid"
+        )
+        (cd "$TMP/guest" && sha256sum -c "$TMP/bridge.sha")
+        sha256sum -c "$TMP/stage.sha"
+        python3 "$ROOT/build/r800_gps_donor_snapshot.py" verify "$SRC" "$TMP/guest/lib" "$TMP/donor.json"
+        echo "QEMU_SYNTHETIC_GPS_DAEMON_SOCKET=PASS"
+    fi
 done
 echo "QEMU_SYNTHETIC_GPS_HAL=PASS"
 echo "GNSS_RUNTIME_VERIFIED=false"
