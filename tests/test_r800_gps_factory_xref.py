@@ -730,5 +730,45 @@ class SymbolicCallbackTests(unittest.TestCase):
             self.analyze(raw)
 
 
+class StrictPageXrefTests(unittest.TestCase):
+    @staticmethod
+    def aligned(raw):
+        # Sectionless fixtures only: preserve virtual addresses and move
+        # the file-backed data and PT_DYNAMIC to a congruent page offset.
+        raw = bytearray(raw)
+        raw = raw[:0x200] + bytearray(0xe00) + raw[0x200:]
+        for index in (1, 2):
+            struct.pack_into("<I", raw, 52 + index * 32 + 4, 0x1000)
+        return bytes(raw)
+
+    def test_factory_and_interface_policy(self):
+        from r800_gps_interface_xref import audit as xref
+        raw = fixture()
+        self.assertFalse(target.audit(raw)["strict_4k_page_review"])
+        for review in (target.audit, xref):
+            with self.subTest(review=review.__module__):
+                with self.assertRaisesRegex(ValueError, "page offset mismatch"):
+                    review(raw, strict_pages=True)
+                report = review(self.aligned(raw), strict_pages=True)
+                self.assertTrue(report["strict_4k_page_review"])
+                self.assertFalse(report["safe_to_flash"])
+                self.assertFalse(report["runtime_verified"])
+                self.assertIsNone(report["selected_abi"])
+
+    def test_factory_automatic_symbolic_callback_policy(self):
+        for got in (False, True):
+            with self.subTest(got=got):
+                raw = SymbolicCallbackTests().fixture(got=got)
+                options = dict(auto_callees=True, callback_calls=True,
+                               symbolic=True, callee_depth=2, strict_pages=True)
+                with self.assertRaisesRegex(ValueError, "page offset mismatch"):
+                    target.audit(bytes(raw), **options)
+                report = target.audit(self.aligned(raw), **options)
+                self.assertTrue(report["strict_4k_page_review"])
+                self.assertEqual(report["symbolic_callback_slot_count"], 1)
+                self.assertEqual(report["function_got_slot_candidate_count"], int(got))
+                self.assertFalse(report["safe_to_flash"])
+
+
 if __name__ == "__main__":
     unittest.main()
