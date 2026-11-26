@@ -15,6 +15,7 @@ import r800_tzlite_audit as audit
 import r800_stage_tzlite as stage
 import r800_tzlite_manifest as manifest
 from r800_tzlite_image_binding import compare
+from r800_tzlite_legacy_image_scope import inspect_image
 import r800_gnss_readiness as readiness
 
 PROVIDER="/usr/lib/libfixture-real.so"
@@ -278,6 +279,36 @@ class RealStageTests(unittest.TestCase):
         self.assertEqual(result["original_metadata"]["entries"]["/usr/lib/private"]["kind"],"directory")
         self.assertFalse(dac["alias_traversal_verified"])
         self.assertFalse(dac["effective_access_verified"])
+
+    def test_extra_plugin_real_elf(self):
+        plugin=self.root/"usr/lib/sensor/extra.so"
+        shutil.copyfile(self.root/audit.PLUGINS[0].lstrip("/"),plugin)
+        image,sha=self.image_fixture()
+        result=inspect_image(image,sha,audit_plugins=True)
+        report=result["extra_plugin_audit"]
+        self.assertEqual(report["status"],"STATIC_EXTRA_PLUGIN_CLOSURE_ONLY",report["problems"])
+        self.assertEqual(report["candidate_count"],1)
+        path="/usr/lib/sensor/extra.so"
+        self.assertEqual(report["candidates"][path]["sha256"],hashlib.sha256(plugin.read_bytes()).hexdigest())
+        self.assertIn("libfixture.so.1",report["dependency_evidence"]["files"][path]["needed"])
+        self.assertFalse(report["dlopen_verified"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
+    def test_extra_plugin_bad_elf(self):
+        (self.root/"usr/lib/sensor/broken.so").write_bytes(b"\x7fELFbroken")
+        image,sha=self.image_fixture()
+        report=inspect_image(image,sha,audit_plugins=True)
+        self.assertIn("EXTRA_PLUGIN_CLOSURE_REVIEW",report["problems"])
+        extra=report["extra_plugin_audit"]
+        self.assertEqual(extra["status"],"REVIEW_REQUIRED")
+        self.assertEqual(extra["candidates"]["/usr/lib/sensor/broken.so"]["status"],"REVIEW_REQUIRED")
+        self.assertFalse(extra["safe_to_flash"])
+
+    def test_extra_plugin_no_candidates(self):
+        image,sha=self.image_fixture()
+        extra=inspect_image(image,sha,audit_plugins=True)["extra_plugin_audit"]
+        self.assertEqual(extra["status"],"NO_ADDITIONAL_ELF_CANDIDATES_REPORTED")
+        self.assertFalse(extra["plugin_completeness_verified"])
 
     def test_image_configuration_changed(self):
         digest=self.candidate_digest()

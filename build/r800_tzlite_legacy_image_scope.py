@@ -157,7 +157,7 @@ def inspect_snapshot(resolver):
             "runtime_verified":False,"safe_to_flash":False}
 
 
-def inspect_image(image,sha):
+def inspect_image(image,sha,*,audit_plugins=False):
     if not re.fullmatch(r"[0-9a-f]{64}",sha):
         raise ValueError("Expected lowercase image SHA-256")
     tool=shutil.which("debugfs")
@@ -171,7 +171,14 @@ def inspect_image(image,sha):
         before=image_info(snapshot)
         if before["sha256"]!=sha:
             raise ValueError("Snapshot digest mismatch")
-        report=inspect_snapshot(ImageResolver(tool,snapshot,scratch))
+        resolver=ImageResolver(tool,snapshot,scratch)
+        report=inspect_snapshot(resolver)
+        if audit_plugins:
+            from r800_tzlite_extra_plugins import check
+            report["extra_plugin_audit"]=check(resolver,report)
+            if report["extra_plugin_audit"]["problems"]:
+                report["problems"]=sorted(set(report["problems"]+["EXTRA_PLUGIN_CLOSURE_REVIEW"]))
+                report["status"]="LEGACY_SCOPE_REVIEW_REQUIRED"
         st=image.lstat()
         if (st.st_dev,st.st_ino,st.st_mode,st.st_size,st.st_mtime_ns,st.st_ctime_ns)!=identity:
             raise ValueError("Donor image changed")
@@ -184,9 +191,10 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--image",required=True,type=Path)
     p.add_argument("--sha256",required=True)
+    p.add_argument("--audit-plugins",action="store_true")
     a=p.parse_args()
     try:
-        report=inspect_image(a.image,a.sha256)
+        report=inspect_image(a.image,a.sha256,audit_plugins=a.audit_plugins)
     except (OSError,ValueError,subprocess.SubprocessError,RecursionError) as exc:
         report={"schema":"r800-tzlite-legacy-image-scope-v1","status":"LEGACY_SCOPE_REVIEW_REQUIRED",
                 "problems":[str(exc)],"safe_to_flash":False}
