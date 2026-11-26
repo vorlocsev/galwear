@@ -118,7 +118,7 @@ def thumb_pic_clues(raw, off, start, size, relocations, tables, direct):
     return clues
 
 
-def audit(raw, ranges=(), *, symbolic=False):
+def audit(raw, ranges=(), *, symbolic=False, assume_aapcs=False):
     discovery = discover(raw, symbolic=symbolic)
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
     tables = {r["table_va"]: r for r in discovery["candidates"]}
@@ -232,12 +232,12 @@ def audit(raw, ranges=(), *, symbolic=False):
         code.append({"role_assumption": role, "isa_assumption": isa, "start_va": start,
                      "size": size, "get_extension_entry_matches": matches,
                      "literal_load_clues": refs,
-                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct)
-                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct),
+                     "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping)
+                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct, assume_aapcs=assume_aapcs, mapping=mapping),
                      "pic_clues": arm_pic_clues(raw, off, start, size, relocations, tables, direct)
                      if isa == "arm" else thumb_pic_clues(raw, off, start, size, relocations, tables, direct)})
         if sum(len(r["literal_load_clues"]) + len(r["pic_clues"])
-               + len((r["pic_flow"] or {}).get("events", [])) for r in code) > MAX_REFS:
+               + len((r["pic_flow"] or {}).get("events", [])) + len((r["pic_flow"] or {}).get("assumed_calls", [])) for r in code) > MAX_REFS:
             raise ValueError("Code reference budget exceeded")
     return {"schema": "galwear-r800-gps-interface-xref-v1", "status": "STATIC_XREF_CLUES_ONLY",
             "sha256": discovery["sha256"], "table_candidates": list(tables.values()),
@@ -264,9 +264,10 @@ def main():
     parser.add_argument("--library", required=True, type=Path)
     parser.add_argument("--range", action="append", type=parse_range, default=[])
     parser.add_argument("--symbolic", action="store_true")
+    parser.add_argument("--assume-aapcs", action="store_true", help="Opt in to opaque direct call summaries")
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic)
+        report = audit(read_regular(args.library, LIMIT), args.range, symbolic=args.symbolic, assume_aapcs=args.assume_aapcs)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
