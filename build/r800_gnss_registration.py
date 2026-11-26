@@ -17,37 +17,58 @@ SERVICE = "/vendor/bin/hw/" + NAME + "@1.0-service"
 IMPL = "/vendor/lib/hw/" + NAME + "@1.0-impl.so"
 MODULE = "/vendor/lib/hw/gps.r800.so"
 HIDL = NAME + "@1.0.so"
+SEC_NAME = "vendor.samsung.hardware.gnss"
+SEC_FQ = SEC_NAME + "@1.0::ISecGnss"
+SEC_SERVICE = "/vendor/bin/hw/" + SEC_NAME + "@1.0-service"
+SEC_IMPL = "/vendor/lib/hw/" + SEC_NAME + "@1.0-impl.so"
+SEC_HIDL = SEC_NAME + "@1.0.so"
 LIMIT = 64 * 1024**2
+
+
+def select_service(init):
+    services = init["gnss_services"]
+    if len(services)!=1 or services[0]["executable"] not in (SERVICE,SEC_SERVICE):
+        raise ValueError("Expected one supported GNSS init service (AOSP or Samsung)")
+    service=services[0]
+    if any(d["name"]==service["name"] for d in init["duplicate_services"]):
+        raise ValueError("Duplicate GNSS init service")
+    return service
+
+
+def declaration_matches(entries, name, interface):
+    found=[e for e in entries if e["name"]==name]
+    return len(found)==1 and all(
+        e["format"]=="hidl" and e["interface"]==interface and
+        e["instance"]=="default" and e["version"]==[1,0,0] and
+        e["transport"]=="hwbinder" for e in found)
 
 
 def registration_problems(vintf, init):
     issues = []
     declarations = [e for d in vintf["files"].values()
-                    if d["kind"] == "manifest" and d["type"] == "device"
-                    for e in d["entries"] if e["name"] == NAME]
-    if len(declarations) != 1 or not any(
-        e["format"] == "hidl" and e["interface"] == "IGnss"
-        and e["instance"] == "default" and e["version"] == [1,0,0]
-        and e["transport"] == "hwbinder" for e in declarations):
+                    if d["kind"]=="manifest" and d["type"]=="device"
+                    for e in d["entries"] if e["name"] in (NAME,SEC_NAME)]
+    if not declaration_matches(declarations,NAME,"IGnss"):
         issues.append("Expected unique HIDL 1.0 IGnss/default hwbinder declaration")
-    if any("override" in r.lower() and NAME in r for d in vintf["files"].values()
-           for r in d["review"]):
+    if any("override" in r.lower() and (NAME in r or SEC_NAME in r)
+           for d in vintf["files"].values() for r in d["review"]):
         issues.append("GNSS manifest override requires merge review")
-    services = [s for s in init["gnss_services"] if s["executable"] == SERVICE]
-    if len(services) != 1:
-        issues.append("Expected unique GNSS 1.0 init service")
-    else:
-        s = services[0]
-        opts = s["options"]
-        interfaces = [o["args"] for o in opts if o["name"] == "interface"]
-        if interfaces and [FQ,"default"] not in interfaces:
+    try:
+        service=select_service(init)
+        samsung=service["executable"]==SEC_SERVICE
+        if samsung and not declaration_matches(declarations,SEC_NAME,"ISecGnss"):
+            issues.append("Expected unique Samsung HIDL 1.0 ISecGnss/default declaration")
+        if not samsung and any(e["name"]==SEC_NAME for e in declarations):
+            issues.append("Unexpected Samsung manifest declaration with AOSP service")
+        opts=service["options"]
+        interfaces=[o["args"] for o in opts if o["name"]=="interface"]
+        allowed=[[FQ,"default"]]+([[SEC_FQ,"default"]] if samsung else [])
+        if any(i not in allowed for i in interfaces) or len({tuple(i) for i in interfaces})!=len(interfaces):
             issues.append("GNSS init interface differs from manifest")
-        if any(o["name"] == "disabled" for o in opts) and [FQ,"default"] not in interfaces:
-            issues.append("Disabled GNSS service has no matching lazy interface")
-        if any(d["name"] == s["name"] for d in init["duplicate_services"]):
-            issues.append("Duplicate GNSS init service")
-        if any(x["executable"] != SERVICE for x in init["gnss_services"]):
-            issues.append("Additional GNSS init service requires review")
+        if any(o["name"]=="disabled" for o in opts) and any(i not in interfaces for i in allowed):
+            issues.append("Disabled GNSS service has no matching lazy interface for every declaration")
+    except ValueError as exc:
+        issues.append(str(exc))
     if vintf["errors"] or init["errors"] or init["unresolved_imports"]:
         issues.append("VINTF or init inventory incomplete")
     return issues
@@ -104,6 +125,8 @@ def binary(root, name, module=False, service=False):
             raise ValueError("Missing exported HMI object")
     if service and HIDL not in obj["needed"]:
         raise ValueError("GNSS 1.0 interface library not a direct dependency")
+    if name==SEC_SERVICE and SEC_HIDL not in obj["needed"]:
+        raise ValueError("Samsung GNSS interface library not a direct dependency")
     if any(n.startswith(("libc.so.6","libpthread.so.0","libdl.so.2"))
            for n in obj["needed"]):
         raise ValueError("Tizen glibc dependency in Android component")
@@ -113,17 +136,28 @@ def binary(root, name, module=False, service=False):
 
 def audit(root):
     root=root.resolve(strict=True)
-    issues=registration_problems(vintf_audit(root),init_audit(root))
+    init=init_audit(root)
+    issues=registration_problems(vintf_audit(root),init)
     records=properties(root)
     issues.extend(property_problems(records))
     binaries={}
-    for name in (SERVICE,IMPL,MODULE,"/vendor/lib/"+HIDL):
+    profile="UNRESOLVED"
+    paths=[]
+    try:
+        service=select_service(init)["executable"]
+        profile="SAMSUNG_J4_CANDIDATE" if service==SEC_SERVICE else "AOSP_CANDIDATE"
+        paths=[service,IMPL,MODULE,"/vendor/lib/"+HIDL]
+        if service==SEC_SERVICE:
+            paths.extend((SEC_IMPL,"/vendor/lib/"+SEC_HIDL))
+    except ValueError:
+        pass
+    for name in paths:
         try:
-            binaries[name]=binary(root,name,module=name==MODULE,service=name==SERVICE)
+            binaries[name]=binary(root,name,module=name==MODULE,service=name in (SERVICE,SEC_SERVICE))
         except (OSError,ValueError) as exc:
             issues.append(name+": "+str(exc))
     return {"status":"REVIEW_REQUIRED" if issues else "STATIC_GNSS_CONTRACT_ONLY",
-            "problems":issues,"property_candidates":records,"binaries":binaries,
+            "problems":issues,"service_profile":profile,"property_candidates":records,"binaries":binaries,
             "effective_properties_verified":False,"manifest_merge_verified":False,
             "linker_namespace_verified":False,"selinux_access_verified":False,
             "socket_mapping_verified":False,"hal_registered":False,

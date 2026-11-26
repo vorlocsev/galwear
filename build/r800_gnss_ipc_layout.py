@@ -9,7 +9,7 @@ import stat
 
 from r800_android_userspace_preflight import guest_path, read_regular
 from r800_init_inventory import audit as init_audit
-from r800_gnss_registration import SERVICE
+from r800_gnss_registration import select_service
 
 ANDROID_DIR = "/oem/r800dev"
 TIZEN_DIR = "/opt/usr/r800dev"
@@ -56,12 +56,9 @@ def resolve_id(token, accounts):
 
 
 def identity(init, users, groups):
-    services = [s for s in init["gnss_services"] if s["executable"] == SERVICE]
-    if len(services) != 1 or init["errors"] or init["unresolved_imports"]:
+    if init["errors"] or init["unresolved_imports"]:
         raise ValueError("GNSS service inventory incomplete or ambiguous")
-    service = services[0]
-    if any(d["name"] == service["name"] for d in init["duplicate_services"]):
-        raise ValueError("Duplicate GNSS service")
+    service = select_service(init)
     opts = service["options"]
     user = [o["args"] for o in opts if o["name"] == "user"]
     group = [o["args"] for o in opts if o["name"] == "group"]
