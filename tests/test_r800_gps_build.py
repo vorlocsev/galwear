@@ -138,7 +138,7 @@ class BuildContract(unittest.TestCase):
                      'r800_gps_publish.py', 'r800_gps_provenance.py',
                      'r800_android_linker_audit.py', 'r800_tizen_dependencies.py',
                      'r800_pack_tizen_stage.py', 'r800_verify_tizen_stage.py',
-                     'r800_gps_host_elf.py', 'r800_gps_host_snapshot.py'):
+                     'r800_gps_host_elf.py', 'r800_gps_host_snapshot.py', 'r800_gps_host_trace.py'):
             shutil.copyfile(SCRIPT.parents[3] / 'build' / name,
                             self.root / 'build' / name)
         (self.root / 'build/r800_gps_link_gate.py').write_text(GATE)
@@ -177,7 +177,7 @@ class BuildContract(unittest.TestCase):
         self.assertFalse(evidence[0]['safe_to_flash'])
         self.assertIsNone(evidence[0]['tizen_archive'])
         self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
-        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-snapshot-v4')
+        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-snapshot-v5')
         self.assertEqual(evidence[0]['inputs']['xtra_abi'], 0)
         host = evidence[0]['inputs']['inputs']['host_elf']
         self.assertEqual(host['status'], 'HOST_REVIEW_REQUIRED')
