@@ -67,9 +67,11 @@ def capture(root, qemu, bwrap):
     paths.update(probe=root / "probe", plugin=root / "probe_plugin.so",
                  qemu=qemu.resolve(strict=True), bwrap=bwrap.resolve(strict=True))
     from r800_gps_probe_linked import check, LIMIT
+    from r800_gps_probe_plugin import check as check_plugin, LIMIT as PLUGIN_LIMIT
     result = {name: hashlib.sha256(read_regular(path, 128 * 1024**2)).hexdigest()
-              for name, path in paths.items() if name != "probe"}
+              for name, path in paths.items() if name not in ("probe", "plugin")}
     result["probe"] = check(read_regular(paths["probe"], LIMIT))["sha256"]
+    result["plugin"] = check_plugin(read_regular(paths["plugin"], PLUGIN_LIMIT))["sha256"]
     return result
 
 
