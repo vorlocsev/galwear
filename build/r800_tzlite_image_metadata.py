@@ -6,7 +6,10 @@ from r800_extract_ext4 import command
 
 
 def parse_inode(text, inode, kind):
-    head=re.findall(r"^Inode:\s+(\d+)\s+Type:\s+(\w+)\s+Mode:\s+([0-7]{3,4})\s+Flags:",text,re.M)
+    # e2fsprogs internal_dump_inode prints "0%03o" (mode & 07777).
+    # Special modes therefore have five digits: 04755, 02755, 01777.
+    # Accept unpadded three/four-digit modes as well, never file type bits.
+    head=re.findall(r"^Inode:[ \t]+(\d+)[ \t]+Type:[ \t]+(\w+)[ \t]+Mode:[ \t]+(0[0-7]{4}|[0-7]{3,4})[ \t]+Flags:",text,re.M)
     owners=re.findall(r"^User:\s+(\d+)\s+Group:\s+(\d+)(?:\s|$)",text,re.M)
     links=re.findall(r"^Links:\s+(\d+)(?:\s|$)",text,re.M)
     if len(head)!=1 or len(owners)!=1 or len(links)!=1:
@@ -15,7 +18,8 @@ def parse_inode(text, inode, kind):
     uid,gid=map(int,owners[0])
     count=int(links[0])
     mode=int(mode,8)
-    if int(ino)!=inode or actual!=kind or not 0<=uid<2**32 or not 0<=gid<2**32 or not 1<=count<2**32:
+    if (int(ino)!=inode or actual!=kind or not 0<=mode<=0o7777
+            or not 0<=uid<2**32 or not 0<=gid<2**32 or not 1<=count<2**32):
         raise ValueError("Invalid ext4 inode metadata")
     return {"inode":inode,"kind":kind,"uid":uid,"gid":gid,"mode":oct(mode),"links":count}
 
@@ -44,7 +48,10 @@ def inspect_metadata(resolver,files):
             raise ValueError("Unexpected audited inode type:"+name)
         if inode not in cache:
             response=command(resolver.tool,resolver.snapshot,"stat <%d>"%inode)
-            cache[inode]=parse_inode(response.stdout,inode,kind)
+            try:
+                cache[inode]=parse_inode(response.stdout,inode,kind)
+            except ValueError as exc:
+                raise ValueError("Metadata parse failed:"+name+": "+str(exc)) from exc
         rec=cache[inode]
         if rec["kind"]!=kind:
             raise ValueError("Inconsistent inode type:"+name)
