@@ -454,6 +454,35 @@ class RealStageTests(unittest.TestCase):
         self.assertFalse(plan["cache_generation_authorized"])
         self.assertFalse(plan["safe_to_flash"])
 
+    def test_gconv_text_real_elf(self):
+        directory=self.root/"usr/lib/gconv"
+        directory.mkdir()
+        (directory/"gconv-modules").write_text("module UTF-16// INTERNAL FIXTURE\n")
+        src=self.parent/"gconv.c"
+        src.write_text("int gconv(void) { return 0; }\n")
+        subprocess.run(FLAGS+[str(src),"-fPIC","-shared","-Wl,-soname,FIXTURE.so",
+                              "-o",str(directory/"FIXTURE.so")],
+                       check=True,timeout=30,capture_output=True)
+        image,sha=self.image_fixture()
+        report=inspect_image(image,sha,review_gconv=True,extended_manifest=True)
+        result=report["gconv_review"]
+        name="/usr/lib/gconv/FIXTURE.so"
+        self.assertEqual(result["status"],"STATIC_GCONV_CANDIDATES_ONLY",result["problems"])
+        self.assertEqual(result["modules"][name]["status"],"STATIC_GCONV_MODULE_CANDIDATE_ONLY")
+        self.assertNotIn(name,report["extended_manifest"]["files"])
+        self.assertFalse(result["staging_authorized"])
+        self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
+
+    def test_gconv_text_missing_module(self):
+        directory=self.root/"usr/lib/gconv"
+        directory.mkdir()
+        (directory/"gconv-modules").write_text("module UTF-16// INTERNAL MISSING\n")
+        image,sha=self.image_fixture()
+        result=inspect_image(image,sha,review_gconv=True)["gconv_review"]
+        self.assertEqual(result["status"],"REVIEW_REQUIRED")
+        self.assertTrue(result["modules"]["/usr/lib/gconv/MISSING.so"]["problems"])
+        self.assertFalse(result["safe_to_flash"])
+
     def test_cache_existing_donor_alias_not_staged(self):
         from test_r800_tzlite_cache_review import new_cache
         (self.root/"etc/ld.so.cache").write_bytes(new_cache(path=b"/usr/lib/libfixture.so.1"))
