@@ -193,9 +193,102 @@ def factory_range(raw):
     return checked_range(mapping, index, value, size, info, other, section, "SYSV", None)
 
 
-def audit(raw):
+def automatic_callees(raw, factory, depth):
+    """Find nonpreemptible dynamic function ranges at direct call candidates."""
+    from r800_gps_pic_flow import arm_call, thumb_call
+    mapping, relocations, tags = parse_elf(raw, include_tags=True)
+    if 4 not in tags or any(t in tags for t in (0x6ffffef5, 0x6ffffff0, 0x6ffffffc,
+                                               0x6ffffffd, 0x6ffffffe, 0x6fffffff)):
+        raise ValueError("Automatic callee mode requires unversioned SYSV symbols")
+
+    def one(tag):
+        if len(tags.get(tag, [])) != 1:
+            raise ValueError("Missing or duplicate callee symbol tag")
+        return tags[tag][0]
+
+    off, _ = mapping(one(4), 8)
+    _, count = struct.unpack_from("<II", raw, off)
+    if not 1 <= count <= MAX_SYMBOLS or one(11) != 16 or not 1 <= one(10) <= MAX_STRINGS:
+        raise ValueError("Invalid callee symbol inventory")
+    off, _ = mapping(one(5), one(10))
+    strings = raw[off:off + one(10)]
+    off, _ = mapping(one(6), count * 16)
+    spans = []
+    for i in range(1, count):
+        name, value, size, info, other, section = struct.unpack_from("<IIIBBH", raw, off + i * 16)
+        if info & 15 not in (2, 10) or not 0 < section < 0xff00 or not value:
+            continue
+        start = value & ~1
+        isa = "thumb" if value & 1 else "arm"
+        align = 2 if isa == "thumb" else 4
+        # Even unsupported or zero-size function entries block overlapping candidates.
+        end = start + max(size, 1)
+        eligible = (info & 15 == 2 and (info >> 4 == 0 or info >> 4 in (1, 2) and other & 3 in (1, 2, 3))
+                    and 0 < size <= 4096 and start % align == 0 and size % align == 0 and end <= 2**32)
+        row = None
+        if eligible:
+            stop = strings.find(b"\0", name, min(len(strings), name + 4096)) if name < len(strings) else -1
+            try:
+                _, flags = mapping(start, size)
+            except ValueError:
+                flags = 0
+            if stop > name and flags & 1 and not flags & 2:
+                row = {"symbol_index": i, "symbol_name": strings[name:stop].decode("utf-8", "replace"),
+                       "isa": isa, "start_va": start, "size": size}
+        spans.append((start, end, i, row))
+    spans.sort(key=lambda s: (s[0], s[1], s[2]))
+    candidates = {}
+    previous_end = 0
+    for j, (start, end, _, row) in enumerate(spans):
+        if (row is not None and previous_end <= start
+                and (j + 1 == len(spans) or spans[j + 1][0] >= end)
+                and not (start < factory["start_va"] + factory["size"] and factory["start_va"] < end)):
+            candidates[(start, row["isa"])] = row
+        previous_end = max(previous_end, end)
+
+    # Linear scanning is discovery only. The flow engine checks modeled reachability.
+    pending = [(factory, 0)]
+    selected = {}
+    for function, level in pending:
+        if level >= depth:
+            continue
+        start, size, isa = function["start_va"], function["size"], function["isa"]
+        off, _ = mapping(start, size)
+        pos = 0
+        while pos < size:
+            va = start + pos
+            if isa == "arm":
+                width = 4
+                call = arm_call(struct.unpack_from("<I", raw, off + pos)[0], va)
+            else:
+                a, = struct.unpack_from("<H", raw, off + pos)
+                width = 4 if a >> 11 in (29, 30, 31) else 2
+                if pos + width > size:
+                    break
+                b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
+                call = thumb_call(a, b, width, va)
+            pos += width
+            if call is None or any(slot in relocations for slot in range(va & ~3, ((va + width - 1) & ~3) + 1, 4)):
+                continue
+            entry = call[:2]
+            if entry in candidates and entry not in selected:
+                if len(selected) >= 16:
+                    raise ValueError("Automatic callee range budget exceeded")
+                selected[entry] = candidates[entry]
+                pending.append((candidates[entry], level + 1))
+    return list(selected.values())
+
+
+def audit(raw, *, auto_callees=False, callee_depth=1):
     symbol = factory_range(raw)
-    report = xref(raw, [("factory", symbol["isa"], symbol["start_va"], symbol["size"])])
+    if type(callee_depth) is not int or not 1 <= callee_depth <= 4 or (callee_depth != 1 and not auto_callees):
+        raise ValueError("Callee depth requires automatic mode and must be between 1 and 4")
+    callees = automatic_callees(raw, symbol, callee_depth) if auto_callees else []
+    report = xref(raw, [("factory", symbol["isa"], symbol["start_va"], symbol["size"])],
+                  assume_aapcs=auto_callees, callee_ranges=[(r["isa"], r["start_va"], r["size"]) for r in callees],
+                  callee_depth=callee_depth if callees else 1)
+    report.update(auto_callee_mode=auto_callees, auto_callee_candidates=callees,
+                  requested_callee_depth=callee_depth, callee_discovery_complete=False)
     report.update(schema="galwear-r800-gps-factory-xref-v1", factory_symbol=symbol,
                   symbol_range_from_metadata=True, function_boundaries_verified=False,
                   factory_signature_verified=False)
@@ -206,9 +299,11 @@ def main():
     from r800_android_userspace_preflight import read_regular
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--library", required=True, type=Path)
+    parser.add_argument("--auto-callees", action="store_true", help="Discover bounded direct-call symbol candidates")
+    parser.add_argument("--callee-depth", type=int, default=1)
     args = parser.parse_args()
     try:
-        report = audit(read_regular(args.library, LIMIT))
+        report = audit(read_regular(args.library, LIMIT), auto_callees=args.auto_callees, callee_depth=args.callee_depth)
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc),
                   "selected_abi": None, "safe_to_flash": False}
