@@ -36,6 +36,15 @@ from pathlib import Path
 assert not any(k in os.environ for k in ('CPATH', 'LIBRARY_PATH', 'CCC_OVERRIDE_OPTIONS'))
 Path(os.environ['TEST_MARKER']).touch()
 output = Path(sys.argv[sys.argv.index('-o') + 1])
+source = output.parent / 'sources/gpsbridge.c'
+assert str(source) in sys.argv
+assert source.read_text() == '/* synthetic fixture */'
+assert source.stat().st_mode & 0o777 == 0o400
+if os.environ.get('TEST_MODE') == 'snapshot-compiler-mutate':
+    p = source.parent / 'gps_abi.h'
+    p.chmod(0o600)
+    p.write_text('mutated')
+    p.chmod(0o400)
 value = 'bridge'
 if os.environ.get('TEST_MODE') == 'nonrepeatable' and Path.cwd().name == 'second':
     value = 'different'
@@ -68,6 +77,8 @@ if mode == 'binary-symlink':
 print(json.dumps(report))
 if mode == 'source-code-mutate':
     (out.parent / 'src/tools/gps/gpsbridge.c').write_text('changed source')
+if mode == 'snapshot-extra':
+    (binary.parent / 'sources/extra.h').write_text('unexpected')
 if mode == 'header-mutate':
     (out.parent / 'src/tools/gps/gps_abi.h').write_text('changed header')
 if mode == 'tool-mutate':
@@ -154,7 +165,7 @@ class BuildContract(unittest.TestCase):
         self.assertFalse(evidence[0]['safe_to_flash'])
         self.assertIsNone(evidence[0]['tizen_archive'])
         self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
-        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-explicit-v1')
+        self.assertEqual(evidence[0]['inputs']['compiler_contract'], 'freestanding-snapshot-v2')
         self.assertEqual(evidence[0]['inputs']['xtra_abi'], 0)
         for name in ('gps_abi.h', 'gps_command.h', 'gps_frame.h', 'gps_lto.h', 'gps_output.h'):
             self.assertIn(name, evidence[0]['inputs']['inputs'])
@@ -178,9 +189,18 @@ class BuildContract(unittest.TestCase):
                      [x for x in argv if x != "-nostdinc"],
                      ["-DR800_XTRA_ABI=3" if x == "-DR800_XTRA_ABI=0" else x for x in argv],
                      ["-O3" if x == "-O2" else x for x in argv],
-                     ["/tmp/libc.so.6" if x.endswith("/libs/libc.so.6") else x for x in argv]):
+                     ["/tmp/libc.so.6" if x.endswith("/libs/libc.so.6") else x for x in argv],
+                     [str(self.script.parent / "gpsbridge.c") if x.endswith("/sources/gpsbridge.c") else x for x in argv]):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 validate_command(self.root, self.ndk, args)
+
+    def test_source_snapshot_mutations(self):
+        for mode in ('snapshot-compiler-mutate', 'snapshot-extra'):
+            with self.subTest(mode=mode):
+                result = self.run_build(mode)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(self.marker.exists())
+                self.assertFalse(self.out.exists())
 
     def test_missing_header_blocks_compiler(self):
         (self.script.parent / 'gps_frame.h').unlink()
