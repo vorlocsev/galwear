@@ -156,6 +156,29 @@ def assumed_call(state, call, va, start, end, mapping, leaf=None):
     return row
 
 
+def code_spans(start, size, isa, data_ranges=()):
+    """Return aligned code islands around explicitly marked data ranges."""
+    end = start + size
+    align = 4 if isa == "arm" else 2
+    cursor = start
+    spans = []
+    for lo, hi in data_ranges:
+        if not cursor <= lo < hi <= end or lo % align or hi % align:
+            raise ValueError("Invalid or unaligned literal pool")
+        if cursor < lo:
+            spans.append((cursor, lo))
+        cursor = hi
+    if cursor < end:
+        spans.append((cursor, end))
+    if not spans or spans[0][0] != start:
+        raise ValueError("Function entry is not code")
+    return spans
+
+
+def in_data(slot, data_ranges):
+    return slot % 4 == 0 and any(lo <= slot and slot + 4 <= hi for lo, hi in data_ranges)
+
+
 class Flow:
     """Must-fact intersection: unseen nodes are distinct from unknown facts."""
     def __init__(self, start, end, nodes, assume_aapcs=False, initial=None):
@@ -178,6 +201,10 @@ class Flow:
         self.current = start
 
     def enqueue(self, target, state):
+        if target != self.end and target not in self.nodes:
+            self.boundaries.append({"address": self.current if not self.emitting else self.report_va,
+                                    "reason": "edge_into_data_or_noninstruction", "target_va": target})
+            return
         if self.emitting:
             return
         if target <= self.current:
@@ -211,6 +238,7 @@ class Flow:
         self.emitting = True
         for va in sorted(self.incoming):
             if va != self.end:
+                self.report_va = va
                 yield va, dict(self.incoming[va])
 
     def record_return(self, state):
@@ -245,11 +273,12 @@ class Flow:
                 "control_flow_verified": False, "safe_to_flash": False}
 
 
-def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None):
+def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None, data_ranges=()):
     if size % 4 or start % 4 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid A32 flow range")
     end = start + size
-    flow = Flow(start, end, range(start, end, 4), assume_aapcs, initial)
+    nodes = {va for lo, hi in code_spans(start, size, "arm", data_ranges) for va in range(lo, hi, 4)}
+    flow = Flow(start, end, nodes, assume_aapcs, initial)
     enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
     for va, state in flow.walk():
         word, = struct.unpack_from("<I", raw, off + va - start)
@@ -331,6 +360,17 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
             if address in tables:
                 events.append({"address": va, "register": "r" + str(rd), "table_va": address,
                                "kind": "COMPUTED_TABLE_ADDRESS"})
+        elif data_ranges and word & 0xff7f0000 == 0xe51f0000 and rd <= 12:
+            delta = word & 0xfff
+            slot = va + 8 + (delta if word & (1 << 23) else -delta)
+            if not in_data(slot, data_ranges):
+                boundary("literal_outside_marked_data")
+                continue
+            value = direct[slot]["table_va"] if slot in direct and state.get("memory_unchanged") else None
+            set_reg(rd, ("address", value) if value is not None else None)
+            if value is not None:
+                events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
+                               "table_va": value, "kind": "RELOCATED_LITERAL_LOAD"})
         elif word & 0xff700000 == 0xe5100000 and rd <= 12 and rn <= 12:
             prev = state.get(rn)
             slot = None
@@ -349,21 +389,22 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
     return flow.report()
 
 
-def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None):
+def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None, data_ranges=()):
     """Bounded Thumb flow, with linear instruction-boundary assumptions."""
     if size % 2 or start % 2 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
         raise ValueError("Invalid Thumb flow range")
     end = start + size
     nodes = {}
-    pos = 0
-    while pos < size:
-        a, = struct.unpack_from("<H", raw, off + pos)
-        width = 4 if a >> 11 in (29, 30, 31) else 2
-        if pos + width > size:
-            raise ValueError("Truncated Thumb flow range")
-        b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
-        nodes[start + pos] = (a, b, width)
-        pos += width
+    for lo, hi in code_spans(start, size, "thumb", data_ranges):
+        pos = lo - start
+        while pos < hi - start:
+            a, = struct.unpack_from("<H", raw, off + pos)
+            width = 4 if a >> 11 in (29, 30, 31) else 2
+            if pos + width > hi - start:
+                raise ValueError("Truncated Thumb flow range")
+            b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
+            nodes[start + pos] = (a, b, width)
+            pos += width
     flow = Flow(start, end, nodes, assume_aapcs, initial)
     enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
 
@@ -460,6 +501,17 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
             if address in tables:
                 events.append({"address": va, "register": "r" + str(rd), "table_va": address,
                                "kind": "COMPUTED_TABLE_ADDRESS"})
+        elif data_ranges and width == 2 and a & 0xf800 == 0x4800:
+            rd = (a >> 8) & 7
+            slot = ((va + 4) & ~3) + 4 * (a & 255)
+            if not in_data(slot, data_ranges):
+                boundary("literal_outside_marked_data")
+                continue
+            value = direct[slot]["table_va"] if slot in direct and state.get("memory_unchanged") else None
+            set_reg(rd, ("address", value) if value is not None else None)
+            if value is not None:
+                events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
+                               "table_va": value, "kind": "RELOCATED_LITERAL_LOAD"})
         elif width == 2 and a & 0xf800 == 0x6800:
             load(a & 7, (a >> 3) & 7, 4 * ((a >> 6) & 31))
         elif width == 4 and a & 0xfff0 == 0xf8d0 and a & 15 <= 12 and b >> 12 <= 12:
@@ -473,10 +525,11 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
     return flow.report()
 
 
-def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges, *, max_depth=1):
+def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges, *, max_depth=1, data_by_range=None):
     """Explicit bounded callee ranges, no inferred entry points or recursion."""
     if type(max_depth) is not int or not 1 <= max_depth <= 4:
         raise ValueError("Callee depth must be between 1 and 4")
+    data_by_range = data_by_range or {}
     cache = {}
     rejected = {"accepted": False}
 
@@ -504,7 +557,7 @@ def leaf_analyzer(raw, mapping, relocations, tables, direct, ranges, *, max_dept
                 report = (audit if isa == "arm" else audit_thumb)(
                     raw, off, target, size, relocations, tables, direct,
                     initial=initial, assume_aapcs=len(path) + 1 < max_depth,
-                    mapping=mapping, leaf=nested)
+                    mapping=mapping, leaf=nested, data_ranges=data_by_range.get(entry, ()))
             except (ValueError, struct.error):
                 return rejected
             cache[key] = report["leaf_summary"]
