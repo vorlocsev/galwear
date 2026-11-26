@@ -13,6 +13,8 @@ on:
       - build/r800_gps_mock_qemu.sh
       - build/r800_gps_mock_peer.py
       - build/r800_gps_mock_recovery.py
+      - build/r800_gps_mock_resources.py
+      - tests/test_r800_gps_mock_resources.py
       - tests/test_r800_gps_mock_recovery.py
       - tests/test_r800_gps_mock_peer.py
       - build/r800_gps_mock_transcript.py
@@ -231,6 +233,7 @@ jobs:
           python3 -m unittest discover -s tests -p test_r800_gps_mock_transcript.py -v
           python3 -m unittest discover -s tests -p test_r800_gps_mock_peer.py -v
           python3 -m unittest discover -s tests -p test_r800_gps_mock_recovery.py -v
+          python3 -m unittest discover -s tests -p test_r800_gps_mock_resources.py -v
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
           for stage in 0 1 2 3 4 5 6; do
