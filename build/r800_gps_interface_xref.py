@@ -12,6 +12,53 @@ MAX_REFS = 4096
 ROLES = ("factory", "get_extension")
 
 
+def arm_pic_clues(raw, off, start, size, relocations, tables, direct):
+    """Adjacent unconditional MOVW/MOVT/ADD-PC patterns, not CFG evidence."""
+    clues = []
+    for pos in range(0, size - 11, 4):
+        va = start + pos
+        if any(va + i in relocations for i in (0, 4, 8)):
+            continue
+        lo, hi, add = struct.unpack_from("<III", raw, off + pos)
+        reg = (lo >> 12) & 15
+        if (lo & 0xfff00000 != 0xe3000000 or hi & 0xfff00000 != 0xe3400000
+                or reg > 12 or (hi >> 12) & 15 != reg
+                or add & 0xfff00ff0 != 0xe0800000):
+            continue
+        rn, rd, rm = (add >> 16) & 15, (add >> 12) & 15, add & 15
+        if rd > 12 or (rn, rm) not in ((15, reg), (reg, 15)):
+            continue
+        def imm16(word):
+            return ((word >> 4) & 0xf000) | (word & 0xfff)
+        delta = imm16(lo) | (imm16(hi) << 16)
+        if delta & 0x80000000:
+            delta -= 1 << 32
+        # A32 reads PC as the ADD address plus eight bytes.
+        address = va + 16 + delta
+        if not 0 <= address <= 0xffffffff:
+            continue
+        base = {"movw_va": va, "movt_va": va + 4, "add_va": va + 8,
+                "computed_va": address, "register": "r" + str(rd)}
+        if address in tables:
+            clues.append({**base, "table_va": address,
+                          "reference_kind": "ARM_PIC_TABLE_ADDRESS_CANDIDATE"})
+        if pos + 16 > size or va + 12 in relocations:
+            continue
+        load, = struct.unpack_from("<I", raw, off + pos + 12)
+        dest = (load >> 12) & 15
+        if (load & 0xff700000 != 0xe5100000 or (load >> 16) & 15 != rd
+                or dest > 12):
+            continue
+        delta = load & 0xfff
+        slot = address + (delta if load & (1 << 23) else -delta)
+        if slot not in direct:
+            continue
+        clues.append({**base, "dereference_va": va + 12, "register": "r" + str(dest),
+                      "slot_va": slot, "table_va": direct[slot]["table_va"],
+                      "reference_kind": "ARM_PIC_RELOCATED_SLOT_CANDIDATE"})
+    return clues
+
+
 def audit(raw, ranges=(), *, symbolic=False):
     discovery = discover(raw, symbolic=symbolic)
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
@@ -125,8 +172,10 @@ def audit(raw, ranges=(), *, symbolic=False):
                        and e["isa"] == isa for e in r["entries"])]
         code.append({"role_assumption": role, "isa_assumption": isa, "start_va": start,
                      "size": size, "get_extension_entry_matches": matches,
-                     "literal_load_clues": refs})
-        if sum(len(r["literal_load_clues"]) for r in code) > MAX_REFS:
+                     "literal_load_clues": refs,
+                     "pic_clues": arm_pic_clues(raw, off, start, size, relocations, tables, direct)
+                     if isa == "arm" else []})
+        if sum(len(r["literal_load_clues"]) + len(r["pic_clues"]) for r in code) > MAX_REFS:
             raise ValueError("Code reference budget exceeded")
     return {"schema": "galwear-r800-gps-interface-xref-v1", "status": "STATIC_XREF_CLUES_ONLY",
             "sha256": discovery["sha256"], "table_candidates": list(tables.values()),
