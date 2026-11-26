@@ -5,12 +5,94 @@ from collections import deque
 MAX_STEPS = 524288
 
 
+MAX_STACK = 256
+
+
+def stack_transfer(state, op, arg):
+    """Track word-aligned private frame slots relative to entry SP."""
+    sp = state.get("sp")
+    if sp is None:
+        return False
+    if op == "adjust":
+        new = sp + arg
+        if new % 4 or not -MAX_STACK <= new <= 0:
+            return False
+        for key in list(state):
+            if isinstance(key, tuple) and key[1] < max(sp, new):
+                state.pop(key)
+        state["sp"] = new
+    elif op in ("push", "pop"):
+        regs = arg
+        if not regs or 13 in regs or (op == "push" and 15 in regs) or (14 in regs and 15 in regs):
+            return False
+        if op == "push":
+            if not stack_transfer(state, "adjust", -4 * len(regs)):
+                return False
+            for i, reg in enumerate(regs):
+                if reg in state:
+                    state[("slot", state["sp"] + 4 * i)] = state[reg]
+        else:
+            new = sp + 4 * len(regs)
+            if new > 0 or (15 in regs and (new != 0 or state.get(("slot", new - 4)) != ("entry_lr", 0))):
+                return False
+            for i, reg in enumerate(regs):
+                value = state.get(("slot", sp + 4 * i))
+                state.pop(reg, None)
+                if value is not None and reg != 15:
+                    state[reg] = value
+            return stack_transfer(state, "adjust", 4 * len(regs))
+    elif op in ("store", "load"):
+        reg, offset = arg
+        addr = sp + offset
+        if addr % 4 or not sp <= addr <= -4:
+            return False
+        key = ("slot", addr)
+        dst, src = (key, reg) if op == "store" else (reg, key)
+        value = state.get(src)
+        state.pop(dst, None)
+        if value is not None:
+            state[dst] = value
+    else:
+        raise ValueError("Unknown stack operation")
+    return True
+
+
+def arm_stack(word):
+    if word & 0xffff0000 in (0xe92d0000, 0xe8bd0000):
+        return ("push" if word >> 16 == 0xe92d else "pop", [r for r in range(16) if word & (1 << r)])
+    if word & 0xfffff000 in (0xe24dd000, 0xe28dd000):
+        imm, shift = word & 255, 2 * ((word >> 8) & 15)
+        imm = ((imm >> shift) | (imm << (32 - shift))) & 0xffffffff
+        return "adjust", -imm if word & 0xfffff000 == 0xe24dd000 else imm
+    if word & 0xff7f0000 in (0xe50d0000, 0xe51d0000) and (word >> 12) & 15 <= 12:
+        delta = word & 0xfff
+        return ("load" if word & (1 << 20) else "store",
+                ((word >> 12) & 15, delta if word & (1 << 23) else -delta))
+    return None
+
+
+def thumb_stack(a, b, width):
+    if width == 2 and a & 0xfe00 in (0xb400, 0xbc00):
+        op = "pop" if a & 0x800 else "push"
+        regs = [r for r in range(8) if a & (1 << r)]
+        if a & 256:
+            regs.append(15 if op == "pop" else 14)
+        return op, regs
+    if width == 2 and a & 0xff00 == 0xb000:
+        return "adjust", 4 * (a & 127) * (-1 if a & 128 else 1)
+    if width == 2 and a & 0xf000 == 0x9000:
+        return ("load" if a & 0x800 else "store", ((a >> 8) & 7, 4 * (a & 255)))
+    if width == 4 and a in (0xf8cd, 0xf8dd) and b >> 12 <= 12:
+        return ("load" if a == 0xf8dd else "store", (b >> 12, b & 0xfff))
+    return None
+
+
 class Flow:
     """Must-fact intersection: unseen nodes are distinct from unknown facts."""
     def __init__(self, start, end, nodes):
         self.end = end
         self.nodes = nodes
-        self.incoming = {start: {}}
+        self.incoming = {start: {"sp": 0, 14: ("entry_lr", 0)}}
         self.pending = deque([start])
         self.queued = {start}
         self.events = []
@@ -29,6 +111,8 @@ class Flow:
         previous = self.incoming.get(target)
         merged = dict(state) if previous is None else {
             k: v for k, v in previous.items() if state.get(k) == v}
+        if "sp" not in merged:
+            merged = {k: v for k, v in merged.items() if not isinstance(k, tuple)}
         if previous == merged:
             return
         self.incoming[target] = merged
@@ -55,6 +139,8 @@ class Flow:
                 yield va, dict(self.incoming[va])
 
     def report(self):
+        if self.converged and self.end in self.incoming and self.incoming[self.end].get("sp") != 0:
+            self.boundaries.append({"address": self.end, "reason": "unbalanced_range_end"})
         return {"status": "PARTIAL_FLOW_REVIEW_REQUIRED" if self.boundaries or not self.converged else "CONDITIONAL_FIXED_POINT_FLOW_ONLY",
                 "events": self.events if self.converged and not self.boundaries else [],
                 "boundaries": self.boundaries,
@@ -83,6 +169,9 @@ def audit(raw, off, start, size, relocations, tables, direct):
             state.pop(reg, None)
             if value is not None:
                 state[reg] = value
+        if "sp" not in state:
+            boundary("ambiguous_stack_depth")
+            continue
         if va in relocations:
             boundary("relocated_instruction")
             continue
@@ -99,11 +188,20 @@ def audit(raw, off, start, size, relocations, tables, direct):
                 enqueue(va + 4, state)
             continue
         if word == 0xe12fff1e:  # BX LR, candidate return only
+            if state.get("sp") != 0 or state.get(14) != ("entry_lr", 0):
+                boundary("unverified_stack_return")
             continue
         if cond != 14:
             boundary("conditional_or_unknown_instruction")
             continue
-        if word & 0xfff00000 == 0xe3000000 and rd <= 12:
+        stack = arm_stack(word)
+        if stack is not None:
+            if not stack_transfer(state, *stack):
+                boundary("invalid_stack_access")
+                continue
+            if stack[0] == "pop" and 15 in stack[1]:
+                continue
+        elif word & 0xfff00000 == 0xe3000000 and rd <= 12:
             imm = ((word >> 4) & 0xf000) | (word & 0xfff)
             set_reg(rd, ("constant", imm))
         elif word & 0xfff00000 == 0xe3400000 and rd <= 12:
@@ -186,6 +284,9 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
             if value is not None:
                 events.append({"address": va, "register": "r" + str(rd), "slot_va": slot,
                                "table_va": value, "kind": "RELOCATED_TABLE_LOAD"})
+        if "sp" not in state:
+            boundary("ambiguous_stack_depth")
+            continue
         if any(slot in relocations for slot in range(va & ~3, ((va + width - 1) & ~3) + 1, 4)):
             boundary("relocated_instruction")
             continue
@@ -205,8 +306,17 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct):
                 enqueue(va + width, state)
             continue
         if a == 0x4770 and width == 2:
+            if state.get("sp") != 0 or state.get(14) != ("entry_lr", 0):
+                boundary("unverified_stack_return")
             continue
-        if width == 4 and a & 0xfbf0 in (0xf240, 0xf2c0) and not b & 0x8000 and (b >> 8) & 15 <= 12:
+        stack = thumb_stack(a, b, width)
+        if stack is not None:
+            if not stack_transfer(state, *stack):
+                boundary("invalid_stack_access")
+                continue
+            if stack[0] == "pop" and 15 in stack[1]:
+                continue
+        elif width == 4 and a & 0xfbf0 in (0xf240, 0xf2c0) and not b & 0x8000 and (b >> 8) & 15 <= 12:
             rd = (b >> 8) & 15
             imm = ((a & 15) << 12) | ((a & 0x400) << 1) | ((b & 0x7000) >> 4) | (b & 255)
             if a & 0xfbf0 == 0xf240:
