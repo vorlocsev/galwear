@@ -7,7 +7,7 @@ import struct
 
 from r800_gps_interface_table import discover, parse_elf, symbolic_code_targets, LIMIT
 
-from r800_gps_pic_flow import audit as pic_flow
+from r800_gps_pic_flow import audit as pic_flow, audit_thumb as thumb_flow
 
 MAX_RANGE = 65536
 MAX_REFS = 4096
@@ -233,7 +233,7 @@ def audit(raw, ranges=(), *, symbolic=False):
                      "size": size, "get_extension_entry_matches": matches,
                      "literal_load_clues": refs,
                      "pic_flow": pic_flow(raw, off, start, size, relocations, tables, direct)
-                     if isa == "arm" else None,
+                     if isa == "arm" else thumb_flow(raw, off, start, size, relocations, tables, direct),
                      "pic_clues": arm_pic_clues(raw, off, start, size, relocations, tables, direct)
                      if isa == "arm" else thumb_pic_clues(raw, off, start, size, relocations, tables, direct)})
         if sum(len(r["literal_load_clues"]) + len(r["pic_clues"])
