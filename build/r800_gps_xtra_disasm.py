@@ -15,21 +15,95 @@ LOAD = re.compile(r"^r(?:1[0-2]|[0-9]),\s*\[r0(?:,\s*#(0x[0-9a-f]+|[0-9]+))?\]$"
 CALL = re.compile(r"^r(?:1[0-2]|[0-9])$", re.I)
 
 
+
+REG = r"r(?:1[0-2]|[0-9])"
+MOVE = re.compile(r"^(" + REG + r"),\s*(" + REG + r")$")
+FIELD = re.compile(r"^(" + REG + r"),\s*\[(" + REG +
+                   r")(?:,\s*#(0x[0-9a-f]+|[0-9]+))?\]$")
+
+
+def trace_prefix(lines, entry):
+    """Track only an uninterrupted, supported prefix under an r0 entry hypothesis."""
+    regs = {"r0": ("argument", 0, None)}
+    events = []
+    previous = None
+    reason = "end_of_function"
+    for line in lines:
+        if not line.strip():
+            continue
+        match = INSN.fullmatch(line)
+        if match is None:
+            reason = "unparsed_line"
+            break
+        address, mnemonic, operands = match.groups()
+        address = int(address, 16)
+        if (previous is None and address != entry
+                or previous is not None and address - previous not in (2, 4)):
+            reason = "address_discontinuity"
+            break
+        previous = address
+        operands = operands.split("@", 1)[0].split(";", 1)[0].strip().lower()
+        if mnemonic in ("mov", "mov.w", "mov.n", "movs"):
+            move = MOVE.fullmatch(operands)
+            if move is None:
+                reason = "unsupported_move"
+                break
+            dest, source = move.groups()
+            value = regs.get(source)
+            regs.pop(dest, None)
+            if value is not None:
+                regs[dest] = value
+        elif mnemonic in ("ldr", "ldr.w", "ldr.n"):
+            field = FIELD.fullmatch(operands)
+            if field is None:
+                reason = "unsupported_load"
+                break
+            dest, base, immediate = field.groups()
+            value = regs.get(base)
+            regs.pop(dest, None)
+            immediate = immediate or "0"
+            offset = int(immediate, 16 if immediate.startswith("0x") else 10)
+            if value is not None and value[0] == "argument" and offset in (0, 4, 8):
+                regs[dest] = ("field", offset, address)
+                events.append({"kind": "argument_word_load", "address": address,
+                               "base": base, "destination": dest, "offset": offset})
+        elif mnemonic in ("blx", "blx.w") and CALL.fullmatch(operands):
+            value = regs.get(operands)
+            if value is not None and value[0] == "field":
+                events.append({"kind": "loaded_word_indirect_call", "address": address,
+                               "register": operands, "offset": value[1],
+                               "load_address": value[2]})
+            reason = "call_boundary"
+            break
+        else:
+            reason = "unsupported_instruction_or_control_flow"
+            break
+        if len(events) > 4096:
+            raise ValueError("Register trace exceeds limit")
+    return {"entry_argument_assumption": "r0", "events": events,
+            "stop_reason": reason, "full_control_flow_analyzed": False}
+
+
 def audit(raw, function):
-    """Exact function label; no inferred control flow or register provenance."""
+    """Exact function label; conditional prefix clues, not verified provenance."""
     if not function or len(function) > 256:
         raise ValueError("Invalid function label")
     active = False
     matches = 0
     loads, calls = [], []
+    prefix_lines = []
+    entry = None
     for line in raw.decode("utf-8", errors="strict").splitlines():
         header = HEADER.fullmatch(line)
         if header:
             active = header[2] == function
             matches += int(active)
+            if active:
+                entry = int(header[1], 16)
             continue
         if not active:
             continue
+        prefix_lines.append(line)
         insn = INSN.fullmatch(line)
         if not insn:
             continue
@@ -56,6 +130,7 @@ def audit(raw, function):
             "observed_offsets": sorted({item["offset"] for item in loads}),
             "candidate_layouts": {"1": {"download": 0, "thread": 4},
                                   "2": {"size": 0, "download": 4, "thread": 8}},
+            "conditional_register_trace": trace_prefix(prefix_lines, entry),
             "disassembly_origin_verified": False,
             "register_provenance_verified": False, "control_flow_verified": False,
             "callback_layout_verified": False, "selected_abi": None,
