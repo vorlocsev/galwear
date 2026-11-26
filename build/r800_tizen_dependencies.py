@@ -158,7 +158,7 @@ def audit_symbols(targets, aliases, objects, edges):
     return {"targets":reports,"limit_exceeded":False}
 
 
-def audit(root, targets=TARGETS):
+def audit(root, targets=TARGETS, *, resolver=resolve_guest):
     root = root.resolve(strict=True)
     targets = tuple(targets)
     queue = deque(targets)
@@ -174,7 +174,7 @@ def audit(root, targets=TARGETS):
             raise ValueError("Tizen dependency count exceeds budget")
         visited.add(guest)
         try:
-            path, canonical = resolve_guest(root, guest)
+            path, canonical = resolver(root, guest)
             aliases[guest] = canonical
             if canonical in files:
                 continue
@@ -222,7 +222,7 @@ def audit(root, targets=TARGETS):
                 for directory in DIRS:
                     candidate = directory+"/"+dep
                     try:
-                        _, real = resolve_guest(root, candidate)
+                        _, real = resolver(root, candidate)
                         providers.setdefault(real, candidate)
                     except FileNotFoundError:
                         continue
