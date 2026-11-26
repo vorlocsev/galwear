@@ -321,6 +321,53 @@ def multiply(state, rd, lhs, rhs, setflags):
             state.update(N=bool(result & 0x80000000), Z=result == 0)
 
 
+def address_offset(base, delta):
+    value = base + delta
+    return ("address", value) if 0 <= value <= 0xffffffff else None
+
+
+def assign_fact(state, rd, value):
+    state.pop(rd, None)
+    if value is not None:
+        state[rd] = value
+
+
+def address_alu(state, op, rd, rn, rhs, setflags):
+    """Link-time VA +/- a constant displacement, never address+address."""
+    fact = state.get(rn)
+    if setflags or op not in ("add", "sub") or not fact or fact[0] != "address" or rhs is None:
+        return False
+    delta = sign_extend(rhs, 32)
+    assign_fact(state, rd, address_offset(fact[1], delta if op == "add" else -delta))
+    return True
+
+
+def arm_adr(word, va):
+    if word & 0xffff0000 not in (0xe28f0000, 0xe24f0000) or (word >> 12) & 15 > 12:
+        return None
+    imm, shift = word & 255, 2 * ((word >> 8) & 15)
+    delta = ((imm >> shift) | (imm << (32 - shift))) & 0xffffffff
+    return (word >> 12) & 15, address_offset(va + 8, delta if word & 0x00400000 == 0 else -delta)
+
+
+def thumb_adr(a, b, width, va):
+    base = (va + 4) & ~3
+    if width == 2 and a & 0xf800 == 0xa000:
+        return (a >> 8) & 7, address_offset(base, (a & 255) * 4)
+    if width == 4 and a & 0xfbff in (0xf20f, 0xf2af) and not b & 0x8000 and (b >> 8) & 15 <= 12:
+        delta = ((a & 0x400) << 1) | ((b >> 12) & 7) * 256 | (b & 255)
+        return (b >> 8) & 15, address_offset(base, -delta if a & 0x80 else delta)
+    return None
+
+
+def derived_events(state, before, va, tables, events):
+    for rd in range(13):
+        fact = state.get(rd)
+        if fact and fact[0] == "address" and before.get(rd) != fact and fact[1] in tables:
+            events.append({"address": va, "register": "r" + str(rd), "table_va": fact[1],
+                           "kind": "DERIVED_TABLE_ADDRESS"})
+
+
 def constant_alu(state, op, rd, lhs, rhs, carry, setflags, *, shifted=False):
     saved = {k: state[k] for k in FLAG_KEYS if k in state}
     alu_flags(state, op, rd, lhs, rhs, carry)
@@ -368,6 +415,8 @@ def arm_alu(state, word):
         shifted = True
     else:
         return False
+    if address_alu(state, op, rd, rn, rhs, setflags):
+        return True
     lhs = constant(state, rn)
     if op == "rsb":
         op, lhs, rhs = "sub", rhs, lhs
@@ -434,6 +483,8 @@ def thumb_wide_alu(state, a, b, width):
     amount = ((b >> 12) & 7) * 4 + ((b >> 6) & 3)
     kind, amount = immediate_shift(("lsl", "lsr", "asr", "ror")[(b >> 4) & 3], amount)
     rhs, carry = shift_with_carry(constant(state, rm), kind, amount, state.get("C"))
+    if address_alu(state, op, rd, rn, rhs, bool(a & 16)):
+        return True
     lhs = constant(state, rn)
     if op == "rsb":
         op, lhs, rhs = "sub", rhs, lhs
@@ -466,7 +517,8 @@ def thumb_immediate_alu(state, a, b, width):
         if rn > 12:
             return False
         op = "add" if a & 0xfbf0 == 0xf200 else "sub"
-        constant_alu(state, op, rd, constant(state, rn), imm12, None, False)
+        if not address_alu(state, op, rd, rn, imm12, False):
+            constant_alu(state, op, rd, constant(state, rn), imm12, None, False)
         return True
     if a & 0xfa00 != 0xf000:
         return False
@@ -483,6 +535,8 @@ def thumb_immediate_alu(state, a, b, width):
         rhs, carry = thumb_expand_imm(imm12, state.get("C"))
     except ValueError:
         return False
+    if address_alu(state, op, rd, rn, rhs, bool(a & 16)):
+        return True
     lhs = constant(state, rn)
     if op == "rsb":
         op, lhs, rhs = "sub", rhs, lhs
@@ -706,8 +760,13 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
             boundary("conditional_or_unknown_instruction")
             continue
         stack = arm_stack(word)
-        if arm_compare(state, word) or arm_alu(state, word):
-            pass
+        before = dict(state)
+        adr = arm_adr(word, va)
+        if adr is not None:
+            assign_fact(state, *adr)
+            derived_events(state, before, va, tables, events)
+        elif arm_compare(state, word) or arm_alu(state, word):
+            derived_events(state, before, va, tables, events)
         elif stack is not None:
             if not stack_transfer(state, *stack):
                 boundary("invalid_stack_access")
@@ -912,8 +971,13 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
                 flow.record_return(state)
             continue
         stack = thumb_stack(a, b, width)
-        if thumb_compare(state, a, width) or thumb_alu(state, a, width) or thumb_wide_alu(state, a, b, width) or thumb_immediate_alu(state, a, b, width):
-            pass
+        before = dict(state)
+        adr = thumb_adr(a, b, width, va)
+        if adr is not None:
+            assign_fact(state, *adr)
+            derived_events(state, before, va, tables, events)
+        elif thumb_compare(state, a, width) or thumb_alu(state, a, width) or thumb_wide_alu(state, a, b, width) or thumb_immediate_alu(state, a, b, width):
+            derived_events(state, before, va, tables, events)
         elif stack is not None:
             if not stack_transfer(state, *stack):
                 boundary("invalid_stack_access")
