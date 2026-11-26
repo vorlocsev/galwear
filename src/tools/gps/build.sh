@@ -30,11 +30,15 @@ for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
     grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$TMP/donor-elf.txt"
     grep -Eq 'Type:[[:space:]]*DYN([[:space:]]|$)' "$TMP/donor-elf.txt"
 done
-"$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
+set -- "$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
     -DR800_XTRA_ABI="$XTRA_ABI" -O2 -fno-pic -no-pie -fno-stack-protector -fno-builtin -ffreestanding -nostdlib -fuse-ld=lld \
     -Wl,--hash-style=sysv -Wl,-z,noexecstack -Wl,-z,now -Wl,--no-undefined \
     -Wl,--dynamic-linker=/lib/ld-linux.so.3 -Wl,-e,_start \
     -o "$TMP/gpsbridge" "$S/gpsbridge.c" "$TMP/libs/libc.so.6" "$TMP/libs/libdl.so.2" "$TMP/libs/libpthread.so.0"
+PROVENANCE=$ROOT/build/r800_gps_provenance.py
+python3 "$PROVENANCE" capture "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
+"$@"
+python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
 "$TC/llvm-readelf" -h -l -d --wide "$TMP/gpsbridge" > "$TMP/elf.txt"
 grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
@@ -45,6 +49,7 @@ python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "
 }
 cat "$TMP/audit.json"
 python3 "$SNAPSHOT" verify "$SR" "$TMP/libs" "$TMP/input.json"
-python3 "$ROOT/build/r800_gps_publish.py" "$TMP/gpsbridge" "$TMP/audit.json" "$TMP/input.json" "$OUT"
+python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"
+python3 "$ROOT/build/r800_gps_publish.py" "$TMP/gpsbridge" "$TMP/audit.json" "$TMP/input.json" "$OUT" "$TMP/provenance.json"
 echo "R800_XTRA_ABI=$XTRA_ABI (0=disabled; 1=legacy; 2=sized vendor candidate)"
 echo "NON-RELEASE Tizen GPS bridge; glibc compatibility and GNSS runtime NOT verified."
