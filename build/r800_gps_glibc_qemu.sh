@@ -37,11 +37,17 @@ PY
   -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -fPIC -shared -nostdlib -fuse-ld=lld --ld-path="$TC/ld.lld" \
   -Wl,--hash-style=sysv,-z,noexecstack,--no-undefined \
   -o "$TMP/root/probe_plugin.so" "$ROOT/tests/r800_glibc_probe_plugin.c"
-"$TC/clang" --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 \
-  -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -no-pie -nostdlib -fuse-ld=lld --ld-path="$TC/ld.lld" \
+# ARMv7 has the user-mode thread pointer register. Require actual TLS
+# relocations and avoid relying on an unverified donor __aeabi_read_tp.
+"$TC/clang" --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 -mtp=cp15 -ftls-model=local-exec \
+  -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector -fno-pic -fno-pie \
+  -Wall -Wextra -Werror -c "$ROOT/tests/r800_glibc_probe.c" -o "$TMP/probe.o"
+sh "$ROOT/build/r800_gps_probe_tls_object.sh" "$TC/llvm-readelf" "$TMP/probe.o"
+"$TC/clang" --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 \
+  --no-default-config -nostdlib -no-pie -fuse-ld=lld --ld-path="$TC/ld.lld" \
   -Wl,--hash-style=sysv,-z,noexecstack,-z,now,--no-undefined \
   -Wl,--dynamic-linker=/lib/ld-linux.so.3,-e,_start \
-  -o "$TMP/root/probe" "$ROOT/tests/r800_glibc_probe.c" \
+  -o "$TMP/root/probe" "$TMP/probe.o" \
   "$TMP/root/lib/libc.so.6" "$TMP/root/lib/libdl.so.2" "$TMP/root/lib/libpthread.so.0"
 python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/root/probe" --libdir "$TMP/root/lib" > "$TMP/audit.json"
 cat "$TMP/audit.json"
