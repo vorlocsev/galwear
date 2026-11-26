@@ -19,11 +19,16 @@ class GnssPreflightTests(unittest.TestCase):
             (self.root/directory.lstrip("/")).mkdir(parents=True)
         for name in ("/usr/bin/gpsd","/usr/bin/lhd"):
             self.put(name,fixture("arm"))
-        data = classified_symbol_fixture("arm",section=1)
-        strings = b"\0gps_get_hardware_interface\0"
+        self.put("/usr/lib/libbrcm.so", self.bridge_fixture())
+
+    @staticmethod
+    def bridge_fixture(name=b"gps_get_hardware_interface", flags=0x05000200, binding=1):
+        data = classified_symbol_fixture("arm", section=1, binding=binding)
+        struct.pack_into("<I", data, 36, flags)
+        strings = b"\0" + name + b"\0"
         data[400:400+len(strings)] = strings
-        struct.pack_into("<iI",data,232,10,len(strings))
-        self.put("/usr/lib/libbrcm.so",data)
+        struct.pack_into("<iI", data, 232, 10, len(strings))
+        return data
 
     def put(self,guest,raw):
         p = self.root/guest.lstrip("/")
@@ -40,8 +45,24 @@ class GnssPreflightTests(unittest.TestCase):
         self.assertFalse(report["safe_to_flash"])
 
     def test_missing_export(self):
-        self.put("/usr/lib/libbrcm.so",fixture("arm"))
-        self.assertIn("BRIDGE_EXPORT_NOT_CONFIRMED",check(self.root)["problems"])
+        self.put("/usr/lib/libbrcm.so", self.bridge_fixture(name=b"other_symbol"))
+        self.assertIn("BRIDGE_EXPORT_NOT_CONFIRMED", check(self.root)["problems"])
+
+    def test_missing_symbol_inventory(self):
+        data = fixture("arm")
+        struct.pack_into("<I", data, 36, 0x05000200)
+        self.put("/usr/lib/libbrcm.so", data)
+        self.assertIn("BRIDGE_LIBRARY_REJECTED", check(self.root)["problems"])
+
+    def test_hard_float_rejected(self):
+        self.put("/usr/lib/libbrcm.so", self.bridge_fixture(flags=0x05000400))
+        report = check(self.root)
+        self.assertIn("BRIDGE_LIBRARY_REJECTED", report["problems"])
+        self.assertFalse(report["safe_to_flash"])
+
+    def test_weak_export_rejected(self):
+        self.put("/usr/lib/libbrcm.so", self.bridge_fixture(binding=2))
+        self.assertIn("BRIDGE_EXPORT_NOT_CONFIRMED", check(self.root)["problems"])
 
     def test_occupied_socket_path(self):
         self.put(SOCKET,b"not a socket")
