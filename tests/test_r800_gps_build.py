@@ -11,7 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'build'))
 from r800_gps_repeatability import compare
-from r800_gps_provenance import HEADERS
+from r800_gps_provenance import BUILD_MODULES, HEADERS
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'src/tools/gps/build.sh'
 LIBS = ('libc.so.6', 'libdl.so.2', 'libpthread.so.0', 'ld-linux.so.3')
@@ -138,13 +138,11 @@ class BuildContract(unittest.TestCase):
             path.chmod(0o755)
         (tc / 'ld.lld').write_text('synthetic linker')
         (self.root / 'build').mkdir()
-        for name in ('r800_gps_donor_snapshot.py', 'r800_android_userspace_preflight.py',
-                     'r800_gps_publish.py', 'r800_gps_provenance.py',
-                     'r800_android_linker_audit.py', 'r800_tizen_dependencies.py',
-                     'r800_pack_tizen_stage.py', 'r800_verify_tizen_stage.py',
-                     'r800_gps_host_elf.py', 'r800_gps_host_snapshot.py', 'r800_gps_host_trace.py'):
-            shutil.copyfile(SCRIPT.parents[3] / 'build' / name,
-                            self.root / 'build' / name)
+        for name in BUILD_MODULES:
+            source = SCRIPT.parents[3] / 'build' / name
+            self.assertTrue(source.is_file(), name)
+            if name != 'r800_gps_link_gate.py':
+                shutil.copyfile(source, self.root / 'build' / name)
         (self.root / 'build/r800_gps_link_gate.py').write_text(GATE)
         self.libs = self.root / 'donor'
         self.libs.mkdir()
@@ -189,7 +187,7 @@ class BuildContract(unittest.TestCase):
         self.assertIsNone(evidence[0]['inputs']['inputs']['host_snapshot'])
         self.assertEqual(evidence[0]['inputs']['tool_snapshot'],
                          {'clang': 'clang', 'ld.lld': 'lld', 'llvm-readelf': 'readelf'})
-        for name in HEADERS:
+        for name in (*HEADERS, *BUILD_MODULES):
             self.assertIn(name, evidence[0]['inputs']['inputs'])
 
     def test_compiler_environment_is_filtered(self):
