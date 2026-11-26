@@ -82,7 +82,13 @@ def check(root, *, strict_pages=False):
     for p,item in optional.items():
         if item["status"] != "MISSING" and item.get("kind") != "regular":
             problems.append("OPTIONAL_FILE_PATH_REVIEW:"+p)
+    # Bind every audited object and guest alias, not only libbrcm.so.
+    closure_hashes = {name: item["sha256"] for name, item in closure["files"].items()}
+    closure_hashes.update({guest: closure["files"][canonical]["sha256"]
+                           for guest, canonical in closure["aliases"].items()
+                           if canonical in closure["files"]})
     return {"status":"TIZEN_GNSS_REVIEW_REQUIRED" if problems else "TIZEN_GNSS_STATIC_ONLY",
+            "closure_sha256":closure_hashes,
             "problems":problems,"closure_status":closure["status"],
             "strict_4k_page_review":strict_pages,"closure_problems":closure["problems"],"bridge_library":library,
             "directories":directories,"socket_path":SOCKET,"socket_metadata":socket,
