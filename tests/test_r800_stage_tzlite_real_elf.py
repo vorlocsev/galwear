@@ -407,15 +407,20 @@ class RealStageTests(unittest.TestCase):
 
     def test_cache_review_real_image(self):
         from test_r800_tzlite_cache_review import new_cache, gconv_cache
+        from r800_tzlite_cache_review import parse_gconv
         (self.root/"etc/ld.so.cache").write_bytes(new_cache(path=b"/lib/libfixture.so.1"))
         cache=self.root/"usr/lib/gconv/gconv-modules.cache"
         cache.parent.mkdir()
-        cache.write_bytes(gconv_cache())
+        fixture=gconv_cache()
+        self.assertEqual(parse_gconv(fixture)["module_paths"],["/usr/lib/gconv/UTF-16.so"])
+        cache.write_bytes(fixture)
         image,sha=self.image_fixture()
         result=inspect_image(image,sha,review_caches=True)["cache_review"]
         self.assertEqual(result["files"]["/etc/ld.so.cache"]["records"][0]["status"],
                          "AUDITED_PATH_CANDIDATE")
-        self.assertEqual(result["files"]["/usr/lib/gconv/gconv-modules.cache"]["outside_audited_subset_count"],1)
+        gconv=result["files"]["/usr/lib/gconv/gconv-modules.cache"]
+        self.assertEqual(gconv["status"],"STATIC_TABLE_INVENTORY_ONLY",result["problems"])
+        self.assertEqual(gconv["outside_audited_subset_count"],1)
         self.assertFalse(result["cache_installation_authorized"])
         self.assertEqual(hashlib.sha256(image.read_bytes()).hexdigest(),sha)
 

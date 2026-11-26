@@ -33,3 +33,16 @@ Android HAL and synthetic ARM QEMU jobs succeeded. Correct positive
 fixture to use the audited alias and add separate real ext4
 negative test proving the donor-only alias stays outside the
 staged subset. No production classifier relaxation. CI pending.
+
+## Gconv fixture correction
+
+CI d389ac5dd84c9c56a53ec29cf47214d7da07dd72: four successful
+workflows, two failures, one workflow not returned at review.
+Host run 45805238803 job 139858618044 failed the gconv part
+of test_cache_review_real_image; exact-path negative case passed.
+The fixture encoded module string offset 25 (NUL terminator of
+/usr/lib/gconv/) rather than 26 (start of UTF-16.so).
+Calculate offsets from appended strings, explicitly reject empty
+module name, validate fixture before building ext4 and run cache
+unit tests before real ELF tests. No production parser relaxation.
+Android HAL and synthetic ARM QEMU jobs passed. New CI pending.

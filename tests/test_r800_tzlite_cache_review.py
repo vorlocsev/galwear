@@ -14,14 +14,22 @@ def new_cache(name=b"libfixture.so.1",path=b"/usr/lib/libfixture.so.1"):
 
 
 def gconv_cache():
-    strings=b"\0INTERNAL\0/usr/lib/gconv/\0UTF-16.so\0"
+    strings=bytearray(b"\0")
+    def add_string(value):
+        offset=len(strings)
+        strings.extend(value+b"\0")
+        return offset
+    canon=add_string(b"INTERNAL")
+    directory=add_string(b"/usr/lib/gconv/")
+    module=add_string(b"UTF-16.so")
+    strings=bytes(strings)
     if len(strings)%2:
         strings+=b"\0"
     hashes=16+len(strings)
     modules=hashes+12
     extra=modules+12
     return struct.pack("<I5H",0x20010324,16,hashes,3,modules,extra)+b"\0\0"+strings+struct.pack(
-        "<6H",1,0,0,0,0,0)+struct.pack("<6H",1,10,25,0,0,0)
+        "<6H",canon,0,0,0,0,0)+struct.pack("<6H",canon,directory,module,0,0,0)
 
 
 class CacheTests(unittest.TestCase):
@@ -46,6 +54,12 @@ class CacheTests(unittest.TestCase):
             parse_ld(new_cache(path=b"/usr/lib/../lib.so"))
     def test_gconv(self):
         self.assertEqual(parse_gconv(gconv_cache())["module_paths"],["/usr/lib/gconv/UTF-16.so"])
+    def test_gconv_empty_module_name(self):
+        raw=bytearray(gconv_cache())
+        modules=struct.unpack_from("<H",raw,10)[0]
+        struct.pack_into("<H",raw,modules+4,0)
+        with self.assertRaises(ValueError):
+            parse_gconv(raw)
     def test_gconv_bad_hash(self):
         raw=bytearray(gconv_cache())
         hashes=struct.unpack_from("<H",raw,6)[0]
