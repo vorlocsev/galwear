@@ -3,6 +3,8 @@
 import hashlib
 from pathlib import Path
 import stat
+import subprocess
+import re
 
 from r800_android_userspace_preflight import read_regular
 from r800_gps_host_elf import LIMIT, MAX_TOTAL, LOADER, NAME, TOOLS
@@ -35,6 +37,72 @@ def plan(report):
             raise ValueError("Invalid host library binding")
         result["lib/" + name] = bindings[name]
     return result
+
+
+def reject_preload():
+    preload = Path("/etc/ld.so.preload")
+    if preload.exists() or preload.is_symlink():
+        raise ValueError("System-wide loader preload requires review")
+
+
+def check_listing(text, staging, report, tool):
+    """Reject unexpected paths from glibc --list (not an execution trace)."""
+    base = Path(staging) / "host"
+    expected = plan(report)
+    objects, bindings = report["objects"], report["bindings"]
+    pending = [bindings[tool], bindings[LOADER]]
+    seen, names = set(), set()
+    while pending:
+        source = pending.pop()
+        if source in seen:
+            continue
+        seen.add(source)
+        for name in objects[source]["needed"]:
+            names.add(name)
+            pending.append(bindings[name])
+    allowed = {str(base / "lib" / n): n for n in names}
+    loader_path = str(base / "loader")
+    listed = set()
+    loader_seen = False
+    for line in text.splitlines():
+        match = re.fullmatch(r"\s*(.*?)\s+\(0x[0-9a-fA-F]+\)\s*", line)
+        if not match:
+            raise ValueError("Unexpected host loader listing")
+        entry = match.group(1).strip()
+        if entry == "linux-vdso.so.1":
+            continue
+        label, sep, path = entry.partition(" => ")
+        path = path if sep else label
+        if path == loader_path:
+            if loader_seen:
+                raise ValueError("Duplicate captured loader listing")
+            loader_seen = True
+            # The loader can also satisfy its own DT_NEEDED alias.
+            listed.update(n for n in names if expected["lib/" + n] == bindings[LOADER])
+        elif path in allowed and (not sep or label == allowed[path]):
+            name = allowed[path]
+            if name in listed:
+                raise ValueError("Duplicate host library listing")
+            listed.add(name)
+        else:
+            raise ValueError("Host dependency escaped captured library set: " + entry)
+    if listed != names or not loader_seen:
+        raise ValueError("Incomplete captured loader listing")
+
+
+def check_loader(staging, report):
+    reject_preload()
+    staging = Path(staging)
+    base = staging / "host"
+    for tool in TOOLS:
+        result = subprocess.run(
+            [str(base / "loader"), "--inhibit-cache", "--glibc-hwcaps-mask", "",
+             "--library-path", str(base / "lib"), "--list", str(staging / "tools" / tool)],
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TZ": "UTC"},
+            capture_output=True, text=True, timeout=30, check=False)
+        if result.returncode or result.stderr:
+            raise ValueError("Captured host loader review failed: " + tool)
+        check_listing(result.stdout, staging, report, tool)
 
 
 def snapshot(staging, report, *, create=False):
@@ -78,10 +146,7 @@ def snapshot(staging, report, *, create=False):
                 raise ValueError("Unexpected host snapshot entries")
             if {p.name for p in libs.iterdir()} != {p[4:] for p in paths if p.startswith("lib/")}:
                 raise ValueError("Unexpected host library entries")
-    # Reject system-wide preload configuration rather than silently accepting it.
-    preload = Path("/etc/ld.so.preload")
-    if preload.exists() or preload.is_symlink():
-        raise ValueError("System-wide loader preload requires review")
+    reject_preload()
     return {"mode": "captured-loader-experimental", "providers": paths,
             "wrapper_sha256": hashlib.sha256(WRAPPER).hexdigest(),
             "host_isolated": False, "runtime_verified": False}
