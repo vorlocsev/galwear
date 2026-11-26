@@ -34,6 +34,18 @@ def object_image(isa="arm", typ=21, other=2, section=1, size=12, value=0x2100, i
     return bytes(raw)
 
 
+def pic_image(address, load=None, symbolic=False):
+    raw = bytearray(object_image() if symbolic else image())
+    delta = (address - 0x1110) & 0xffffffff
+    def mov(base, imm):
+        return base | ((imm & 0xf000) << 4) | (imm & 0xfff)
+    struct.pack_into("<III", raw, 0x100, mov(0xe3000000, delta & 0xffff),
+                     mov(0xe3400000, delta >> 16), 0xe08f0000)
+    if load is not None:
+        struct.pack_into("<I", raw, 0x10c, load)
+    return bytes(raw)
+
+
 class XrefTests(unittest.TestCase):
     def test_data_reference_without_code_claim(self):
         report = target.audit(image())
@@ -135,6 +147,57 @@ class XrefTests(unittest.TestCase):
         self.assertEqual(target.audit(bytes(raw), symbolic=True)["symbolic_data_references"], [])
         report = target.audit(object_image(), [("factory", "arm", 0x1100, 4)], symbolic=True)
         self.assertEqual(report["code_ranges"][0]["literal_load_clues"], [])
+
+    def test_pic_direct_table_address(self):
+        raw = pic_image(0x2100)
+        report = target.audit(raw, [("factory", "arm", 0x1100, 12)])
+        clue = report["code_ranges"][0]["pic_clues"][0]
+        self.assertEqual(clue["table_va"], 0x2100)
+        self.assertEqual(clue["reference_kind"], "ARM_PIC_TABLE_ADDRESS_CANDIDATE")
+        self.assertFalse(report["control_flow_verified"])
+
+    def test_pic_symbolic_got_slot(self):
+        raw = pic_image(0x2140, load=0xe5901000, symbolic=True)
+        report = target.audit(raw, [("factory", "arm", 0x1100, 16)], symbolic=True)
+        clue = report["code_ranges"][0]["pic_clues"][0]
+        self.assertEqual((clue["slot_va"], clue["table_va"], clue["register"]), (0x2140, 0x2100, "r1"))
+        self.assertEqual(clue["reference_kind"], "ARM_PIC_RELOCATED_SLOT_CANDIDATE")
+        self.assertEqual(target.audit(raw, [("factory", "arm", 0x1100, 16)])["code_ranges"][0]["pic_clues"], [])
+
+    def test_pic_signed_load_offset(self):
+        for addr, op in ((0x117c, 0xe5901004), (0x1184, 0xe5101004)):
+            with self.subTest(addr=addr):
+                raw = pic_image(addr, load=op)
+                clue = target.audit(raw, [("factory", "arm", 0x1100, 16)])["code_ranges"][0]["pic_clues"][0]
+                self.assertEqual(clue["slot_va"], 0x1180)
+
+    def test_pic_negative_delta(self):
+        # Compute an address lower than the architectural PC, then load the
+        # relative literal at 0x1180 using a positive immediate.
+        raw = pic_image(0x1100, load=0xe5901080)
+        clue = target.audit(raw, [("factory", "arm", 0x1100, 16)])["code_ranges"][0]["pic_clues"][0]
+        self.assertEqual(clue["computed_va"], 0x1100)
+        self.assertEqual(clue["slot_va"], 0x1180)
+
+    def test_pic_reject_mismatched_or_conditional_ops(self):
+        for offset, word in ((0x104, 0xe3401000), (0x108, 0x108f0000),
+                             (0x108, 0xe08f0080), (0x108, 0xe08f0001)):
+            with self.subTest(offset=offset, word=word):
+                raw = bytearray(pic_image(0x2100))
+                struct.pack_into("<I", raw, offset, word)
+                self.assertEqual(target.audit(bytes(raw), [("factory", "arm", 0x1100, 12)])["code_ranges"][0]["pic_clues"], [])
+
+    def test_pic_reject_relocated_instruction(self):
+        raw = bytearray(pic_image(0x2100))
+        struct.pack_into("<I", raw, 0x20c, 32)
+        struct.pack_into("<II", raw, 0x418, 0x1104, 23)
+        self.assertEqual(target.audit(bytes(raw), [("factory", "arm", 0x1100, 12)])["code_ranges"][0]["pic_clues"], [])
+
+    def test_pic_no_partial_or_thumb_decode(self):
+        raw = pic_image(0x2100)
+        for isa, size in (("arm", 8), ("thumb", 12)):
+            with self.subTest(isa=isa):
+                self.assertEqual(target.audit(raw, [("factory", isa, 0x1100, size)])["code_ranges"][0]["pic_clues"], [])
 
 
 if __name__ == "__main__":
