@@ -304,6 +304,7 @@ class Flow:
                 "range_end_reached": self.end in self.incoming,
                 "converged": self.converged, "iterations": self.steps,
                 "back_edge_count": len(self.back_edges),
+                "modeled_it_blocks": getattr(self, "it_blocks", 0), "flags_verified": False,
                 "control_flow_verified": False, "safe_to_flash": False}
 
 
@@ -423,6 +424,70 @@ def audit(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=Fa
     return flow.report()
 
 
+def it_register_transfer(state, va, a, b, width):
+    """Flag-neutral register subset; no branches, memory or SP/LR writes."""
+    if width == 2 and a == 0xbf00:
+        return True
+    if width == 4 and a & 0xfbf0 in (0xf240, 0xf2c0) and not b & 0x8000 and (b >> 8) & 15 <= 12:
+        rd = (b >> 8) & 15
+        imm = ((a & 15) << 12) | ((a & 0x400) << 1) | ((b & 0x7000) >> 4) | (b & 255)
+        prev = state.get(rd)
+        value = (("constant", imm) if a & 0xfbf0 == 0xf240 else
+                 ("constant", (prev[1] & 0xffff) | (imm << 16)) if prev and prev[0] == "constant" else None)
+    elif width == 2 and a & 0xff00 == 0x4600 and (a & 7) + ((a >> 4) & 8) <= 12 and (a >> 3) & 15 <= 12:
+        rd = (a & 7) + ((a >> 4) & 8)
+        value = state.get((a >> 3) & 15)
+    elif width == 2 and a & 0xff78 == 0x4478 and (a & 7) + ((a >> 4) & 8) <= 12:
+        rd = (a & 7) + ((a >> 4) & 8)
+        prev = state.get(rd)
+        address = va + 4 + sign_extend(prev[1], 32) if prev and prev[0] == "constant" else None
+        value = ("address", address) if address is not None and 0 <= address <= 0xffffffff else None
+    else:
+        return False
+    state.pop(rd, None)
+    if value is not None:
+        state[rd] = value
+    return True
+
+
+def thumb_it_blocks(nodes, relocations):
+    """Validate complete blocks and remove body entries from the CFG."""
+    blocks, body, errors = {}, set(), []
+    for va, (a, _, width) in nodes.items():
+        if width != 2 or a & 0xff00 != 0xbf00 or not a & 15:
+            continue
+        itstate, first = a & 255, (a >> 4) & 15
+        pos, steps = va + 2, []
+        if first >= 14 or va in body or va & ~3 in relocations:
+            errors.append({"address": va, "reason": "invalid_it_header"})
+            continue
+        while True:
+            op = nodes.get(pos)
+            if op is None or pos in body or not it_register_transfer({}, pos, *op):
+                errors.append({"address": pos, "reason": "unsupported_it_body"})
+                break
+            if any(slot in relocations for slot in range(pos & ~3, ((pos + op[2] - 1) & ~3) + 1, 4)):
+                errors.append({"address": pos, "reason": "relocated_it_body"})
+                break
+            steps.append((pos, (itstate >> 4) == first, op))
+            body.add(pos)
+            pos += op[2]
+            if itstate & 7 == 0:
+                blocks[va] = (pos, steps)
+                break
+            itstate = (itstate & 0xe0) | ((itstate << 1) & 0x1f)
+    return blocks, body, errors
+
+
+def transfer_it(state, steps):
+    # Flags are unknown but unchanged by the accepted subset. Keep the two
+    # correlated predicate outcomes separate until the block exits.
+    lanes = [dict(state), dict(state)]
+    for va, then, op in steps:
+        it_register_transfer(lanes[0 if then else 1], va, *op)
+    return {k: v for k, v in lanes[0].items() if lanes[1].get(k) == v}
+
+
 def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aapcs=False, mapping=None, initial=None, leaf=None, data_ranges=()):
     """Bounded Thumb flow, with linear instruction-boundary assumptions."""
     if size % 2 or start % 2 or not 0 < size <= 65536 or off < 0 or off + size > len(raw):
@@ -439,14 +504,11 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
             b = struct.unpack_from("<H", raw, off + pos + 2)[0] if width == 4 else None
             nodes[start + pos] = (a, b, width)
             pos += width
-    flow = Flow(start, end, nodes, assume_aapcs, initial)
+    blocks, body, errors = thumb_it_blocks(nodes, relocations)
+    flow = Flow(start, end, {va: op for va, op in nodes.items() if va not in body}, assume_aapcs, initial)
     enqueue, events, boundaries = flow.enqueue, flow.events, flow.boundaries
-
-    # Reject even an unreachable IT encoding: a branch into its body could
-    # otherwise be mistaken for an unconditional instruction sequence.
-    for va, (a, _, width) in nodes.items():
-        if width == 2 and a & 0xff00 == 0xbf00 and a & 15:
-            boundaries.append({"address": va, "reason": "it_block_not_modeled"})
+    flow.it_blocks = len(blocks)
+    boundaries.extend(errors)
     if boundaries:
         return flow.report()
     for va, state in flow.walk():
@@ -471,6 +533,10 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
         if any(slot in relocations for slot in range(va & ~3, ((va + width - 1) & ~3) + 1, 4)):
             boundary("relocated_instruction")
             continue
+        if va in blocks:
+            target, steps = blocks[va]
+            enqueue(target, transfer_it(state, steps))
+            continue
         call = thumb_call(a, b, width, va) if assume_aapcs else None
         if call is not None:
             row = assumed_call(state, call, va, start, end, mapping, leaf)
@@ -483,7 +549,7 @@ def audit_thumb(raw, off, start, size, relocations, tables, direct, *, assume_aa
         branch = thumb_branch(a, b, width, va)
         if branch is not None:
             target, conditional = branch
-            if target not in nodes:
+            if target not in flow.nodes:
                 boundary("invalid_branch")
             else:
                 enqueue(target, state)
