@@ -11,6 +11,8 @@ on:
       - build/r800_gps_link_gate.py
       - build/r800_gps_glibc_qemu.sh
       - build/r800_gps_mock_qemu.sh
+      - build/r800_gps_mock_peer.py
+      - tests/test_r800_gps_mock_peer.py
       - build/r800_gps_mock_transcript.py
       - tests/r800_mock_gps_hal.c
       - tests/test_r800_gps_mock_transcript.py
@@ -225,6 +227,7 @@ jobs:
           export LC_ALL=C
           sh -n build/r800_gps_mock_qemu.sh
           python3 -m unittest discover -s tests -p test_r800_gps_mock_transcript.py -v
+          python3 -m unittest discover -s tests -p test_r800_gps_mock_peer.py -v
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
           for stage in 0 1 2 3 4; do
