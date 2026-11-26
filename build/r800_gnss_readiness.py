@@ -190,6 +190,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ("android-root","tizen-root","binary","libdir"):
         p.add_argument("--"+name,type=Path)
+    p.add_argument("--tzlite-root",type=Path)
     p.add_argument("--tizen-image",type=Path)
     p.add_argument("--tizen-image-sha256")
     p.add_argument("--donor-ndk",type=Path)
@@ -221,7 +222,7 @@ def main():
                 raise ValueError("SELinux audit requires Android root, policy path, SHA-256 and type candidates")
             if not re.fullmatch(r"[0-9a-f]{64}",a.selinux_policy_sha256):
                 raise ValueError("Expected lowercase policy SHA-256")
-        for root in (a.android_root,a.tizen_root):
+        for root in (a.android_root,a.tizen_root,a.tzlite_root):
             if root is not None and (not root.is_dir() or root.resolve()==Path("/")):
                 raise ValueError("Use isolated, prepared offline roots")
         gates=[offline_gate(a.run_offline,sha,clean),ci_gate(a.check_ci,sha),
@@ -231,6 +232,12 @@ def main():
                static_gate("tizen_preflight","r800_tizen_gnss_preflight.py",
                            ["--root",a.tizen_root] if a.tizen_root else None,
                            "TIZEN_GNSS_STATIC_ONLY"),
+               static_gate("tzlite_known_components","r800_tzlite_audit.py",
+                           ["--root",a.tzlite_root] if a.tzlite_root else None,
+                           "TZLITE_KNOWN_STATIC_CANDIDATES_ONLY",
+                           bindings={"schema":"r800-tzlite-audit-v1","plugin_completeness_verified":False,
+                                     "runtime_mounts_verified":False,"configuration_semantics_verified":False,
+                                     "original_donor_verified":False,"gnss_runtime_verified":False},timeout=600),
                static_gate("tizen_image_closure","r800_gps_image_audit.py",
                            ["--image",a.tizen_image,"--sha256",a.tizen_image_sha256]
                            if a.tizen_image else None,"STATIC_IMAGE_GNSS_CLOSURE_ONLY",
