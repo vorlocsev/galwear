@@ -98,7 +98,86 @@ def parse_elf(raw, *, include_tags=False):
     return (mapping, relocations, tags) if include_tags else (mapping, relocations)
 
 
-def inspect_table(raw, address, layout, mapping, relocations, digest):
+def symbolic_code_targets(raw, mapping, relocations, tags):
+    """Conservative zero-addend REL function references; never apply relocations."""
+    wanted = {slot: (typ, sym) for slot, (typ, sym) in relocations.items()
+              if typ in (2, 21, 22) and sym}
+    if not wanted:
+        return {}
+    # This optional mode deliberately excludes versioned and GNU-only symbol
+    # inventories until their local binding rules are independently reviewed.
+    if 4 not in tags or any(t in tags for t in (0x6ffffef5, 0x6ffffff0,
+                                               0x6ffffffc, 0x6ffffffd,
+                                               0x6ffffffe, 0x6fffffff)):
+        raise ValueError("Symbolic mode requires unversioned SYSV symbols")
+
+    def one(tag):
+        if len(tags.get(tag, [])) != 1:
+            raise ValueError("Missing or duplicate symbol tag")
+        return tags[tag][0]
+
+    if one(11) != 16:
+        raise ValueError("Invalid DT_SYMENT")
+    addr = one(4)
+    off, _ = mapping(addr, 8)
+    buckets, count = struct.unpack_from("<II", raw, off)
+    if not 1 <= buckets <= 262144 or not 1 <= count <= 262144:
+        raise ValueError("Invalid SYSV symbol dimensions")
+    off, _ = mapping(addr, 8 + 4 * (buckets + count))
+    indices = struct.unpack_from(f"<{buckets + count}I", raw, off + 8)
+    if any(i >= count for i in indices) or indices[buckets] != 0:
+        raise ValueError("Invalid SYSV hash indices")
+    done = {0}
+    for head in indices[:buckets]:
+        seen = set()
+        while head not in done:
+            if head in seen:
+                raise ValueError("Cyclic SYSV hash chain")
+            seen.add(head)
+            head = indices[buckets + head]
+        done.update(seen)
+    symoff, _ = mapping(one(6), count * 16)
+    strsize = one(10)
+    if not 1 <= strsize <= 8 * 1024**2:
+        raise ValueError("Invalid dynamic string size")
+    stroff, _ = mapping(one(5), strsize)
+    strings = raw[stroff:stroff + strsize]
+    if strings[0] != 0:
+        raise ValueError("Invalid dynamic string table")
+    targets = {}
+    for slot, (typ, sym) in wanted.items():
+        if sym >= count:
+            raise ValueError("Relocation symbol index out of bounds")
+        name, value, size, info, other, section = struct.unpack_from("<IIIBBH", raw, symoff + sym * 16)
+        if name >= len(strings):
+            raise ValueError("Invalid relocation symbol name")
+        end = strings.find(b"\0", name, min(len(strings), name + 4096))
+        if end < 0:
+            raise ValueError("Unterminated relocation symbol name")
+        binding, visibility = info >> 4, other & 3
+        if (info & 15 != 2 or not 0 < section < 0xff00 or not value or not size
+                or not (binding == 0 or binding in (1, 2) and visibility in (1, 2, 3))):
+            continue
+        try:
+            off, _ = mapping(slot, 4)
+            if struct.unpack_from("<I", raw, off)[0] != 0:
+                continue
+            start = value & ~1
+            align = 2 if value & 1 else 4
+            if start % align or size % align:
+                continue
+            _, flags = mapping(start, size)
+            if not flags & 1 or flags & 2:
+                continue
+        except ValueError:
+            continue
+        targets[slot] = {"value": value, "symbol_index": sym,
+                         "symbol_name": strings[name:end].decode("utf-8", "replace"),
+                         "relocation_type": typ, "zero_addend_only": True}
+    return targets
+
+
+def inspect_table(raw, address, layout, mapping, relocations, digest, symbolic_targets=None):
     if layout not in LAYOUTS or type(address) is not int or not 0 <= address <= 0xffffffff or address % 4:
         raise ValueError("Invalid table address or layout")
     fields = LAYOUTS[layout]
@@ -116,12 +195,18 @@ def inspect_table(raw, address, layout, mapping, relocations, digest):
         row = {"field": field, "slot_va": slot, "raw_word": value,
                "relocation": relocation, "target_va": None, "isa": None,
                "status": "UNRESOLVED"}
-        if relocation == (23, 0) and value:
-            target, isa = value & ~1, "thumb" if value & 1 else "arm"
+        symbolic = (symbolic_targets or {}).get(slot)
+        pointer = symbolic["value"] if symbolic is not None else value
+        if (relocation == (23, 0) or symbolic is not None) and pointer:
+            target, isa = pointer & ~1, "thumb" if pointer & 1 else "arm"
             try:
                 _, target_flags = mapping(target, 2 if isa == "thumb" else 4)
                 if target % (2 if isa == "thumb" else 4) == 0 and target_flags & 1 and not target_flags & 2:
-                    row.update(target_va=target, isa=isa, status="RELATIVE_EXECUTABLE_CANDIDATE")
+                    row.update(target_va=target, isa=isa, status=(
+                        "SYMBOLIC_EXECUTABLE_CANDIDATE" if symbolic is not None
+                        else "RELATIVE_EXECUTABLE_CANDIDATE"))
+                    if symbolic is not None:
+                        row["symbolic_evidence"] = symbolic
             except ValueError:
                 pass
         elif relocation is None and value == 0:
@@ -138,19 +223,22 @@ def inspect_table(raw, address, layout, mapping, relocations, digest):
 MAX_CANDIDATES = 256
 
 
-def audit(raw, address, layout):
-    mapping, relocations = parse_elf(raw)
+def audit(raw, address, layout, *, symbolic=False):
+    mapping, relocations, tags = parse_elf(raw, include_tags=True)
+    targets = symbolic_code_targets(raw, mapping, relocations, tags) if symbolic else {}
     return inspect_table(raw, address, layout, mapping, relocations,
-                         hashlib.sha256(raw).hexdigest())
+                         hashlib.sha256(raw).hexdigest(), targets)
 
 
-def discover(raw):
-    """Strict heuristic: exact known size, every slot has a relative code pointer."""
-    mapping, relocations = parse_elf(raw)
+def discover(raw, *, symbolic=False):
+    """Strict heuristic: exact size and a supported code pointer in every slot."""
+    mapping, relocations, tags = parse_elf(raw, include_tags=True)
+    targets = symbolic_code_targets(raw, mapping, relocations, tags) if symbolic else {}
     digest = hashlib.sha256(raw).hexdigest()
     candidates = []
     relative = {slot for slot, reloc in relocations.items() if reloc == (23, 0)}
-    for slot in sorted(relative):
+    eligible = relative | set(targets)
+    for slot in sorted(eligible):
         address = slot - 4
         if address < 0 or address in relocations:
             continue
@@ -164,13 +252,13 @@ def discover(raw):
         for layout, fields in LAYOUTS.items():
             if declared != 4 * (1 + len(fields)):
                 continue
-            if not all(address + 4 * i in relative for i in range(1, len(fields) + 1)):
+            if not all(address + 4 * i in eligible for i in range(1, len(fields) + 1)):
                 continue
             try:
-                row = inspect_table(raw, address, layout, mapping, relocations, digest)
+                row = inspect_table(raw, address, layout, mapping, relocations, digest, targets)
             except ValueError:
                 continue
-            if not all(e["status"] == "RELATIVE_EXECUTABLE_CANDIDATE" for e in row["entries"]):
+            if not all(e["status"] in ("RELATIVE_EXECUTABLE_CANDIDATE", "SYMBOLIC_EXECUTABLE_CANDIDATE") for e in row["entries"]):
                 continue
             if len(candidates) >= MAX_CANDIDATES:
                 raise ValueError("Interface candidate budget exceeded")
@@ -179,7 +267,8 @@ def discover(raw):
             "status": "STATIC_CANDIDATES_ONLY", "sha256": digest,
             "candidate_count": len(candidates), "candidates": candidates,
             "relative_slots_examined": len(relative),
-            "exact_size_all_relative_code_pointers_only": True,
+            "exact_size_all_relative_code_pointers_only": not symbolic,
+            "symbolic_mode": symbolic, "symbolic_slots_resolved": len(targets),
             "discovery_complete": False, "table_identity_verified": False,
             "selected_abi": None, "runtime_verified": False, "safe_to_flash": False}
 
@@ -192,12 +281,14 @@ def main():
     mode.add_argument("--table-va", type=lambda s: int(s, 0))
     mode.add_argument("--discover", action="store_true")
     parser.add_argument("--layout", choices=LAYOUTS)
+    parser.add_argument("--symbolic", action="store_true", help="Opt in to conservative zero-addend symbol clues")
     args = parser.parse_args()
     if args.discover == (args.layout is not None):
         parser.error("--layout is required only with --table-va")
     try:
         raw = read_regular(args.library, LIMIT)
-        report = discover(raw) if args.discover else audit(raw, args.table_va, args.layout)
+        report = (discover(raw, symbolic=args.symbolic) if args.discover
+                  else audit(raw, args.table_va, args.layout, symbolic=args.symbolic))
     except (OSError, ValueError, struct.error) as exc:
         report = {"status": "REVIEW_REQUIRED", "error": str(exc), "safe_to_flash": False}
     print(json.dumps(report, indent=2, sort_keys=True))
