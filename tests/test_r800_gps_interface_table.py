@@ -78,5 +78,49 @@ class TableTests(unittest.TestCase):
         self.assertEqual([x["status"] for x in report["entries"]], ["NULL_WORD"] * 2)
 
 
+    def test_discover_exact_layouts(self):
+        for layout in ("gps", "xtra"):
+            with self.subTest(layout=layout):
+                report = target.discover(fixture(layout))
+                self.assertEqual(report["candidate_count"], 1)
+                self.assertEqual(report["candidates"][0]["layout_assumption"], layout)
+                self.assertEqual(report["candidates"][0]["table_va"], 0x2100)
+                self.assertFalse(report["table_identity_verified"])
+                self.assertFalse(report["discovery_complete"])
+                self.assertFalse(report["safe_to_flash"])
+                self.assertIsNone(report["selected_abi"])
+
+    def test_discover_multiple_candidates(self):
+        raw = bytearray(fixture(relocs=[(0x2104, 23), (0x2108, 23),
+                                        (0x2124, 23), (0x2128, 23)]))
+        struct.pack_into("<III", raw, 0x320, 12, 0x1100, 0x1101)
+        report = target.discover(bytes(raw))
+        self.assertEqual([r["table_va"] for r in report["candidates"]], [0x2100, 0x2120])
+
+    def test_discover_rejects_nonexact_size(self):
+        raw = fixture(words=[16, 0x1100, 0x1101])
+        self.assertEqual(target.audit(raw, 0x2100, "xtra")["declared_size"], 16)
+        self.assertEqual(target.discover(raw)["candidate_count"], 0)
+
+    def test_discover_rejects_missing_or_symbolic_reloc(self):
+        for relocs in ([], [(0x2104, 23)], [(0x2104, 23), (0x2108, 258)]):
+            with self.subTest(relocs=relocs):
+                self.assertEqual(target.discover(fixture(relocs=relocs))["candidate_count"], 0)
+
+    def test_discover_rejects_invalid_code_targets(self):
+        for words in ([12, 0x1100, 0], [12, 0x1100, 0x2100], [12, 0x1100, 0x1102]):
+            with self.subTest(words=words):
+                self.assertEqual(target.discover(fixture(words=words))["candidate_count"], 0)
+
+    def test_discover_rejects_invalid_relocation_table(self):
+        with self.assertRaises(ValueError):
+            target.discover(fixture(relocs=[(0x2104, 23), (0x2104, 23)]))
+
+    def test_discover_budget(self):
+        from unittest.mock import patch
+        with patch.object(target, "MAX_CANDIDATES", 0), self.assertRaises(ValueError):
+            target.discover(fixture())
+
+
 if __name__ == "__main__":
     unittest.main()
