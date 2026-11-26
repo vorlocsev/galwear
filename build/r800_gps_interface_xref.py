@@ -59,6 +59,63 @@ def arm_pic_clues(raw, off, start, size, relocations, tables, direct):
     return clues
 
 
+def thumb_pic_clues(raw, off, start, size, relocations, tables, direct):
+    """Adjacent T32 MOVW/MOVT, T16 ADD-PC and optional T32 LDR clues."""
+    clues = []
+    pos = 0
+    def clean(va, width):
+        return not any(slot in relocations for slot in range(
+            va & ~3, ((va + width - 1) & ~3) + 1, 4))
+    def imm16(a, b):
+        return ((a & 15) << 12) | ((a & 0x400) << 1) | ((b & 0x7000) >> 4) | (b & 255)
+    while pos + 2 <= size:
+        first, = struct.unpack_from("<H", raw, off + pos)
+        width = 4 if first >> 11 in (0b11101, 0b11110, 0b11111) else 2
+        # Do not infer unconditional execution beyond a possible IT block.
+        if first & 0xff00 == 0xbf00 and first & 15:
+            break
+        p = pos
+        pos += width
+        if p + 10 > size or not clean(start + p, 10):
+            continue
+        a, b, c, d, add = struct.unpack_from("<5H", raw, off + p)
+        reg = (b >> 8) & 15
+        if (a & 0xfbf0 != 0xf240 or c & 0xfbf0 != 0xf2c0
+                or b & 0x8000 or d & 0x8000 or reg > 12
+                or (d >> 8) & 15 != reg
+                or add != (0x4478 | (reg & 7) | ((reg & 8) << 4))):
+            continue
+        delta = imm16(a, b) | (imm16(c, d) << 16)
+        if delta & 0x80000000:
+            delta -= 1 << 32
+        va = start + p
+        address = va + 12 + delta
+        if not 0 <= address <= 0xffffffff:
+            continue
+        base = {"movw_va": va, "movt_va": va + 4, "add_va": va + 8,
+                "computed_va": address, "register": "r" + str(reg)}
+        if address in tables:
+            clues.append({**base, "table_va": address,
+                          "reference_kind": "THUMB_PIC_TABLE_ADDRESS_CANDIDATE"})
+        if p + 14 > size or not clean(va + 10, 4):
+            continue
+        a, b = struct.unpack_from("<HH", raw, off + p + 10)
+        dest = b >> 12
+        if dest > 12 or a & 15 != reg:
+            continue
+        if a & 0xfff0 == 0xf8d0:
+            slot = address + (b & 0xfff)
+        elif a & 0xfff0 == 0xf850 and b & 0xf00 == 0xc00:
+            slot = address - (b & 255)
+        else:
+            continue
+        if slot in direct:
+            clues.append({**base, "dereference_va": va + 10, "register": "r" + str(dest),
+                          "slot_va": slot, "table_va": direct[slot]["table_va"],
+                          "reference_kind": "THUMB_PIC_RELOCATED_SLOT_CANDIDATE"})
+    return clues
+
+
 def audit(raw, ranges=(), *, symbolic=False):
     discovery = discover(raw, symbolic=symbolic)
     mapping, relocations, tags = parse_elf(raw, include_tags=True)
@@ -174,7 +231,7 @@ def audit(raw, ranges=(), *, symbolic=False):
                      "size": size, "get_extension_entry_matches": matches,
                      "literal_load_clues": refs,
                      "pic_clues": arm_pic_clues(raw, off, start, size, relocations, tables, direct)
-                     if isa == "arm" else []})
+                     if isa == "arm" else thumb_pic_clues(raw, off, start, size, relocations, tables, direct)})
         if sum(len(r["literal_load_clues"]) + len(r["pic_clues"]) for r in code) > MAX_REFS:
             raise ValueError("Code reference budget exceeded")
     return {"schema": "galwear-r800-gps-interface-xref-v1", "status": "STATIC_XREF_CLUES_ONLY",
