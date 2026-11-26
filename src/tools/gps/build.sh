@@ -8,28 +8,20 @@ case "$XTRA_ABI" in 0|1|2) ;; *) echo "invalid R800_XTRA_ABI" >&2; exit 2;; esac
 S=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$S/../../.." && pwd)
 NDK=$(CDPATH= cd -- "$1" && pwd)
-SR=$(CDPATH= cd -- "$2" && pwd)
+SR=$(CDPATH= cd -- "$2" && pwd -P)
 OUT=$3
 [ ! -e "$OUT" ] && [ ! -L "$OUT" ] || { echo "output already exists" >&2; exit 2; }
 grep -Eq '^Pkg.Revision[[:space:]]*=[[:space:]]*27\.2\.12479018$' "$NDK/source.properties"
 TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
-for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
-    [ -f "$SR/$lib" ] && [ ! -L "$SR/$lib" ] || { echo "supply resolved local library: $lib" >&2; exit 2; }
-done
 PARENT=$(CDPATH= cd -- "$(dirname -- "$OUT")" && pwd)
 OUT=$PARENT/$(basename -- "$OUT")
 TMP=$(mktemp -d "$PARENT/.gpsbridge.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
 trap 'exit 1' HUP INT TERM
-(cd "$SR" && sha256sum libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3) > "$TMP/input.txt"
-mkdir "$TMP/libs"
-for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
-    cp --no-dereference -- "$SR/$lib" "$TMP/libs/$lib"
-    [ -f "$TMP/libs/$lib" ] && [ ! -L "$TMP/libs/$lib" ] || { echo "invalid snapshot: $lib" >&2; exit 2; }
-    cmp -- "$SR/$lib" "$TMP/libs/$lib"
-done
-(cd "$SR" && sha256sum -c "$TMP/input.txt")
-(cd "$TMP/libs" && sha256sum -c "$TMP/input.txt")
+mkdir -m 700 "$TMP/libs"
+SNAPSHOT=$ROOT/build/r800_gps_donor_snapshot.py
+python3 "$SNAPSHOT" create "$SR" "$TMP/libs" "$TMP/input.json"
+python3 "$SNAPSHOT" verify "$SR" "$TMP/libs" "$TMP/input.json"
 # Validate the exact private snapshot used by the linker, not just its source.
 for lib in libc.so.6 libdl.so.2 libpthread.so.0 ld-linux.so.3; do
     "$TC/llvm-readelf" -h "$TMP/libs/$lib" > "$TMP/donor-elf.txt"
@@ -48,8 +40,7 @@ grep -Eq 'Class:[[:space:]]*ELF32' "$TMP/elf.txt"
 grep -Eq 'Machine:[[:space:]]*ARM' "$TMP/elf.txt"
 grep -Fq '/lib/ld-linux.so.3' "$TMP/elf.txt"
 python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/gpsbridge" --libdir "$TMP/libs"
-(cd "$TMP/libs" && sha256sum -c "$TMP/input.txt")
-(cd "$SR" && sha256sum -c "$TMP/input.txt")
+python3 "$SNAPSHOT" verify "$SR" "$TMP/libs" "$TMP/input.json"
 # Do not treat a concurrently created directory or directory symlink as a destination.
 ln -T -- "$TMP/gpsbridge" "$OUT"
 sha256sum "$OUT"
