@@ -109,7 +109,8 @@ class BuildContract(unittest.TestCase):
         (self.root / 'build').mkdir()
         for name in ('r800_gps_donor_snapshot.py', 'r800_android_userspace_preflight.py',
                      'r800_gps_publish.py', 'r800_gps_provenance.py',
-                     'r800_android_linker_audit.py', 'r800_tizen_dependencies.py'):
+                     'r800_android_linker_audit.py', 'r800_tizen_dependencies.py',
+                     'r800_pack_tizen_stage.py', 'r800_verify_tizen_stage.py'):
             shutil.copyfile(SCRIPT.parents[3] / 'build' / name,
                             self.root / 'build' / name)
         (self.root / 'build/r800_gps_link_gate.py').write_text(GATE)
@@ -146,6 +147,7 @@ class BuildContract(unittest.TestCase):
         self.assertEqual(len(evidence), 1)
         self.assertFalse(evidence[0]['signed_attestation'])
         self.assertFalse(evidence[0]['safe_to_flash'])
+        self.assertIsNone(evidence[0]['tizen_archive'])
         self.assertIn('--target=armv7a-linux-gnueabi', evidence[0]['inputs']['argv'])
 
     def test_repeatability(self):
