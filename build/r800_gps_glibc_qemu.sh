@@ -43,22 +43,23 @@ PY
   -Wl,--dynamic-linker=/lib/ld-linux.so.3,-e,_start \
   -o "$TMP/root/probe" "$ROOT/tests/r800_glibc_probe.c" \
   "$TMP/root/lib/libc.so.6" "$TMP/root/lib/libdl.so.2" "$TMP/root/lib/libpthread.so.0"
-python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/root/probe" --libdir "$TMP/root/lib"
+python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/root/probe" --libdir "$TMP/root/lib" > "$TMP/audit.json"
+cat "$TMP/audit.json"
 (cd "$TMP/root/lib" && sha256sum -c "$TMP/manifest")
-sha256sum "$TMP/root/probe" "$TMP/root/probe_plugin.so" "$QEMU"
+EVIDENCE=$ROOT/build/r800_gps_qemu_evidence.py
+python3 "$EVIDENCE" capture --root "$TMP/root" --qemu "$QEMU" --bwrap "$BWRAP" > "$TMP/before.json"
 # No host filesystem mounts, no network, no privilege escalation, no fallback.
 # A dynamic host qemu binary cannot run in this isolated root.
 # Explicit LD_LIBRARY_PATH in the guest avoids host library search.
+RC=0
 timeout -k 5s 30s "$BWRAP" --unshare-all --die-with-parent --new-session \
   --clearenv --ro-bind "$TMP/root" / --ro-bind "$QEMU" /qemu \
   --dev /dev --proc /proc --chdir / \
-  /qemu -cpu cortex-a15 -L / -E LD_LIBRARY_PATH=/lib /probe > "$TMP/run.log" 2>&1 || {
-    cat "$TMP/run.log"; echo "QEMU_PROBE=FAILED_OR_SANDBOX_UNAVAILABLE" >&2; exit 1;
-  }
+  /qemu -cpu cortex-a15 -L / -E LD_LIBRARY_PATH=/lib /probe > "$TMP/run.log" 2>&1 || RC=$?
+# Capture both successful and failed executions; review detects identity changes.
+python3 "$EVIDENCE" capture --root "$TMP/root" --qemu "$QEMU" --bwrap "$BWRAP" > "$TMP/after.json" || true
+python3 "$EVIDENCE" review --before "$TMP/before.json" --after "$TMP/after.json" --audit "$TMP/audit.json" --log "$TMP/run.log" --exit-code "$RC"
 cat "$TMP/run.log"
-for marker in GLIBC_2_24 PTHREAD_TLS DLOPEN_DLSYM R800_GLIBC_QEMU_PROBE; do
-    [ "$(grep -Fxc "$marker=PASS" "$TMP/run.log")" -eq 1 ]
-done
 (cd "$TMP/root/lib" && sha256sum -c "$TMP/manifest")
 echo "QEMU_USER_ONLY=PASS"
 echo "GNSS_RUNTIME_VERIFIED=false"
