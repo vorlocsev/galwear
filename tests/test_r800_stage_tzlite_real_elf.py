@@ -17,6 +17,7 @@ import r800_tzlite_manifest as manifest
 from r800_tzlite_image_binding import compare
 from r800_tzlite_legacy_image_scope import inspect_image
 from r800_stage_tzlite_extended import stage as stage_extended
+from r800_tzlite_extended_verify import verify as verify_extended
 import r800_gnss_readiness as readiness
 
 PROVIDER="/usr/lib/libfixture-real.so"
@@ -333,6 +334,43 @@ class RealStageTests(unittest.TestCase):
                          report["stage_manifest_sha256"])
         with self.assertRaises(ValueError):
             manifest.verify(self.output,report["stage_manifest_sha256"])
+
+    def extended_fixture(self):
+        shutil.copyfile(self.root/audit.PLUGINS[0].lstrip("/"),self.root/"usr/lib/sensor/extra.so")
+        image,sha=self.image_fixture()
+        review=inspect_image(image,sha,extended_manifest=True)["extended_manifest_sha256"]
+        report=stage_extended(image,self.output,sha,review)
+        return image,sha,review,report["stage_manifest_sha256"]
+
+    def test_extended_verify_real_image(self):
+        args=self.extended_fixture()
+        result=verify_extended(self.output,*args)
+        self.assertEqual(result["status"],"EXTENDED_STATIC_IMAGE_MATCH_ONLY")
+        self.assertEqual(result["extra_plugin_count"],1)
+        self.assertFalse(result["runtime_verified"])
+        self.assertFalse(result["safe_to_flash"])
+
+    def test_extended_verify_modified_file(self):
+        args=self.extended_fixture()
+        (self.output/"usr/lib/sensor/extra.so").write_bytes(b"changed")
+        with self.assertRaises(ValueError):
+            verify_extended(self.output,*args)
+
+    def test_extended_verify_forged_tree(self):
+        image,sha,review,_=self.extended_fixture()
+        (self.output/"etc/info.ini").write_bytes(b"unreviewed")
+        path=self.output/manifest.MANIFEST
+        record=json.loads(path.read_text())
+        record["tree"]=manifest.inventory(self.output)
+        path.write_text(json.dumps(record))
+        stage_sha=hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError,"path set"):
+            verify_extended(self.output,image,sha,review,stage_sha)
+
+    def test_extended_verify_wrong_digest(self):
+        image,sha,review,_=self.extended_fixture()
+        with self.assertRaisesRegex(ValueError,"manifest digest"):
+            verify_extended(self.output,image,sha,review,"0"*64)
 
     def test_extended_stage_wrong_review(self):
         image,sha=self.image_fixture()
