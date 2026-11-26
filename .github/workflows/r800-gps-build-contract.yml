@@ -49,6 +49,11 @@ on:
       - tests/test_r800_pack_tizen_stage.py
       - tests/test_android_linker_audit.py
       - src/tools/gps/gpsbridge.c
+      - src/tools/gps/gps_abi.h
+      - src/tools/gps/gps_command.h
+      - src/tools/gps/gps_frame.h
+      - src/tools/gps/gps_lto.h
+      - src/tools/gps/gps_output.h
       - build/r800_android_userspace_preflight.py
       - tests/test_android_userspace_preflight.py
   workflow_dispatch:
