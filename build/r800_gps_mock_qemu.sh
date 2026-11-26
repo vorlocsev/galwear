@@ -21,7 +21,7 @@ python3 "$ROOT/build/r800_gps_donor_snapshot.py" create "$SRC" "$TMP/guest/lib" 
 R800_XTRA_ABI=0 R800_TIZEN_ARCHIVE='' sh "$ROOT/src/tools/gps/build.sh" "$NDK" "$TMP/guest/lib" "$TMP/guest/gpsbridge"
 python3 "$ROOT/build/r800_gps_link_gate.py" --binary "$TMP/guest/gpsbridge" --libdir "$TMP/guest/lib"
 (cd "$TMP/guest" && sha256sum gpsbridge lib/*) > "$TMP/bridge.sha"
-for stage in 0 1 2 3 4 5 6; do
+for stage in 0 1 2 3 4 5 6 7; do
     "$TC/clang" --target=armv7a-linux-gnueabi -marm -mfloat-abi=softfp -mfpu=vfpv3-d16 \
         -O2 --no-default-config -nostdinc -ffreestanding -fno-builtin -fno-stack-protector \
         -Wall -Wextra -Werror -fPIC -fvisibility=hidden -shared -nostdlib -fuse-ld=lld --ld-path="$TC/ld.lld" \
@@ -55,7 +55,7 @@ for stage in 0 1 2 3 4 5 6; do
             daemon_pid=$!
             trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
             trap 'exit 1' HUP INT TERM
-            if [ "$stage" = 0 ]; then
+            if [ "$stage" = 0 ] || [ "$stage" = 7 ]; then
                 timeout -k 2s 35s python3 "$ROOT/build/r800_gps_mock_peer.py" \
                     --socket "$TMP/daemon-runtime-$stage/gps.sock" --log "$TMP/daemon.log"
                 kill -0 "$daemon_pid"
