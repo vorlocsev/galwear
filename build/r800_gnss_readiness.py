@@ -135,6 +135,50 @@ def tzlite_binding_recheck(binding, integrity):
     return binding
 
 
+def extended_tzlite_gate(root,image,image_digest,review_digest,stage_digest,gates):
+    name="tzlite_extended_binding"
+    if any(v is None for v in (root,image,image_digest,review_digest,stage_digest)):
+        return outcome(name,"NOT_TESTED",reason="Extended candidate, image and three external digests required")
+    if not any(g["gate"]=="tizen_image_closure" and g["status"]=="STATIC_PASS" for g in gates):
+        return outcome(name,"BLOCKED",blocked_by=["tizen_image_closure"],
+                       reason="Prerequisite image closure not confirmed")
+    gate=static_gate(name,"r800_tzlite_extended_verify.py",
+                     ["--root",root,"--image",image,"--image-sha256",image_digest,
+                      "--review-sha256",review_digest,"--stage-sha256",stage_digest],
+                     "EXTENDED_STATIC_IMAGE_MATCH_ONLY",
+                     bindings={"schema":"r800-tzlite-extended-verify-v1",
+                               "image_sha256":image_digest,"review_manifest_sha256":review_digest,
+                               "stage_manifest_sha256":stage_digest,"snapshot_verified":True,
+                               "donor_authenticity_verified":False,"ownership_verified":False,
+                               "xattrs_verified":False,"runtime_verified":False},timeout=900)
+    if gate["status"]=="STATIC_PASS":
+        detail=gate.get("detail")
+        if not isinstance(detail,dict):
+            return outcome(name,"REVIEW_REQUIRED",problems=["MISSING_EXTENDED_BINDING_DETAIL"])
+        for key,minimum,maximum in (("file_count",5,4096),("alias_count",0,4096),
+                                    ("extra_plugin_count",0,64),("excluded_unreviewed_data_count",0,4096)):
+            value=detail.get(key)
+            if type(value) is not int or not minimum<=value<=maximum:
+                return outcome(name,"REVIEW_REQUIRED",problems=["INVALID_EXTENDED_BINDING_COUNT:"+key])
+        items=detail.get("review_items")
+        if not isinstance(items,list) or not all(isinstance(v,str) for v in items):
+            return outcome(name,"REVIEW_REQUIRED",problems=["INVALID_EXTENDED_REVIEW_ITEMS"])
+    return gate
+
+
+def extended_tzlite_recheck(first,root,image,image_digest,review_digest,stage_digest,gates):
+    if first["status"]!="STATIC_PASS":
+        return first
+    after=extended_tzlite_gate(root,image,image_digest,review_digest,stage_digest,gates)
+    if (after["status"]!="STATIC_PASS" or not isinstance(first.get("detail"),dict)
+            or after.get("detail")!=first["detail"]
+            or not isinstance(after.get("report_sha256"),str)
+            or not re.fullmatch(r"[0-9a-f]{64}",after["report_sha256"])):
+        return outcome(first["gate"],"REVIEW_REQUIRED",
+                       problems=["EXTENDED_BINDING_FINAL_RECHECK_FAILED"],before=first,after=after)
+    return dict(first,recheck_report_sha256=after["report_sha256"],recheck_passed=True)
+
+
 def offline_gate(enabled, sha, clean):
     if not enabled:
         return outcome("offline_regression","NOT_TESTED",reason="Local execution not requested")
@@ -260,6 +304,9 @@ def main():
         p.add_argument("--"+name,type=Path)
     p.add_argument("--tzlite-root",type=Path)
     p.add_argument("--tzlite-manifest-sha256",help="Externally recorded SHA-256 of the static candidate v2 manifest")
+    p.add_argument("--tzlite-extended-root",type=Path)
+    p.add_argument("--tzlite-extended-review-sha256")
+    p.add_argument("--tzlite-extended-stage-sha256")
     p.add_argument("--tizen-image",type=Path)
     p.add_argument("--tizen-image-sha256")
     p.add_argument("--donor-ndk",type=Path)
@@ -294,7 +341,16 @@ def main():
         if a.tzlite_manifest_sha256 is not None:
             if a.tzlite_root is None or not re.fullmatch(r"[0-9a-f]{64}",a.tzlite_manifest_sha256):
                 raise ValueError("Manifest audit requires --tzlite-root and lowercase manifest SHA-256")
-        for root in (a.android_root,a.tizen_root,a.tzlite_root):
+        extended_inputs=(a.tzlite_extended_root,a.tzlite_extended_review_sha256,
+                         a.tzlite_extended_stage_sha256)
+        if any(v is not None for v in extended_inputs):
+            if any(v is None for v in extended_inputs) or a.tizen_image is None:
+                raise ValueError("Extended audit requires root, image and both extended manifest digests")
+            if any(not re.fullmatch(r"[0-9a-f]{64}",v) for v in extended_inputs[1:]):
+                raise ValueError("Expected lowercase extended manifest SHA-256")
+            if a.tzlite_root is not None and a.tzlite_root.resolve()==a.tzlite_extended_root.resolve():
+                raise ValueError("Baseline and extended candidates must be distinct roots")
+        for root in (a.android_root,a.tizen_root,a.tzlite_root,a.tzlite_extended_root):
             if root is not None and (not root.is_dir() or root.resolve()==Path("/")):
                 raise ValueError("Use isolated, prepared offline roots")
         gates=[offline_gate(a.run_offline,sha,clean),ci_gate(a.check_ci,sha),
@@ -329,6 +385,8 @@ def main():
                            "STATIC_GLIBC_CLOSURE_ONLY")]
         gates.append(tzlite_image_gate(a.tzlite_root,a.tizen_image,a.tizen_image_sha256,
                                        a.tzlite_manifest_sha256,gates))
+        gates.append(extended_tzlite_gate(a.tzlite_extended_root,a.tizen_image,a.tizen_image_sha256,
+                                          a.tzlite_extended_review_sha256,a.tzlite_extended_stage_sha256,gates))
         registration=next(g for g in gates if g["gate"]=="android_registration")
         gates.append(policy_gate(a.android_root,a.selinux_policy,a.selinux_policy_sha256,
                                  a.selinux_types,registration))
@@ -343,6 +401,11 @@ def main():
         for index,gate in enumerate(gates):
             if gate["gate"]=="tzlite_image_binding":
                 gates[index]=tzlite_binding_recheck(gate,integrity)
+                break
+        for index,gate in enumerate(gates):
+            if gate["gate"]=="tzlite_extended_binding":
+                gates[index]=extended_tzlite_recheck(gate,a.tzlite_extended_root,a.tizen_image,
+                    a.tizen_image_sha256,a.tzlite_extended_review_sha256,a.tzlite_extended_stage_sha256,gates)
                 break
         end_sha,end_clean=git_state()
         if end_sha!=sha or not end_clean:

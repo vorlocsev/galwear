@@ -347,6 +347,10 @@ class RealStageTests(unittest.TestCase):
         result=verify_extended(self.output,*args)
         self.assertEqual(result["status"],"EXTENDED_STATIC_IMAGE_MATCH_ONLY")
         self.assertEqual(result["extra_plugin_count"],1)
+        prerequisites=[readiness.outcome("tizen_image_closure","STATIC_PASS")]
+        gate=readiness.extended_tzlite_gate(self.output,*args,prerequisites)
+        self.assertEqual(gate["status"],"STATIC_PASS",gate)
+        self.assertEqual(gate["detail"],result)
         self.assertFalse(result["runtime_verified"])
         self.assertFalse(result["safe_to_flash"])
 
