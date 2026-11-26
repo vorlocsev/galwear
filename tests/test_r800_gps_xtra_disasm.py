@@ -62,5 +62,65 @@ class DisassemblyTests(unittest.TestCase):
             target.audit(raw, "xtra_init")
 
 
+
+    def trace(self, body):
+        return target.audit(fixture(body), "xtra_init")["conditional_register_trace"]
+
+    def test_register_alias_and_indirect_call(self):
+        trace = self.trace("  1000: mov r4, r0\n"
+                           "  1002: ldr.w r3, [r4, #8]\n"
+                           "  1006: mov r2, r3\n"
+                           "  1008: blx r2")
+        self.assertEqual(trace["events"], [
+            {"kind": "argument_word_load", "address": 0x1002, "base": "r4",
+             "destination": "r3", "offset": 8},
+            {"kind": "loaded_word_indirect_call", "address": 0x1008,
+             "register": "r2", "offset": 8, "load_address": 0x1002}])
+        self.assertEqual(trace["stop_reason"], "call_boundary")
+
+    def test_alias_overwritten(self):
+        trace = self.trace("  1000: mov r4, r0\n"
+                           "  1002: mov r4, r1\n"
+                           "  1004: ldr r3, [r4, #8]\n"
+                           "  1006: blx r3")
+        self.assertEqual(trace["events"], [])
+
+    def test_field_word_is_not_callback_base(self):
+        trace = self.trace("  1000: ldr r0, [r0, #4]\n"
+                           "  1004: ldr r3, [r0, #8]\n"
+                           "  1008: blx r3")
+        self.assertEqual(len(trace["events"]), 1)
+        self.assertEqual(trace["events"][0]["offset"], 4)
+
+    def test_stop_at_unknown_or_control_flow(self):
+        for instruction in ("b 0x1008", "it eq", "adds r0, #4",
+                            "bl 0x4000", "ldreq r3, [r0]"):
+            with self.subTest(instruction=instruction):
+                trace = self.trace("  1000: " + instruction +
+                                   "\n  1004: ldr r3, [r0, #8]")
+                self.assertEqual(trace["events"], [])
+                self.assertEqual(trace["stop_reason"],
+                                 "unsupported_instruction_or_control_flow")
+
+    def test_discontinuity_and_unparsed_line(self):
+        for body, reason in (
+            ("  1004: ldr r3, [r0]", "address_discontinuity"),
+            ("  1000: mov r4, r0\n  1008: ldr r3, [r4]", "address_discontinuity"),
+            ("  1000: .word 0x1234\n  1004: ldr r3, [r0]", "unparsed_line"),
+        ):
+            with self.subTest(body=body):
+                trace = self.trace(body)
+                self.assertEqual(trace["events"], [])
+                self.assertEqual(trace["stop_reason"], reason)
+
+    def test_call_closes_prefix(self):
+        trace = self.trace("  1000: ldr r3, [r0]\n"
+                           "  1004: blx r3\n"
+                           "  1008: ldr r2, [r0, #8]")
+        self.assertEqual(len(trace["events"]), 2)
+        self.assertEqual(trace["stop_reason"], "call_boundary")
+        self.assertFalse(trace["full_control_flow_analyzed"])
+
+
 if __name__ == "__main__":
     unittest.main()
