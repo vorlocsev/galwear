@@ -12,6 +12,15 @@ they stay mounted over the tree as before (tzchroot.sh).
 """
 import os, shutil, stat, subprocess, sys
 
+# The legacy full copier is not an acceptance gate. The explicitly
+# selected static-candidate mode stages only audited known components.
+if len(sys.argv)>1 and sys.argv[1]=="--static-candidate":
+    from pathlib import Path
+    sys.path.insert(0,str(Path(__file__).resolve().parents[3]/"build"))
+    from r800_stage_tzlite import main
+    sys.argv=[sys.argv[0],*sys.argv[2:]]
+    raise SystemExit(main())
+
 SRC, OUT = sys.argv[1].rstrip('/'), sys.argv[2].rstrip('/')
 
 BINS = [
