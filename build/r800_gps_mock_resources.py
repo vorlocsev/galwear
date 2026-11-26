@@ -1,16 +1,20 @@
 """Bounded host /proc measurements for a synthetic daemon under QEMU."""
-import os
 from pathlib import Path
 
 PROC = Path('/proc')
 MAX_PROCESSES = 128
+MAX_VISIBLE = 32768
 WARMUP = 2
 RSS_BUDGET_KIB = 8192
 
 
-def identity(pid):
+def record(pid):
     fields = (PROC / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
-    return int(fields[19])  # Linux stat field 22, process start time.
+    return int(fields[1]), int(fields[19])  # PPID and start time.
+
+
+def identity(pid):
+    return record(pid)[1]
 
 
 def executable(pid):
@@ -24,27 +28,34 @@ def locate(root, binary):
         raise ValueError('Invalid launcher PID')
     st = Path(binary).stat()
     wanted = st.st_dev, st.st_ino
-    pending, seen, matches = [root], set(), []
     root_id = identity(root)
+    # /proc/PID/task/PID/children is optional in Linux configurations.
+    children = {}
+    for i, path in enumerate(PROC.iterdir()):
+        if i >= MAX_VISIBLE:
+            raise ValueError('Visible process scan exceeds measurement budget')
+        if not path.name.isdecimal():
+            continue
+        pid = int(path.name)
+        try:
+            parent, start = record(pid)
+        except FileNotFoundError:
+            continue
+        children.setdefault(parent, []).append((pid, start))
+    pending, seen, matches = [(root, root_id)], set(), []
     while pending:
-        pid = pending.pop()
+        pid, start = pending.pop()
         if pid in seen:
             continue
         seen.add(pid)
         if len(seen) > MAX_PROCESSES:
             raise ValueError('Process tree exceeds measurement budget')
-        base = PROC / str(pid)
-        try:
-            start = identity(pid)
-            if executable(pid) == wanted:
-                matches.append((pid, start))
-            children = (base / 'task' / str(pid) / 'children').read_text().split()
-            if identity(pid) != start:
-                raise ValueError('Process identity changed during discovery')
-            pending.extend(map(int, children))
-        except FileNotFoundError:
-            continue
-    if identity(root) != root_id or len(matches) != 1:
+        if identity(pid) != start:
+            raise ValueError('Process identity changed during discovery')
+        if executable(pid) == wanted:
+            matches.append((pid, start))
+        pending.extend(children.get(pid, ()))
+    if identity(root) != root_id or len(matches) != 1 or identity(matches[0][0]) != matches[0][1]:
         raise ValueError('Expected exactly one matching daemon process')
     return matches[0]
 
