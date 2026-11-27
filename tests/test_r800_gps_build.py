@@ -64,6 +64,12 @@ GATE = '''import hashlib, json, os, sys
 from pathlib import Path
 mode = os.environ['TEST_MODE']
 out = Path(os.environ['TEST_OUT'])
+if '--donor-only' in sys.argv:
+    if mode == 'reject-donor-closure':
+        sys.exit(2)
+    print(json.dumps({'status': 'DONOR_STATIC_CLOSURE_ONLY', 'problems': [],
+                      'safe_to_flash': False}))
+    sys.exit(0)
 if mode == 'reject':
     sys.exit(2)
 binary = Path(sys.argv[sys.argv.index('--binary') + 1])
@@ -354,6 +360,11 @@ class BuildContract(unittest.TestCase):
                 self.assertNotEqual(self.run_build(mode).returncode, 0)
                 self.assertTrue(self.marker.exists())
                 self.assertFalse(self.out.exists())
+
+    def test_donor_closure_failure_precedes_compiler(self):
+        self.assertNotEqual(self.run_build('reject-donor-closure').returncode, 0)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.out.exists())
 
     def test_gate_failure(self):
         self.assertNotEqual(self.run_build('reject').returncode, 0)

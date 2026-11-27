@@ -77,3 +77,16 @@ attempt artifact upload; an absent evidence directory is an upload error.
 The workflow does not download donor libraries, execute QEMU, or publish a
 flashable image. A missing artifact or unsuccessful workflow is not evidence
 of acceptance. Use the actual workflow run and commit SHA when citing CI.
+
+
+## Pre-link donor audit
+
+```sh
+python3 build/r800_gps_link_gate.py --donor-only --libdir /path/to/tizen-libs
+```
+
+The same static ELF, SONAME, version and internal symbol checks now run on
+the private donor snapshot before the GPSBridge compiler is invoked. The
+post-link audit remains mandatory. DONOR_STATIC_CLOSURE_ONLY means only
+that the static check found no problems, not that the donor is authentic,
+the private ABI is compatible, the loader executes, or GNSS works.

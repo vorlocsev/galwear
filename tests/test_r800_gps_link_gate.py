@@ -2,8 +2,9 @@
 import sys
 from pathlib import Path
 import unittest
+from unittest import mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
-from r800_gps_link_gate import check_version, import_problems
+from r800_gps_link_gate import check_version, import_problems, audit_donors, DONORS
 
 class GpsLinkGateTests(unittest.TestCase):
     def setUp(self):
@@ -14,6 +15,22 @@ class GpsLinkGateTests(unittest.TestCase):
         self.providers = {"libc.so.6":{"version_definitions":[{"version":"GLIBC_2.4","base":False}],
                         "symbol_exports":[{"name":"malloc","type":2,"version":"GLIBC_2.4",
                                            "version_hidden":False}]}}
+
+    def test_donor_only_closure(self):
+        providers = {name: {"needed": [], "version_needs": [], "symbol_imports": [],
+                            "symbol_exports": [], "version_definitions": []}
+                     for name in DONORS}
+        hashes = {name: "a" * 64 for name in DONORS}
+        with mock.patch("r800_gps_link_gate.load_donors", return_value=(providers, hashes)):
+            report = audit_donors(Path("/fixture"))
+            self.assertEqual(report["status"], "DONOR_STATIC_CLOSURE_ONLY")
+            self.assertEqual(report["donor_sha256"], hashes)
+            self.assertFalse(report["safe_to_flash"])
+            self.assertFalse(report["runtime_verified"])
+            providers["libc.so.6"]["needed"].append("foreign.so")
+            report = audit_donors(Path("/fixture"))
+            self.assertEqual(report["status"], "REVIEW_REQUIRED")
+            self.assertIn("libc.so.6: Unexpected DT_NEEDED: foreign.so", report["problems"])
 
     def test_versions(self):
         for version in ("GLIBC_2.4","GLIBC_2.24","GLIBC_2.24.0"):

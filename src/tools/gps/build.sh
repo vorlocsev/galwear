@@ -64,6 +64,12 @@ run_tool() {
         grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' "$TMP/donor-elf.txt"
         grep -Eq 'Type:[[:space:]]*DYN([[:space:]]|$)' "$TMP/donor-elf.txt"
     done
+    # Reject incompatible donor ELF/symbol sets before invoking clang.
+    python3 "$ROOT/build/r800_gps_link_gate.py" --donor-only --libdir "$TMP/libs" > "$TMP/donor-audit.json" || {
+        cat "$TMP/donor-audit.json" >&2
+        exit 2
+    }
+    python3 "$SNAPSHOT" verify "$SR" "$TMP/libs" "$TMP/input.json"
     run_tool compile "$@"
 )
 python3 "$PROVENANCE" verify "$ROOT" "$NDK" "$TMP/provenance.json" "$@"

@@ -92,9 +92,7 @@ def import_problems(info, providers, internal=False, scope=None):
     return problems
 
 
-def audit(binary, libdir):
-    raw = read_regular(binary, LIMIT)
-    info = elf(raw, executable=True)
+def load_donors(libdir):
     providers, hashes = {}, {}
     for name in DONORS:
         data = read_regular(libdir / name, LIMIT)
@@ -107,12 +105,36 @@ def audit(binary, libdir):
             raise ValueError("Loader must not have PT_INTERP")
         providers[name] = p
         hashes[name] = hashlib.sha256(data).hexdigest()
-    problems = import_problems(info, providers)
+    return providers, hashes
+
+
+def donor_problems(providers):
+    problems = []
     # glibc components can use GLIBC_PRIVATE internally. Presence of the
     # version/symbol does not establish matching private data layouts.
     for name, obj in providers.items():
         problems.extend(name + ": " + issue for issue in
                         import_problems(obj, providers, internal=True, scope=DONORS))
+    return problems
+
+
+def audit_donors(libdir):
+    providers, hashes = load_donors(libdir)
+    problems = donor_problems(providers)
+    return {"status": "REVIEW_REQUIRED" if problems else "DONOR_STATIC_CLOSURE_ONLY",
+            "problems": problems, "donor_sha256": hashes,
+            "dependency_edges": {name: obj["needed"] for name, obj in providers.items()},
+            "glibc_ceiling": "2.24", "static_closure_pass": not problems,
+            "donor_authenticity_verified": False, "private_abi_verified": False,
+            "loader_verified": False, "runtime_verified": False,
+            "safe_to_flash": False}
+
+
+def audit(binary, libdir):
+    raw = read_regular(binary, LIMIT)
+    info = elf(raw, executable=True)
+    providers, hashes = load_donors(libdir)
+    problems = import_problems(info, providers) + donor_problems(providers)
     edges = {name: obj["needed"] for name, obj in providers.items()}
     edges["gpsbridge"] = info["needed"] + [LOADER]
     return {"status":"REVIEW_REQUIRED" if problems else "STATIC_GLIBC_CLOSURE_ONLY",
@@ -127,11 +149,13 @@ def audit(binary, libdir):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--binary",type=Path,required=True)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--binary",type=Path)
+    mode.add_argument("--donor-only",action="store_true")
     p.add_argument("--libdir",type=Path,required=True)
     a = p.parse_args()
     try:
-        report = audit(a.binary,a.libdir)
+        report = audit_donors(a.libdir) if a.donor_only else audit(a.binary,a.libdir)
     except (OSError,ValueError) as exc:
         report = {"status":"REVIEW_REQUIRED","problems":[str(exc)],"safe_to_flash":False}
     print(json.dumps(report,indent=2,sort_keys=True))
