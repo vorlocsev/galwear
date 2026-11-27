@@ -121,7 +121,7 @@ def audit_checkfc(policy, tool, expected_tool_sha, entries):
 
 
 def compile_cil(inputs, tool, checker=None, context_entries=(), checkfc=None,
-                checkfc_sha=None, checkfc_entries=()):
+                checkfc_sha=None, checkfc_entries=(), policy_probe=None):
     if not 1 <= len(inputs) <= 32:
         raise ValueError("Expected 1..32 explicit CIL files")
     tool = Path(tool).resolve(strict=True)
@@ -166,6 +166,10 @@ def compile_cil(inputs, tool, checker=None, context_entries=(), checkfc=None,
             if checkfc is not None:
                 report["checkfc_audit"] = audit_checkfc(policy, checkfc, checkfc_sha, checkfc_entries)
                 if report["checkfc_audit"]["status"] != "CHECKFC_SELECTED_CONTEXTS_ONLY":
+                    report["status"] = "REVIEW_REQUIRED"
+            if policy_probe is not None:
+                report["policy_probe"] = policy_probe(policy)
+                if report["policy_probe"]["status"] == "REVIEW_REQUIRED":
                     report["status"] = "REVIEW_REQUIRED"
         if sha(read_regular(tool, MAX_POLICY)) != tool_sha:
             raise ValueError("Compiler changed during audit")

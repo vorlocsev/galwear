@@ -225,3 +225,17 @@ product/odm, отсутствующие файлы, результаты каж�
 vndservice может отсутствовать и отмечается отдельно. Запуск только
 на подготовленной disposable AOSP среде. Это stock AOSP, не донорская
 политика SM-R800; обычный CI проверяет контракт с mock.
+
+
+Для статической проверки перехода домена конкретного HAL:
+```sh
+python3 build/r800_donor_domain_transition.py --policy /path/to/sepolicy \
+  --policy-sha256 "$POLICY_SHA256" --source init --executable HAL_EXEC_TYPE \
+  --target HAL_DOMAIN --report /path/to/new-transition.json
+```
+Типы берутся из реальной политики и контекстов, не угадываются.
+sesearch проверяет конкретный type_transition и необходимые unconditional
+allow transition/execute/entrypoint. Условные правила и переходы через
+атрибуты в type_transition требуют дополнительной проверки. CI компилирует
+синтетическую политику, затем проверяет разрешённый и неподходящий домен.
+Это не проверка полного запуска HIDL, ограничений MLS, binder или enforcing.
