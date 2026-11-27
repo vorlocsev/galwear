@@ -57,5 +57,71 @@ class KernelDiffEvidenceTests(unittest.TestCase):
             self.assertFalse(a["safe_to_flash"])
 
 
+class KernelDiffComparisonTests(unittest.TestCase):
+    def setUp(self):
+        import r800_reproducibility_audit as audit
+        self.a = {"schema": "galwear-kernel-diagnostic-v1", "safe_to_flash": False,
+                  "image_sha256": "11" * 32, "image_bytes": diag.BLOCK + 10,
+                  "block_bytes": diag.BLOCK, "blocks": ["22" * 32, "33" * 32],
+                  "sections": diag.sections(elf(b"abc"))}
+        import copy
+        self.b = copy.deepcopy(self.a)
+        self.ma = {field: "44" * 32 for field in audit.COMPARE_FIELDS
+                   if field.endswith("_sha256")}
+        self.ma.update(schema=audit.SCHEMA, status="ONE_BUILD_EVIDENCE_ONLY",
+                       run_id=33, run_attempt=1, runner_replica="a",
+                       galwear_commit="ab" * 20, source_commit=audit.BASE,
+                       container_image_id="sha256:" + "cd" * 32,
+                       compiler="19.1.4", linker="19.1.4",
+                       image_sha256=self.a["image_sha256"], image_bytes=self.a["image_bytes"],
+                       kernel_compiled=True, cpio_verified=True, kernel_boot_tested=False,
+                       reproducibility_proven=False, safe_to_flash=False)
+        self.mb = dict(self.ma, runner_replica="b")
+
+    def compare(self):
+        return diag.compare(self.a, self.b, self.ma, self.mb)
+
+    def test_equal(self):
+        result = self.compare()
+        self.assertEqual(result["status"], "IMAGE_HASH_MATCH")
+        self.assertEqual(result["different_blocks"], 0)
+        self.assertEqual(result["different_sections"], {})
+        self.assertFalse(result["safe_to_flash"])
+
+    def test_changed_block_and_section(self):
+        self.b["image_sha256"] = self.mb["image_sha256"] = "55" * 32
+        self.b["blocks"][1] = "66" * 32
+        self.b["sections"] = diag.sections(elf(b"abd"))
+        result = self.compare()
+        self.assertEqual(result["status"], "IMAGE_HASH_MISMATCH")
+        self.assertEqual(result["different_block_offsets"], [diag.BLOCK])
+        self.assertEqual(list(result["different_sections"]), [".text"])
+
+    def test_unbound_digest_rejected(self):
+        self.b["image_sha256"] = "55" * 32
+        with self.assertRaisesRegex(ValueError, "not bound"):
+            self.compare()
+
+    def test_wrong_attempt_rejected(self):
+        self.mb["run_attempt"] = 2
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            self.compare()
+
+    def test_same_replica_rejected(self):
+        self.mb["runner_replica"] = "a"
+        with self.assertRaisesRegex(ValueError, "distinct matrix replicas"):
+            self.compare()
+
+    def test_truncated_block_list_rejected(self):
+        self.b["blocks"].pop()
+        with self.assertRaisesRegex(ValueError, "block count"):
+            self.compare()
+
+    def test_inconsistent_whole_hash_rejected(self):
+        self.b["blocks"][0] = "77" * 32
+        with self.assertRaisesRegex(ValueError, "Inconsistent"):
+            self.compare()
+
+
 if __name__ == "__main__":
     unittest.main()
