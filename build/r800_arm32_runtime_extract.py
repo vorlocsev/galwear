@@ -65,13 +65,26 @@ def extract(system, expected, output):
         identity = snapshot_image(system, snapshot, expected)
         raw_system = unpack_system(snapshot, scratch)
         before = image_info(raw_system)
-        source, apex_bytes = get_member(tool, raw_system, APEX_PATHS, scratch, MAX_APEX)
-        apex = scratch/"runtime.apex"
-        apex.write_bytes(apex_bytes)
-        payload = scratch/"runtime-payload.img"
-        extract_payload(apex, payload)
-        payload.chmod(0o400)
-        payload_before = image_info(payload)
+        packaged = [path for path in APEX_PATHS if locate(tool, raw_system, path, MAX_APEX) is not None]
+        flat = [prefix for prefix in ("/apex/com.android.runtime", "/system/apex/com.android.runtime")
+                if locate(tool, raw_system, prefix + "/bin/linker", LIMIT) is not None]
+        if len(packaged) + len(flat) != 1:
+            raise ValueError("Expected exactly one packaged or flattened ARM32 Runtime APEX")
+        payload = None
+        payload_before = None
+        apex_bytes = None
+        if packaged:
+            source, apex_bytes = get_member(tool, raw_system, tuple(packaged), scratch, MAX_APEX)
+            apex = scratch/"runtime.apex"
+            apex.write_bytes(apex_bytes)
+            payload = scratch/"runtime-payload.img"
+            extract_payload(apex, payload)
+            payload.chmod(0o400)
+            payload_before = image_info(payload)
+            layout = "PACKAGED_APEX"
+        else:
+            source = flat[0]
+            layout = "FLATTENED_APEX"
         stage = scratch/"stage"
         stage.mkdir()
         rows = {}
@@ -80,7 +93,9 @@ def extract(system, expected, output):
                 guest, raw = get_member(tool, raw_system, LIBLOG_PATHS, scratch, LIMIT)
                 origin = "system"
             else:
-                guest, raw = get_member(tool, payload, (FILES[name],), scratch, LIMIT)
+                filesystem = payload if payload is not None else raw_system
+                member = FILES[name] if payload is not None else source + FILES[name]
+                guest, raw = get_member(tool, filesystem, (member,), scratch, LIMIT)
                 origin = "com.android.runtime"
             dest = stage/name
             dest.write_bytes(raw)
@@ -92,7 +107,7 @@ def extract(system, expected, output):
             dest.chmod(0o555 if name == "linker" else 0o444)
             rows[name] = {"sha256": sha(raw), "bytes": len(raw), "origin": origin,
                           "guest_path": guest, "needed": info["needed"], "soname": info["soname"]}
-        if image_info(raw_system) != before or image_info(payload) != payload_before:
+        if image_info(raw_system) != before or (payload is not None and image_info(payload) != payload_before):
             raise ValueError("Read-only extraction input changed")
         current = system.lstat()
         if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
@@ -101,8 +116,9 @@ def extract(system, expected, output):
         pins = {name: row["sha256"] for name, row in rows.items()}
         report = {"status": "ARM32_BIONIC_RUNTIME_EXTRACTED_STATIC_ONLY",
                   "system_sha256": expected, "raw_system_sha256": before["sha256"],
-                  "apex_path": source, "apex_sha256": sha(apex_bytes),
-                  "apex_payload_sha256": payload_before["sha256"], "files": rows,
+                  "apex_path": source, "apex_layout": layout,
+                  "apex_sha256": sha(apex_bytes) if apex_bytes is not None else None,
+                  "apex_payload_sha256": payload_before["sha256"] if payload_before else None, "files": rows,
                   "runtime_authenticity_verified": False, "android_version_verified": False,
                   "apex_signature_verified": False, "runtime_stub_exclusion_proven": False,
                   "runtime_verified": False, "safe_to_flash": False}

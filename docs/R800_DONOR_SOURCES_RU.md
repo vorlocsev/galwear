@@ -395,3 +395,22 @@ r800_hal_dlopen_probe.py run --runtime ... --runtime-manifest .../runtime-manife
 реальные синтетические EXT4/APEX, отдельный негативный тест отклоняет
 не-ELF. Сам Android 11 runtime пока не получен и не запущен. Подлинность
 и версия донорского runtime требуют отдельной проверки.
+
+
+## Независимый Android 11 ARM32 reference
+
+Google emulator RSR1.240422.001 из AOSP commit
+cdaf21eb286931aa947e9ca3df00f89afe197713 имеет пустой abilist32;
+не выбран для ARM32. Официальный GSI RP1A.200720.009 остаётся
+локальным вариантом после получения с соблюдением условий Google.
+
+Публичный phhusson/treble_experimentations v313 (Android 11), release
+50839463, asset 46298761, system-roar-arm32_binder64-ab-vanilla.img.xz,
+364782672 bytes — независимый reference, не Wear OS. GitHub не
+предоставляет digest для этого legacy asset. CI получает его по
+фиксированному release URL, ограничивает размер XZ и декомпрессии,
+фиксирует наблюдаемый SHA-256, извлекает только пять runtime файлов
+из packaged или flattened Runtime APEX + system liblog.
+Публикуется только JSON. Это первое наблюдение, не независимая
+проверка хеша, и не разрешение на выполнение стороннего ELF.
+Динамический QEMU запуск в данном job отсутствует.

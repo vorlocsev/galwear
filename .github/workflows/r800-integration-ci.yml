@@ -142,6 +142,33 @@ jobs:
           path: ${{ runner.temp }}/r800-integrated-regression.json
           if-no-files-found: warn
           retention-days: 7
+  arm32-reference-extract:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Observe exact phh Android 11 release asset (static only)
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          archive="$RUNNER_TEMP/system-roar-arm32_binder64-ab-vanilla.img.xz"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+            --max-filesize 364782672 \
+            https://github.com/phhusson/treble_experimentations/releases/download/v313/system-roar-arm32_binder64-ab-vanilla.img.xz \
+            -o "$archive"
+          python3 build/r800_phh_runtime_reference.py --archive "$archive" --output "$RUNNER_TEMP/r800-phh-reference"
+          rm -- "$archive"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r800-phh-arm32-reference-evidence
+          path: |
+            ${{ runner.temp }}/r800-phh-reference/reference-evidence.json
+            ${{ runner.temp }}/r800-phh-reference/runtime/runtime-manifest.json
+            ${{ runner.temp }}/r800-phh-reference/runtime/runtime-extraction.json
+          if-no-files-found: warn
+          retention-days: 7
   overlay-independent:
     if: github.ref_name == 'development/r800-integration-20261127'
     runs-on: ubuntu-24.04

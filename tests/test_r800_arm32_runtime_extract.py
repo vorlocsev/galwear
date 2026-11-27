@@ -62,6 +62,36 @@ class Arm32RuntimeExtractTests(unittest.TestCase):
                 runtime.extract(image, expected, root/"invalid")
             self.assertFalse((root/"invalid").exists())
 
+    def test_flattened_apex_and_xz_bounds(self):
+        import lzma
+        from r800_phh_runtime_reference import expand
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tree = root/"tree"
+            (tree/"lib").mkdir(parents=True)
+            (tree/"lib/liblog.so").write_bytes(b"liblog.so")
+            for name, guest in runtime.FILES.items():
+                dest = tree/"apex/com.android.runtime"/guest.lstrip("/")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(name.encode())
+            image = root/"system.img"
+            mkimage(tree, image)
+            expected = runtime.image_info(image)["sha256"]
+            def fake_check(path, library=False):
+                return path.read_bytes(), {"elf_type": "ET_DYN", "needed": [],
+                                           "soname": path.name if library else None}
+            with patch.object(runtime, "check", side_effect=fake_check):
+                report = runtime.extract(image, expected, root/"out")
+            self.assertEqual(report["apex_layout"], "FLATTENED_APEX")
+            self.assertIsNone(report["apex_sha256"])
+            archive = root/"fixture.xz"
+            archive.write_bytes(lzma.compress(b"fixture"))
+            size = archive.stat().st_size
+            result = expand(archive, root/"expanded", expected_size=size, limit=7)
+            self.assertEqual(result["system_sha256"], hashlib.sha256(b"fixture").hexdigest())
+            with self.assertRaisesRegex(ValueError, "exceeds limit"):
+                expand(archive, root/"oversized", expected_size=size, limit=6)
+
 
 if __name__ == "__main__":
     unittest.main()
