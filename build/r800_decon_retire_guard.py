@@ -17,6 +17,7 @@ def extract(source, signature):
 
 def harness(source):
     return r'''
+#define _GNU_SOURCE 1
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -106,6 +107,12 @@ int main(int argc,char **argv) {
 }
 '''
 
+def compile_fixture(source, unit, exe):
+    unit.write_text(harness(source))
+    subprocess.run(["cc","-std=c11","-Wall","-Wextra","-Werror",str(unit),"-o",str(exe)],
+                   check=True,timeout=30)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ("fence-source","patch","scratch"):
@@ -126,9 +133,7 @@ def main():
                        cwd=a.scratch,check=True,timeout=30)
     unit=a.scratch/"retire.c"
     exe=a.scratch/"retire"
-    unit.write_text(harness(target.read_text()))
-    subprocess.run(["cc","-std=c11","-Wall","-Wextra","-Werror",str(unit),"-o",str(exe)],
-                   check=True,timeout=30)
+    compile_fixture(target.read_text(), unit, exe)
     cases=[(1,0,-1,0),(2,0,-1,0)]
     cases.extend((0,n,-1,0) for n in range(4))
     cases.extend((0,3,n,err) for n in range(4) for err in (-24,-12))
