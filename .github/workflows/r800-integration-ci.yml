@@ -108,7 +108,7 @@ jobs:
           retention-days: 7
   hal-compile:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install exact NDK release without sdkmanager
@@ -180,13 +180,8 @@ jobs:
             ${{ runner.temp }}/r800-bt/libbt-vendor.elf.txt
           if-no-files-found: warn
           retention-days: 7
-  keepwifi-compile:
-    if: github.ref_name == 'development/r800-integration-20261127'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
       - name: Install Android API 30 and Build Tools 30.0.3
+        if: github.ref_name == 'development/r800-integration-20261127'
         run: |
           set -eu
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -245,18 +240,85 @@ jobs:
           test -x "$(dirname "$d8")/dexdump"
           printf 'R800_ANDROID_JAR=%s\nR800_BUILD_TOOLS=%s\n' "$jar" "$(dirname "$d8")" >> "$GITHUB_ENV"
       - name: Compile KeepWifi Java and inspect DEX (never execute)
+        if: github.ref_name == 'development/r800-integration-20261127'
         run: |
           set -eu
           sh src/tools/keepwifi/build.sh "$R800_ANDROID_JAR" "$R800_BUILD_TOOLS" "$RUNNER_TEMP/r800-keepwifi"
           echo "KEEPWIFI_COMPILE_ONLY; runtime_verified=false; safe_to_flash=false"
       - name: Upload KeepWifi text evidence only
-        if: always()
+        if: always() && github.ref_name == 'development/r800-integration-20261127'
         uses: actions/upload-artifact@v4
         with:
           name: r800-keepwifi-compile-evidence
           path: |
             ${{ runner.temp }}/r800-keepwifi/keepwifi-build-evidence.txt
             ${{ runner.temp }}/r800-keepwifi/keepwifi-dex-evidence.txt
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Install ARM EABI build dependencies for BusyBox and Wi-Fi tools
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi libc6-dev-armel-cross \
+            qemu-user make flex bison pkg-config
+      - name: Build static BusyBox and Wi-Fi utilities (inventory and version only)
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh build/r800_build_busybox.sh "$RUNNER_TEMP/r800-busybox"
+          sh build/r800_build_wifi_tools.sh "$RUNNER_TEMP/r800-wifi"
+      - name: Assemble and verify real same-run partial component tree
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_stage_components.py \
+            --hal-dir "$RUNNER_TEMP/r800-hal" --vendor-sources src/vendor \
+            --tools "$RUNNER_TEMP/r800-tools" --bluetooth "$RUNNER_TEMP/r800-bt" \
+            --keepwifi "$RUNNER_TEMP/r800-keepwifi" --busybox "$RUNNER_TEMP/r800-busybox" \
+            --wifi "$RUNNER_TEMP/r800-wifi" --output "$RUNNER_TEMP/r800-components" \
+            --source-sha "$GITHUB_SHA"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, stat
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r800-components"
+          report = json.loads((root / "component-evidence.json").read_text())
+          assert report["source_sha"] == os.environ["GITHUB_SHA"]
+          assert report["status"] == "PARTIAL_COMPILED_COMPONENTS_ONLY"
+          for flag in ("payload_complete", "vendor_image_built", "runtime_verified", "safe_to_flash"):
+              assert report[flag] is False, flag
+          actual = set()
+          for p in root.rglob("*"):
+              assert not p.is_symlink(), p
+              if not p.is_file():
+                  continue
+              name = p.relative_to(root).as_posix()
+              if name == "component-evidence.json":
+                  continue
+              actual.add(name)
+              expected = report["files"][name]
+              assert p.stat().st_size == expected["bytes"], name
+              assert oct(stat.S_IMODE(p.stat().st_mode)) == expected["mode"], name
+              assert hashlib.sha256(p.read_bytes()).hexdigest() == expected["sha256"], name
+          assert actual == set(report["files"])
+          assert "unlinked/gpsbridge.o" in actual
+          assert "payload/keepwifi.dex" in actual
+          assert "payload/fw/bt/libbt-vendor.so" in actual
+          print("REAL_COMPONENT_TREE_PASS", len(actual), "files; safe_to_flash=false")
+          PY
+      - name: Upload component manifest only (no binaries)
+        if: always() && github.ref_name == 'development/r800-integration-20261127'
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-real-component-stage-evidence
+          path: |
+            ${{ runner.temp }}/r800-components/component-evidence.json
+            ${{ runner.temp }}/r800-components/hal-stage-evidence.json
           if-no-files-found: warn
           retention-days: 7
   kernel:
