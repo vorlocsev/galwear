@@ -25,6 +25,28 @@ MAX_IMAGE = 4*1024**3
 OBSERVED_ASSET_SHA256 = "8685851758960e80110171249fd1ea005e88469457d31bd903a18ab1554eeb37"
 OBSERVED_SYSTEM_SHA256 = "2bf6cd3fa34b01b7d38456f02e1cb4694da80b8d2cb585a2a5b13adc361c812d"
 OBSERVED_SYSTEM_BYTES = 1014649136
+# Successful extraction: CI 46029031849 / job 140607780855.
+OBSERVED_RUNTIME_SHA256 = {
+    "linker": "f3805ba092213553cef66ce750be6e63122a0f347872b360edf6da27b9e0c8f0",
+    "libc.so": "90dc4679e8d6241823b24b1866bf53274f9e455ec84df028cd8952437cb88160",
+    "libdl.so": "1eaa0a0deb5ba045f62ecca45585aecfcfa22d6ad8a59b3c0120cbf069a51fcd",
+    "libm.so": "4f7fdec3746a77c55f61d0f9799792e730c76913ddc680e2f0e53459fd3c7358",
+    "liblog.so": "8a6ccc6df8292962a1f87759371f9baa8fdef25c2279e2d100cd3b4ffaa849b4",
+    "libc++.so": "12c5c803a751e04772ce04012edcd066c3cc52a2d31775ce38eba479352211ce",
+}
+OBSERVED_APEX_SHA256 = "790ad832c8aa4969132df13990f668a726529efd9b093eb0aa7c7a3363bcf622"
+OBSERVED_APEX_PAYLOAD_SHA256 = "2cd795b542c924c759f270392918b46ee17399e2000f568735d7eadf42d364cc"
+OBSERVED_RAW_SYSTEM_SHA256 = "2887b0b2941ceb0dddd806fa9568195516f1c8aec194510260485f3292c60099"
+
+
+def verify_runtime_pins(report):
+    actual = {name: row["sha256"] for name, row in report["files"].items()}
+    if (actual != OBSERVED_RUNTIME_SHA256 or
+            report["apex_sha256"] != OBSERVED_APEX_SHA256 or
+            report["apex_payload_sha256"] != OBSERVED_APEX_PAYLOAD_SHA256 or
+            report["raw_system_sha256"] != OBSERVED_RAW_SYSTEM_SHA256):
+        raise ValueError("Extracted runtime differs from successful reference observation")
+
 
 
 def expand(archive, output, expected_size=ASSET_SIZE, limit=MAX_IMAGE,
@@ -88,6 +110,8 @@ def main():
                                  expected_system_bytes=OBSERVED_SYSTEM_BYTES))
             report["first_observation_pin_matched"] = True
             report["runtime"] = extract(image, report["system_sha256"], a.output/"runtime")
+            verify_runtime_pins(report["runtime"])
+            report["runtime_observation_pins_matched"] = True
             report["status"] = "PHH_V313_ARM32_RUNTIME_STATIC_ONLY"
     except (OSError, ValueError, lzma.LZMAError, RuntimeError) as exc:
         report.update(status="REVIEW_REQUIRED", reason=str(exc))

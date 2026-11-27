@@ -177,6 +177,82 @@ jobs:
             ${{ runner.temp }}/r800-phh-reference/runtime/runtime-extraction.json
           if-no-files-found: warn
           retention-days: 7
+  arm32-hal-qemu:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install isolated QEMU and sparse tools
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(id -u)" -ne 0
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends qemu-user-static bubblewrap android-sdk-libsparse-utils
+          qemu-arm-static --version
+          bwrap --version
+          command -v simg2img
+          scratch=$(mktemp -d)
+          trap 'rm -rf "$scratch"' EXIT
+          mkdir "$scratch/dev" "$scratch/proc"
+          touch "$scratch/qemu"
+          qemu=$(realpath "$(command -v qemu-arm-static)")
+          timeout -k 5s 20s bwrap --unshare-all --die-with-parent --new-session \
+            --clearenv --ro-bind "$scratch" / --ro-bind "$qemu" /qemu \
+            --dev /dev --proc /proc --chdir / /qemu --version
+      - name: Re-extract hash-pinned ARM32 reference
+        run: |
+          set -eu
+          archive="$RUNNER_TEMP/phh-reference.img.xz"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+            --max-filesize 364782672 \
+            https://github.com/phhusson/treble_experimentations/releases/download/v313/system-roar-arm32_binder64-ab-vanilla.img.xz \
+            -o "$archive"
+          python3 build/r800_phh_runtime_reference.py --archive "$archive" --output "$RUNNER_TEMP/r800-phh-reference"
+          rm -- "$archive"
+      - name: Install exact NDK release without sdkmanager
+        run: |
+          set -eu
+          archive="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o "$archive"
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e "$archive" | sha1sum --check -
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          rm -f "$archive"
+      - name: Independently compile five HALs and probe at exact HEAD
+        run: |
+          set -eu
+          git init "$RUNNER_TEMP/tinyalsa"
+          git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
+          git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
+          git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
+          sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+          python3 build/r800_hal_dlopen_probe.py compile \
+            --ndk "$RUNNER_TEMP/android-ndk-r27c" --hals "$RUNNER_TEMP/r800-hal" \
+            --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/r800-hal-probe"
+      - name: Run five HAL metadata probes in isolated ARM32 Bionic QEMU
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-phh-reference/runtime"
+          python3 build/r800_hal_dlopen_probe.py run \
+            --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
+            --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
+            --output "$RUNNER_TEMP/r800-hal-runtime"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r800-arm32-hal-qemu-evidence
+          path: |
+            ${{ runner.temp }}/r800-phh-reference/reference-evidence.json
+            ${{ runner.temp }}/r800-hal-probe/hal-probe-evidence.json
+            ${{ runner.temp }}/r800-hal-runtime/hal-runtime-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
   overlay-independent:
     if: github.ref_name == 'development/r800-integration-20261127'
     runs-on: ubuntu-24.04

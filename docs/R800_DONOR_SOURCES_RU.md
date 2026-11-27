@@ -447,3 +447,15 @@ SONAME, SHA-256 и закрытый список DT_NEEDED; новый manifest 
 все шесть файлов. QEMU размещает libc++.so в /system/lib. Список
 разрешённых зависимостей компилируемых HAL не расширен. Тесты включают
 отсутствие libc++.so. Фактическое замыкание и запуск ещё не подтверждены.
+
+
+CI 46029031849 / job 140607780855: PHH_V313_ARM32_RUNTIME_STATIC_ONLY,
+шесть файлов извлечены, packaged APEX, SONAME ld-android.so у linker,
+все DT_NEEDED входят в замкнутый набор. Закреплены SHA-256 шести ELF,
+raw system, APEX и APEX payload. Новый job arm32-hal-qemu на Ubuntu
+22.04 независимо повторяет извлечение и компиляцию точного HEAD,
+проверяет bwrap isolation и запускает пять отдельных HMI probes.
+Публикуется только JSON, без исходных донорских ELF и образов.
+Reference не является Wear OS; runtime authenticity не подтверждена.
+Даже успешный HMI не проверяет methods->open, реальные namespaces,
+Android boot, устройства или безопасность прошивки.
