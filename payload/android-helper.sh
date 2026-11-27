@@ -1,10 +1,40 @@
 #!/oem/r800dev/bin/busybox sh
 # SM-R800 Wear OS helper. Runs under Android's init as service r800helper (root).
 # Only static busybox and absolute paths. Keeps the board alive and adds what the
-# images lack: swap, GPU clock, Wi-Fi with a root telnet shell, one-time setup.
+# images lack: swap, GPU clock, Wi-Fi support, one-time setup.
 B=/oem/r800dev/bin/busybox
 k() { echo "<6>r800: $*" > /dev/kmsg; }
-# Developer mode: touch /oem/r800dev/android/DEV for the telnet shell, Wi-Fi
+# Bounded boot-stage observation; no service starts, property writes or IPC probes.
+# A running process alone does not establish successful service registration.
+boot_observe() {
+    previous=
+    for attempt in $("$B" seq 1 120); do
+        managers=
+        for service in servicemanager hwservicemanager vndservicemanager zygote; do
+            state=$(/system/bin/getprop "init.svc.$service")
+            case "$state" in running|stopped|restarting|stopping) ;; *) state=unknown;; esac
+            managers="$managers $service=$state"
+        done
+        server=absent
+        "$B" pidof system_server >/dev/null 2>&1 && server=present
+        completed=$(/system/bin/getprop sys.boot_completed)
+        case "$completed" in 1) ;; *) completed=0;; esac
+        current="$managers system_server=$server boot_completed=$completed"
+        if [ "$current" != "$previous" ]; then
+            k "boot-stage:$current"
+            previous=$current
+        fi
+        if [ "$completed" = 1 ]; then
+            k "boot-stage: Android reports boot_completed; hardware acceptance not established"
+            return 0
+        fi
+        "$B" sleep 2
+    done
+    k "boot-stage: observation window expired without boot_completed"
+}
+boot_observe &
+
+# Developer mode: touch /oem/r800dev/android/DEV for Wi-Fi
 # forced on, the setup wizard skipped and debug logs on p17. Without it the
 # watch runs as a normal user watch.
 DEVF=/oem/r800dev/android/DEV
@@ -73,7 +103,7 @@ fi
 # Suspect: the GPU fallback for animated/scaled layers. Opt in: android/OVERLAY.
 [ -f /oem/r800dev/android/OVERLAY ] || /system/bin/setprop vendor.hwc.r800.overlay 0
 # bcmdhd prefixes /vendor to its firmware paths; vendor.img has an empty mount point
-$B mount --bind /oem/r800dev/fw /vendor/data/r800dev/fw
+# Radio firmware already bound by start.sh before Android init.
 # Kernel firmware search path (no user-mode helper): /mnt/r800fw resolves both
 # here (requests from kernel workers: ABOX calliope_*.bin, VTS vts.bin) and in
 # the sensor chroot (BBD patch, requested in lhd's context; tzchroot.sh mounts
@@ -86,7 +116,7 @@ echo -n /mnt/r800fw > /sys/module/firmware_class/parameters/path
 BT=/oem/r800dev/fw/bt
 if [ -f $BT/libbt-vendor.so ]; then
     $B chmod 755 $BT; $B chmod 644 $BT/*
-    $B mount --bind $BT/libbt-vendor.so /vendor/lib/libbt-vendor.so
+    # Broadcom library already bound before switch_root.
 fi
 for r in /sys/class/rfkill/rfkill*; do
     [ "$($B cat $r/type 2>/dev/null)" = bluetooth ] || continue
@@ -335,7 +365,7 @@ else
       done ) &
 fi
 
-# ---- after boot: one-time setup, then Wi-Fi and the telnet shell
+# ---- after boot: one-time setup, then Wi-Fi
 (
     for i in $($B seq 1 120); do [ "$(/system/bin/getprop sys.boot_completed)" = 1 ] && break; $B sleep 1; done
     # boot got through: reset start.sh's Gemini priv-app failure counter
@@ -553,7 +583,7 @@ fi
           done
           k "touchscreen IDC installed (touch.wake=1), $E reopened"
       fi
-      # Deep doze would stop telnet answering and Wi-Fi being serviced, and it
+      # Deep doze would stop Wi-Fi being serviced, and it
       # has not been verified to persist across reboots, so this one stays on
       # the every-boot path. Fold it into the marker block once that is
       # checked (dumpsys deviceidle after a reboot).
@@ -663,20 +693,17 @@ fi
     fi
 
     # Developer mode (android/DEV): Wi-Fi forced on with the Wear Wi-Fi mediator
-    # off, the phone's Bluetooth internet proxy (sysproxyd) stopped, and a root
-    # telnet shell on port 23. Without it Wear OS runs Wi-Fi and the phone link
-    # itself, as on a Pixel Watch, and there is no shell.
+    # off. Without developer mode Wear OS manages Wi-Fi and the phone link.
     if [ -f /oem/r800dev/android/DEV ]; then
     W=/dev/r800wpa; ( umask 077; $B mkdir -p "$W" ) && $B chmod 700 "$W" || exit 1
-    L=/oem/r800dev/root      # musl wpa_supplicant and busybox-extras live here
+    L=/oem/r800dev/root      # musl wpa_supplicant lives here
     inet() { $B ip -4 addr show wlan0 2>/dev/null | $B grep -q inet; }
-    tnet() { $B ps w 2>/dev/null | $B grep -q '[t]elnetd' ||              $L/lib/ld-musl-aarch64.so.1 /oem/r800dev/bin/busybox-extras telnetd -p 23 -l /system/bin/sh; }
     # Android owns Wi-Fi: it gets a real network (apps have internet) and nothing
     # fights over wlan0. Join the Tizen network with the passphrase in wifi.pass.
     SSID=$($B sed -n 's/^[[:space:]]*ssid="\(.*\)"[[:space:]]*$/\1/p' /oem/r800dev/wpa.conf | $B head -1)
     PASS=$($B cat /oem/r800dev/wifi.pass 2>/dev/null)
     # Keep Wi-Fi on: once paired, WearWifiMediator turns it off ~30 s after boot
-    # (OFF_NO_REQUESTS; the phone link is meant to carry traffic) and the shell is lost.
+    # (OFF_NO_REQUESTS; the phone link is meant to carry traffic) and connectivity is lost.
     /system/bin/settings put global cw_disable_wifimediator 1
     /system/bin/cmd wifi set-wifi-enabled enabled
     for i in $($B seq 1 20); do inet && break; $B sleep 2; done
@@ -728,13 +755,12 @@ H
             /system/bin/cmd wifi set-wifi-enabled enabled
         fi
     fi
-    # Policy routing: replies to the telnet shell must find the LAN route, which
+    # Policy routing: LAN traffic must find the LAN route, which
     # lives in the main table (helper mode) or the wlan0 table (Android mode).
     /system/bin/ip rule show | $B grep -q '^9999:.*lookup main' ||
         /system/bin/ip rule add from all lookup main pref 9999 2>/dev/null
     /system/bin/ip rule show | $B grep -q '^9998:.*lookup wlan0' ||
         /system/bin/ip rule add from all lookup wlan0 pref 9998 2>/dev/null
-    tnet
     # Once paired, the Bluetooth companion proxy outranks Wi-Fi (score 100 vs 60) and
     # ConnectivityService tears Wi-Fi down after a ~20 s linger. KeepWifi files a
     # standing Wi-Fi request so it stays up (tools/keepwifi). With sysproxyd stopped
@@ -742,7 +768,7 @@ H
     # 21 MB Java process) only starts if Wi-Fi has been gone for a minute.
     # The phone proxy (sysproxyd) now runs and becomes the default network, so
     # hold the Wi-Fi request from the start: on 2026-11-20 Wi-Fi was torn down
-    # and re-made several times (network 102 -> 106) and the shell dropped.
+    # and re-made several times (network 102 -> 106) and connectivity dropped.
     [ "$MODE" = android ] && [ -f /oem/r800dev/keepwifi.dex ] && ! $B pgrep -f KeepWifi > /dev/null &&
         CLASSPATH=/oem/r800dev/keepwifi.dex $B setsid /system/bin/app_process / KeepWifi > /oem/r800dev/keepwifi.log 2>&1 &
     # KeepWifi's request lives in system_server: when that restarts (2026-11-20: a
@@ -765,10 +791,9 @@ H
             CLASSPATH=/oem/r800dev/keepwifi.dex $B setsid /system/bin/app_process / KeepWifi > /oem/r800dev/keepwifi.log 2>&1 &
         fi
       done ) &
-    k "wifi($MODE) $($B ip -4 addr show wlan0 | $B grep -o 'inet [0-9.]*'), telnet on 23"
-    # Keep the shell alive; in Android mode re-join if the network is lost.
+    k "wifi($MODE) $($B ip -4 addr show wlan0 | $B grep -o 'inet [0-9.]*')"
+    # In Android mode re-join if the network is lost.
     ( n=0; wpa_pid=; dhcp_pid=; while :; do
-        tnet
         if [ $MODE = android ]; then
             if inet; then n=0; else n=$((n+1)); fi
             [ $n -eq 4 ] && [ -n "$SSID" ] && [ -n "$PASS" ] && /system/bin/cmd wifi connect-network "$SSID" wpa2 "$PASS" > /dev/null 2>&1
@@ -806,7 +831,7 @@ H
       done ) &
     else
         /system/bin/settings put global cw_disable_wifimediator 0
-        k "user mode: Wi-Fi and phone link managed by Wear OS, no telnet"
+        k "user mode: Wi-Fi and phone link managed by Wear OS, no developer Wi-Fi override"
     fi
     # Developer mode: logs on p17 that survive a hang (fatal-only logcat, the
     # kernel log, display/panel/key kernel messages).
