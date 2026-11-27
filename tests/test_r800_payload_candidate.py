@@ -68,6 +68,27 @@ class PayloadCandidateTests(unittest.TestCase):
             self.assertNotIn("r800dev/android/userdata.img", names)
             self.assertNotIn("r800dev/android/unlisted/private.db", names)
 
+    def test_display_power_and_recovery_flags_excluded(self):
+        markers = ("PANEL_REALBLANK", "ABOX_POWEROFF", "HWC_RESTART",
+                   "GPU_SCALE", "SLEEP", "CPUIDLE_DEEP")
+        for marker in markers:
+            self.put(self.src, "android/" + marker, b"")
+        self.build()
+        with tarfile.open(self.out) as tar:
+            names = set(tar.getnames())
+            for marker in markers:
+                self.assertNotIn("r800dev/android/" + marker, names)
+            self.assertIn("r800dev/r800-display-watchdog.sh", names)
+
+    def test_nested_experimental_flags_rejected(self):
+        for marker in ("PANEL_REALBLANK", "ABOX_POWEROFF", "HWC_RESTART"):
+            with self.subTest(marker=marker):
+                path = self.put(self.src, "fw/" + marker, b"")
+                with self.assertRaisesRegex(ValueError, "State/debug"):
+                    self.build()
+                self.assertFalse(self.out.exists())
+                path.unlink()
+
     def test_wrong_wifi_tool_abi(self):
         self.put(self.src, "bin/iw", fixture("arm64"))
         with self.assertRaisesRegex(ValueError, "ARM32 ELF"):
