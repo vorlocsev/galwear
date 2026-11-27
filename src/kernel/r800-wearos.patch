@@ -30467,3 +30467,16 @@ diff --git a/drivers/gpu/arm/t72x/r28p0/mali_kbase_mem_linux.c b/drivers/gpu/arm
 +	if (IS_ERR_OR_NULL(dma_attachment))
  		goto no_attachment;
  
+diff --git a/drivers/gpu/arm/t72x/r28p0/mali_kbase_sync_file.c b/drivers/gpu/arm/t72x/r28p0/mali_kbase_sync_file.c
+--- a/drivers/gpu/arm/t72x/r28p0/mali_kbase_sync_file.c
++++ b/drivers/gpu/arm/t72x/r28p0/mali_kbase_sync_file.c
+@@ -84,7 +84,9 @@
+ 	/* create a sync_file fd representing the fence */
+ 	sync_file = sync_file_create(fence);
+ 	if (!sync_file) {
++#if (KERNEL_VERSION(4, 9, 67) >= LINUX_VERSION_CODE)
+ 		dma_fence_put(fence);
++#endif
+ 		kbase_fence_out_remove(katom);
+ 		return -ENOMEM;
+ 	}

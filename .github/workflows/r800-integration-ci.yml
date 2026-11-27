@@ -508,6 +508,25 @@ jobs:
           path: ${{ runner.temp }}/kbase-dma-guard/dma-guard-evidence.json
           if-no-files-found: error
           retention-days: 7
+      - name: Test KBASE output fence reference ownership on pinned disposable source
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/kbase-fence-pinned"
+          mkdir -p "$dir"
+          base=https://raw.githubusercontent.com/xanderlent/COMBINED_android-kernel-exynos/50db73fc799f20a7120a8b5f653b16cc123d856f
+          for f in mali_kbase_sync_file.c mali_kbase_fence.h; do
+            curl --fail --location --retry 3 --max-time 90 "$base/drivers/gpu/arm/t72x/r28p0/$f" -o "$dir/$f"
+          done
+          curl --fail --location --retry 3 --max-time 90 "$base/drivers/dma-buf/sync_file.c" -o "$dir/sync_file.c"
+          python3 build/r800_kbase_fence_guard.py --source-dir "$dir" --patch src/kernel/r800-wearos.patch --scratch "$RUNNER_TEMP/kbase-fence-guard" --source-sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        if: github.ref_name == 'development/r800-integration-20261127'
+        with:
+          name: r800-kbase-fence-guard-evidence
+          path: ${{ runner.temp }}/kbase-fence-guard/fence-guard-evidence.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Compile ARM32 Bionic HAL dlopen metadata probe (no runtime)
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
