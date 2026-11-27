@@ -21,6 +21,7 @@
 static atomic_uint bad, invalid_geometry, fail_power, fixed, variable, wake, blanks, power, vsync_on, vsync_off, pans;
 static atomic_uint zero_copy, fail_win, win_calls, win_success;
 static atomic_int last_release=-1,last_retire=-1;
+static atomic_uint overlays, fail_overlay, overlay_calls, overlay_success;
 unsigned int r800_hwc_fixture_get(unsigned int k)
 {
     switch(k) {
@@ -37,6 +38,8 @@ unsigned int r800_hwc_fixture_get(unsigned int k)
     case 10: return win_success;
     case 11: return (unsigned int)last_release;
     case 12: return (unsigned int)last_retire;
+    case 13: return overlay_calls;
+    case 14: return overlay_success;
     default: return UINT32_MAX;
     }
 }
@@ -44,8 +47,10 @@ void r800_hwc_fixture_mode(unsigned int mode)
 {
     invalid_geometry=mode==1;
     fail_power=mode==2;
-    zero_copy=mode==3 || mode==4;
+    zero_copy=mode>=3 && mode<=6;
     fail_win=mode==4;
+    overlays=mode==5 || mode==6;
+    fail_overlay=mode==6;
 }
 int __system_property_get(const char *name,char *value)
 {
@@ -53,6 +58,7 @@ int __system_property_get(const char *name,char *value)
     if (!strcmp(name,"debug.r800.layer_stride")) v="96";
     else if (!strcmp(name,"debug.r800.realblank")) v="1";
     else if (!strcmp(name,"debug.r800.zerocopy")) v=zero_copy?"1":"0";
+    else if (!strcmp(name,"vendor.hwc.r800.overlay")) v=overlays?"1":"0";
     strcpy(value,v);
     return (int)strlen(v);
 }
@@ -61,6 +67,54 @@ int __system_property_set(const char *name,const char *value)
     if (!strcmp(name,"debug.r800.hwc_woke") && !strcmp(value,"1")) return 0;
     ++bad;
     return -1;
+}
+static int overlay_config(struct r800_win_config_data *d)
+{
+    const int formats[]={2,6,3};
+    const struct r800_frame src={0,0,360,360,368,360},dst={0,0,360,360,360,360};
+    struct stat expected;
+    if (!overlays || d->retire_fence!=-1 || d->fd_odma!=-1 ||
+        lstat("/dev/graphics/pixels",&expected) || !S_ISREG(expected.st_mode)) goto invalid;
+    int n=d->config[2].state==R800_WIN_STATE_BUFFER?3:2;
+    for (int i=0;i<=R800_MAX_DECON_WIN;++i) {
+        struct r800_win_config *w=&d->config[i];
+        if (w->fd_idma[1]!=-1 || w->fd_idma[2]!=-1 || w->rel_fence!=-1) goto invalid;
+        if (i>=n) {
+            if (w->state!=R800_WIN_STATE_DISABLED || w->fd_idma[0]!=-1 || w->acq_fence!=-1) goto invalid;
+            continue;
+        }
+        struct stat actual;
+        if (w->state!=R800_WIN_STATE_BUFFER || w->channel!=(unsigned int)i ||
+            w->format!=formats[i] || w->plane_alpha!=255-i*40 || w->blending!=i ||
+            w->protection || w->compression || w->acq_fence<0 ||
+            fcntl(w->acq_fence,F_GETFD)<0 ||
+            fstat(w->fd_idma[0],&actual) || !S_ISREG(actual.st_mode) ||
+            actual.st_dev!=expected.st_dev || actual.st_ino!=expected.st_ino ||
+            actual.st_size!=368*360*4 || memcmp(&w->src,&src,sizeof(src)) ||
+            memcmp(&w->dst,&dst,sizeof(dst))) goto invalid;
+        for (int j=0;j<i;++j)
+            if (w->acq_fence==d->config[j].acq_fence ||
+                w->fd_idma[0]==d->config[j].fd_idma[0]) goto invalid;
+    }
+    ++overlay_calls;
+    if (fail_overlay) { errno=EIO; return -1; }
+    int rel[3]={-1,-1,-1};
+    int retire=-1;
+    for (int i=0;i<n;++i) {
+        rel[i]=eventfd(21+i,EFD_CLOEXEC|EFD_NONBLOCK);
+        if (rel[i]<0) goto cleanup;
+    }
+    retire=eventfd(31,EFD_CLOEXEC|EFD_NONBLOCK);
+    if (retire<0) goto cleanup;
+    for (int i=0;i<n;++i) d->config[i].rel_fence=rel[i];
+    d->retire_fence=retire;
+    ++overlay_success;
+    return 0;
+cleanup:
+    for (int i=0;i<n;++i) if (rel[i]>=0) close(rel[i]);
+    if (retire>=0) close(retire);
+invalid:
+    ++bad; errno=EINVAL; return -1;
 }
 int ioctl(int fd,int request,...)
 {
@@ -110,6 +164,7 @@ int ioctl(int fd,int request,...)
     }
     case R800_S3CFB_WIN_CONFIG: {
         struct r800_win_config_data *d=arg;
+        if (d->config[1].state==R800_WIN_STATE_BUFFER) return overlay_config(d);
         struct r800_win_config *c=&d->config[0];
         struct stat pixel, expected_pixel;
         const struct r800_frame src={0,0,360,360,368,360},dst={0,0,360,360,360,360};

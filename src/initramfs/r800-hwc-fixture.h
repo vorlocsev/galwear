@@ -166,6 +166,105 @@ static int hwc_zero_copy(const hw_module_t *module,unsigned int (*get)(unsigned 
     return base->close(base)==0 && fd_count()==before;
 }
 
+/* All layers use separate read-only FDs to the private synthetic pixel file.
+ * No actual compositing, DMA or sync_file signaling is claimed. */
+static int hwc_overlay(const hw_module_t *module,unsigned int (*get)(unsigned int),
+                       void (*mode)(unsigned int))
+{
+    int before=fd_count();
+    hw_device_t *base=NULL;
+    mode(5);
+    if (before<0 || module->methods->open(module,HWC_HARDWARE_COMPOSER,&base) || !base) return 0;
+    hwc_composer_device_1_t *dev=(hwc_composer_device_1_t *)base;
+    native_handle_t *buf[3]={0};
+    const int formats[]={HAL_PIXEL_FORMAT_RGBA_8888,HAL_PIXEL_FORMAT_RGBX_8888,HAL_PIXEL_FORMAT_BGRA_8888};
+    const int blends[]={HWC_BLENDING_NONE,HWC_BLENDING_PREMULT,HWC_BLENDING_COVERAGE};
+    for (int i=0;i<3;++i) {
+        buf[i]=calloc(1,sizeof(*buf[i])+5*sizeof(int));
+        if (!buf[i]) return 0;
+        int fd=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if (fd<0) return 0;
+        buf[i]->version=sizeof(*buf[i]); buf[i]->numFds=1; buf[i]->numInts=4;
+        buf[i]->data[0]=fd; buf[i]->data[1]=formats[i];
+        buf[i]->data[2]=360; buf[i]->data[3]=360; buf[i]->data[4]=368;
+    }
+    hwc_display_contents_1_t *c=calloc(1,sizeof(*c)+4*sizeof(hwc_layer_1_t));
+    if (!c) return 0;
+    hwc_display_contents_1_t *displays[]={c};
+    /* Prime the format gate through a successful real client-target set. */
+    c->numHwLayers=1;
+    hwc_layer_1_t *l=&c->hwLayers[0];
+    l->compositionType=HWC_FRAMEBUFFER_TARGET; l->handle=buf[0];
+    int prime[2];
+    if (pipe(prime) || write(prime[1],"x",1)!=1) return 0;
+    l->acquireFenceFd=prime[0]; l->releaseFenceFd=c->retireFenceFd=-1;
+    if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
+        l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd<0 ||
+        get(9)!=3 || get(10)!=2 || close(c->retireFenceFd) || close(prime[1])) return 0;
+    /* 2-layer then 3-layer success, followed by five EIO failures. */
+    for (int round=0;round<7;++round) {
+        int n=round==1?3:2;
+        mode(round<2?5:6);
+        c->numHwLayers=n+1;
+        c->retireFenceFd=-1;
+        int pairs[4][2];
+        for (int i=0;i<=n;++i) {
+            l=&c->hwLayers[i]; memset(l,0,sizeof(*l));
+            l->compositionType=i==n?HWC_FRAMEBUFFER_TARGET:HWC_FRAMEBUFFER;
+            l->handle=i==n?NULL:buf[i];
+            l->sourceCropf=(hwc_frect_t){0,0,360,360};
+            l->displayFrame=(hwc_rect_t){0,0,360,360};
+            l->planeAlpha=i==n?255:255-i*40;
+            l->blending=i==n?HWC_BLENDING_NONE:blends[i];
+            if (pipe(pairs[i]) || write(pairs[i][1],"x",1)!=1) return 0;
+            l->acquireFenceFd=pairs[i][0]; l->releaseFenceFd=-1;
+        }
+        if (round==0) {
+            c->hwLayers[0].transform=HWC_TRANSFORM_ROT_90;
+            if (dev->prepare(dev,1,displays)) return 0;
+            for (int i=0;i<n;++i) if (c->hwLayers[i].compositionType!=HWC_FRAMEBUFFER) return 0;
+            c->hwLayers[0].transform=0;
+        }
+        if (dev->prepare(dev,1,displays)) return 0;
+        for (int i=0;i<n;++i) if (c->hwLayers[i].compositionType!=HWC_OVERLAY) return 0;
+        if (dev->set(dev,1,displays)) return 0;
+        for (int i=0;i<=n;++i) {
+            l=&c->hwLayers[i];
+            if (l->acquireFenceFd!=-1 || fcntl(pairs[i][0],F_GETFD)!=-1 || errno!=EBADF ||
+                close(pairs[i][1])) return 0;
+            if (round<2 && i<n) {
+                uint64_t v=0;
+                if (l->releaseFenceFd<0 || l->releaseFenceFd==c->retireFenceFd ||
+                    read(l->releaseFenceFd,&v,sizeof(v))!=(ssize_t)sizeof(v) ||
+                    v!=(uint64_t)(21+i) || close(l->releaseFenceFd)) return 0;
+            } else if (l->releaseFenceFd!=-1) return 0;
+        }
+        if (round<2) {
+            uint64_t v=0;
+            if (c->retireFenceFd<0 ||
+                read(c->retireFenceFd,&v,sizeof(v))!=(ssize_t)sizeof(v) ||
+                v!=31 || close(c->retireFenceFd)) return 0;
+        } else if (c->retireFenceFd!=-1) return 0;
+        if (get(13)!=(unsigned int)(round+1) || get(14)!=(unsigned int)(round<2?round+1:2) ||
+            get(8)!=9 || get(0) || !hwc_fb_matches(1,2)) return 0;
+    }
+    /* The sixth attempt is not an overlay: prepare must select GPU composition. */
+    mode(5);
+    c->retireFenceFd=-1;
+    for (size_t i=0;i<c->numHwLayers;++i) {
+        c->hwLayers[i].acquireFenceFd=c->hwLayers[i].releaseFenceFd=-1;
+    }
+    if (dev->prepare(dev,1,displays) || c->hwLayers[0].compositionType!=HWC_FRAMEBUFFER ||
+        c->hwLayers[1].compositionType!=HWC_FRAMEBUFFER || get(13)!=7) return 0;
+    free(c);
+    for (int i=0;i<3;++i) {
+        if (close(buf[i]->data[0])) return 0;
+        free(buf[i]);
+    }
+    mode(0);
+    return base->close(base)==0 && fd_count()==before;
+}
+
 static int hwc_fixture(const hw_module_t *module)
 {
     struct stat st;
@@ -289,6 +388,12 @@ static int hwc_fixture(const hw_module_t *module)
                 get(9),get(10),get(8),get(0));
         return 184;
     }
+    if (!hwc_overlay(module,get,mode)) {
+        fprintf(stderr,"HWC overlay failed: calls=%u success=%u client=%u pans=%u bad=%u\n",
+                get(13),get(14),get(9),get(8),get(0));
+        return 185;
+    }
+    puts("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1");
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
     puts("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8");
