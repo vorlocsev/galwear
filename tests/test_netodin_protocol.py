@@ -193,6 +193,28 @@ class PrewriteProtocolTests(unittest.TestCase):
             self.simulate(watch)
         self.assertEqual(watch.transfer_commands, [])
 
+    def test_invalid_geometry_never_starts_any_image(self):
+        # Corrupt the last synthetic entry, proving that ALL entries are
+        # validated before the first transfer, even if preceding entries fit.
+        names = list(r800_safety.EXPECTED_IMAGES)
+        begin = r800_safety.PIT_HEADER_SIZE + (len(names) - 1) * r800_safety.PIT_ENTRY_SIZE
+        cases = (
+            ("zero count", 24, 0, "Missing/zero PIT block count"),
+            ("unknown device", 4, 4, "Unknown PIT device type"),
+            ("range overflow", 20, 0xffffffff, "PIT block range overflow"),
+            ("padded overflow", 24, 1, "exceeds assumed PIT partition capacity"),
+        )
+        for name, offset, value, diagnostic in cases:
+            with self.subTest(case=name):
+                pit = bytearray(fake_pit())
+                struct.pack_into("<I", pit, begin + offset, value)
+                watch = SimulatedWatch(pit_data=bytes(pit))
+                with self.assertRaisesRegex(r800_safety.SafetyError, diagnostic):
+                    self.simulate(watch)
+                self.assertEqual(watch.transfer_commands, [])
+                self.assertEqual(watch.raw_blocks, 0)
+                self.assertEqual(watch.reboot_commands, 0)
+
     def test_window_start_nonzero_ack_stops_without_data(self):
         watch = SimulatedWatch(bad_phase=("transfer", 0))
         with self.assertRaises(IOError):
