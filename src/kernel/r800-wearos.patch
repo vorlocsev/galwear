@@ -27547,6 +27547,22 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon.h b/drivers/video/fbdev/exyn
 diff --git a/drivers/video/fbdev/exynos/dpu30/fence.c b/drivers/video/fbdev/exynos/dpu30/fence.c
 --- a/drivers/video/fbdev/exynos/dpu30/fence.c
 +++ b/drivers/video/fbdev/exynos/dpu30/fence.c
+@@ -37,7 +37,7 @@
+ 
+ 	fd = get_unused_fd_flags(O_CLOEXEC);
+ 	if (fd < 0)
+-		return -EINVAL;
++		return fd;
+ 
+ 	if (fd < VALID_FD_VAL) {
+ 		/*
+@@ -63,5 +63,5 @@
+ 		}
+ 
+ 		if (fd < 0)
+-			return -EINVAL;
++			return fd;
+ 	}
 @@ -68,48 +68,60 @@
  	return fd;
  }
@@ -27620,7 +27636,7 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/fence.c b/drivers/video/fbdev/exyn
 +		fd = decon_get_valid_fd();
 +		if (fd < 0) {
 +			decon_cancel_release_fences(decon, win_data);
-+			return -EMFILE;
++			return fd;
 +		}
 +		win_data->config[i].rel_fence = fd;
 +	}

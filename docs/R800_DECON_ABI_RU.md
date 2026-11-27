@@ -35,3 +35,12 @@ release-функций. Моделируются отказ kzalloc, retire FD, 
 проверяет передачу FD и worker reference. Модель не воспроизводит реальные
 kernel races, DMA, timeline или аппаратную презентацию. CI нового теста
 ещё не подтверждён. safe_to_flash=false.
+
+## Retire FD / errno
+
+Патч сохраняет исходный errno get_unused_fd_flags при первом отказе и
+при отказе после резервирования FD 0–2. Резервирование release возвращает
+тот же errno вместо принудительного EMFILE. CI применяет секцию fence.c
+к точному pinned blob и компилирует реальные функции в host-only harness:
+20 сценариев, в том числе ENOMEM, EMFILE, откат низких FD и баланс ссылок
+retire. Фактические kernel FD table races и sync_file не проверены.
