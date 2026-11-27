@@ -126,3 +126,14 @@ Both jobs obtain the same SHA-256-pinned Debian archive independently.
 No host security sysctl changes, privileged guest execution, shared
 network fallback, or bypass of bubblewrap are used. A failed preflight
 blocks the QEMU job; it does not establish a guest runtime result.
+
+
+Exact-head CI run [45998385945](https://github.com/vorlocsev/galwear/actions/runs/45998385945)
+on `6047e1404d6d062d2138ab7bb6b1b3b9e6469937` passed the full sandbox
+preflight, all glibc probe markers, synthetic HAL and daemon recovery,
+and XTRA matrix on Ubuntu 22.04. These are Debian reference results only.
+The static reference job additionally compares two separately staged
+real links per XTRA ABI, binds all builds to the same pinned donor
+library hashes, and requires the ABI 0 hash to match its prior static
+link in the same job. Repeatability across independent hosts and original
+Tizen libraries remain unverified. Only JSON and logs are uploaded.

@@ -491,6 +491,44 @@ jobs:
             }
           python3 build/r800_gps_link_gate.py --binary "$ref/gpsbridge" --libdir "$ref/libs" > "$ref/reference-postlink.json"
           echo "DEBIAN_ARMEL_REFERENCE_LINK_PASS; tizen_donor_verified=false; runtime_verified=false; safe_to_flash=false"
+      - name: Compare two independent real GPSBridge links for each reference XTRA ABI
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          for abi in 0 1 2; do
+            R800_TIZEN_ARCHIVE='' R800_HOST_SNAPSHOT=0 python3 build/r800_gps_repeatability.py \
+              --ndk "$RUNNER_TEMP/android-ndk-r27c" --donor "$ref/libs" --xtra-abi "$abi" \
+              > "$ref/reference-repeatability-$abi.json" || {
+                cat "$ref/reference-repeatability-$abi.json"; exit 2;
+              }
+          done
+          python3 - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r800-debian-glibc-reference"
+          origin = json.loads((root / "reference-origin.json").read_text())
+          postlink = json.loads((root / "reference-postlink.json").read_text())
+          hashes = {}
+          for abi in (0, 1, 2):
+              report = json.loads((root / f"reference-repeatability-{abi}.json").read_text())
+              assert report["status"] == "LOCAL_REPEATABILITY_PASS"
+              assert report["xtra_abi"] == abi and report["differences"] == []
+              assert len(report["runs"]) == 2 and report["runs"][0] == report["runs"][1]
+              for flag in ("independent_hosts_tested", "runtime_verified", "safe_to_flash"):
+                  assert report[flag] is False
+              record = report["runs"][0]
+              assert record["donor_sha256"] == origin["files"]
+              hashes[str(abi)] = record["binary_sha256"]
+              if abi == 0:
+                  assert record["binary_sha256"] == postlink["sha256"]
+          assert len(set(hashes.values())) == 3, "Distinct XTRA ABI binaries must not be conflated"
+          summary = {"status": "DEBIAN_REFERENCE_SAME_HOST_REPEATABILITY_PASS",
+                     "source_sha": os.environ["GITHUB_SHA"], "binary_sha256_by_abi": hashes,
+                     "builds_compared": 6, "tizen_donor_verified": False,
+                     "independent_hosts_tested": False, "runtime_verified": False, "safe_to_flash": False}
+          (root / "reference-repeatability-summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
+          print(summary["status"], hashes)
+          PY
       - name: Upload reference link metadata only (no guest binaries)
         if: always() && github.ref_name == 'development/r800-integration-20261127'
         uses: actions/upload-artifact@v4
@@ -502,6 +540,7 @@ jobs:
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-symbol-review.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-postlink.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-link.log
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-repeatability-*.json
           if-no-files-found: warn
           retention-days: 7
   qemu-reference:
