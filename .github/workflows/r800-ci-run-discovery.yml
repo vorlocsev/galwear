@@ -1,0 +1,52 @@
+name: GalWear CI run discovery (metadata only)
+
+on:
+  push:
+    branches:
+      - "development/r800-integration-20261127"
+
+permissions: {}
+
+jobs:
+  index:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      actions: read
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CURRENT_SHA: ${{ github.sha }}
+      PREVIOUS_SHA: ${{ github.event.before }}
+    steps:
+      - name: Record exact push run IDs for current and previous commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "vorlocsev/galwear" ]]
+          [[ "$GITHUB_REF" == "refs/heads/development/r800-integration-20261127" ]]
+          for sha in "$CURRENT_SHA" "$PREVIOUS_SHA"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$sha" != "0000000000000000000000000000000000000000" ]] || continue
+            raw="$RUNNER_TEMP/ci-index-$sha.jsonl"
+            out="$RUNNER_TEMP/ci-index-$sha.json"
+            gh api --method GET --paginate "repos/$GITHUB_REPOSITORY/actions/runs" \
+              -f head_sha="$sha" -f event=push -F per_page=100 \
+              --jq '.workflow_runs[] | {id,workflow_id,name,head_sha,status,conclusion,run_attempt,html_url}' > "$raw"
+            jq -s --arg sha "$sha" '
+              map(select(.head_sha == $sha and .name != "GalWear CI run discovery (metadata only)"))
+              | sort_by(.id) | reverse
+            ' "$raw" > "$out"
+            echo "CI_RUN_INDEX_SHA=$sha"
+            cat "$out"
+            # Success here means metadata discovery ONLY, never a build/test pass.
+            count=$(jq length "$out")
+            if [ "$count" -gt 0 ]; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$sha" \
+                -f state=success \
+                -f context=galwear/ci-run-discovery-only \
+                -f description="Metadata index only: $count run links; not CI acceptance" \
+                -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                --silent
+            fi
+          done
