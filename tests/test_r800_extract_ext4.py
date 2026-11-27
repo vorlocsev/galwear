@@ -325,6 +325,51 @@ class Ext4ExtractionTests(unittest.TestCase):
                 extract(vendor, self.root/"bad-system", "vendor-identity", vendor_sha,
                         self.image, "0"*64)
 
+    def test_system_dependency_graph_follows_unique_candidates_and_cycles(self):
+        self.put("bin/hw/android.hardware.gnss@1.0-service", b"service")
+        vendor_sha = self.make_image()
+        vendor = self.image
+        self.tree = self.root / "system-tree"
+        self.tree.mkdir()
+        self.image = self.root / "system.img"
+        self.put("lib/libfirst.so", b"first")
+        self.put("lib/libsecond.so", b"second")
+        system_sha = self.make_image()
+        deps = {b"service": ["libfirst.so"], b"first": ["libsecond.so"],
+                b"second": ["libfirst.so"]}
+        def inspect(raw):
+            return {"abi": "arm", "has_dynamic": True, "elf_type": "ET_DYN",
+                    "needed": deps[raw], "soname": None, "custom_search_path": False}
+        with mock.patch("r800_android_linker_audit.inspect", side_effect=inspect):
+            report = extract(vendor, self.output, "vendor-identity", vendor_sha,
+                             self.image, system_sha)
+        result = report["vendor_identity"]["system_dependency_candidates"]
+        self.assertEqual(result["status"], "SYSTEM_PATH_CANDIDATES_ONLY")
+        self.assertEqual(set(result["external_candidates"]), {"libfirst.so"})
+        self.assertEqual(set(result["system_candidate_graph"]), {"libfirst.so", "libsecond.so"})
+        self.assertEqual(result["system_candidate_graph"]["libsecond.so"]["depth"], 1)
+        self.assertEqual(len(result["system_dependency_edges"]), 2)
+        self.assertFalse(result["dependency_closure_verified"])
+        deps[b"second"] = ["libmissing.so"]
+        with mock.patch("r800_android_linker_audit.inspect", side_effect=inspect):
+            report = extract(vendor, self.root/"missing", "vendor-identity", vendor_sha,
+                             self.image, system_sha)
+        result = report["vendor_identity"]["system_dependency_candidates"]
+        self.assertEqual(result["status"], "REVIEW_REQUIRED")
+        self.assertEqual(result["system_candidate_graph"]["libmissing.so"]["status"],
+                         "NOT_FOUND_IN_SELECTED_PATHS")
+        with mock.patch("r800_android_linker_audit.inspect", side_effect=inspect), mock.patch.object(extractor, "MAX_WALK_DEPTH", 0):
+            scratch = self.root / "bounded-system"
+            scratch.mkdir()
+            result = extractor.system_dependency_candidates(shutil.which("debugfs"),
+                self.image, system_sha, scratch,
+                {"roots": ["service"], "external_names": ["libfirst.so"],
+                 "budget_exhausted": False, "problems": []}, {})
+        self.assertTrue(result["budget_exhausted"])
+        self.assertEqual(result["uninspected_names"], ["libsecond.so"])
+        self.assertEqual(result["system_dependency_edges"][0]["status"], "NOT_INSPECTED")
+        self.assertFalse(result["safe_to_flash"])
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")

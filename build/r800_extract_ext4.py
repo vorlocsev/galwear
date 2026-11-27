@@ -400,6 +400,7 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
 
     No APEX activation, symlink resolution, namespace ordering or guest execution.
     """
+    from collections import deque
     from r800_android_linker_audit import inspect
     image = Path(image).absolute()
     snapshot = scratch / "system.img"
@@ -413,10 +414,18 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
         dirs += [base + "/" + sub + "-" + vndk
                  for base in ("/lib", "/system/lib") for sub in ("vndk", "vndk-sp")]
     results = {}
+    edges = []
+    roots = sorted(set(walk['external_names']))
+    pending = deque((name, 0) for name in roots)
+    queued = set(roots)
     total = 0
     probes = 0
     exhausted = False
-    for name in sorted(set(walk["external_names"])):
+    while pending:
+        name, depth = pending.popleft()
+        if len(results) >= MAX_WALK_OBJECTS or depth > MAX_WALK_DEPTH:
+            exhausted = True
+            break
         if not re.fullmatch(r"[A-Za-z0-9_@.+~-]{1,255}", name) or name in (".", ".."):
             raise ValueError("Invalid system dependency basename")
         candidates = []
@@ -457,22 +466,44 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
         status = ("REVIEW_REQUIRED" if exhausted or problems else
                   "NOT_FOUND_IN_SELECTED_PATHS" if not candidates else
                   "AMBIGUOUS" if len(candidates) > 1 else "CANDIDATE_ONLY")
-        results[name] = {"status": status, "candidates": candidates, "problems": problems}
+        results[name] = {"status": status, "candidates": candidates, "problems": problems,
+                         "depth": depth}
+        if status == "CANDIDATE_ONLY":
+            for dep in sorted(set(candidates[0]["needed"])):
+                if not re.fullmatch(r"[A-Za-z0-9_@.+~-]{1,255}", dep) or dep in (".", ".."):
+                    problems.append({"path": candidates[0]["path"], "reason": "Invalid DT_NEEDED basename"})
+                    results[name]["status"] = "REVIEW_REQUIRED"
+                    continue
+                if len(edges) >= MAX_WALK_EDGES:
+                    exhausted = True
+                    break
+                edges.append({"from": name, "needed": dep})
+                if dep not in queued:
+                    if len(queued) >= MAX_WALK_OBJECTS:
+                        exhausted = True
+                        break
+                    queued.add(dep)
+                    pending.append((dep, depth + 1))
         if exhausted:
             break
+    for edge in edges:
+        edge["status"] = results.get(edge["needed"], {}).get("status", "NOT_INSPECTED")
     current = image.lstat()
     if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
             current.st_mtime_ns, current.st_ctime_ns) != identity:
         raise ValueError("System donor image changed")
     if image_info(snapshot) != before:
         raise ValueError("System snapshot changed")
-    complete = (not exhausted and not walk["budget_exhausted"] and not walk["problems"]
-                and set(results) == set(walk["external_names"]) and
+    complete = (bool(walk["roots"]) and not exhausted and not walk["budget_exhausted"]
+                and not walk["problems"] and set(results) == queued and
                 all(row["status"] == "CANDIDATE_ONLY" for row in results.values()))
     return {"status": "SYSTEM_PATH_CANDIDATES_ONLY" if complete else "REVIEW_REQUIRED",
             "system_image_sha256": expected_sha, "snapshot_verified": True,
             "search_paths": dirs, "observed_vndk_version": vndk,
-            "external_candidates": results, "budget_exhausted": exhausted,
+            "external_candidates": {name: results[name] for name in roots if name in results},
+            "system_candidate_graph": results, "system_dependency_edges": edges,
+            "uninspected_names": sorted(queued - set(results)),
+            "budget_exhausted": exhausted,
             "bytes_inspected": total, "apex_inspected": False,
             "dependency_closure_verified": False, "namespace_resolution_verified": False,
             "runtime_verified": False, "safe_to_flash": False}
