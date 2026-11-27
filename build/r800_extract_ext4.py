@@ -60,6 +60,55 @@ PROFILES = {"tizen": TIZEN, "tizen-gps": TIZEN_GPS,
             "vendor-identity": {"vendor/"+n: ("/"+n,) for n in VENDOR_IDENTITY_FILES}}
 
 
+# Match the 1.0 HIDL service contracts used by build_vendor.sh.
+VINTF_REQUIRED = {
+    "wifi": (("android.hardware.wifi", "IWifi"),
+             ("android.hardware.wifi.supplicant", "ISupplicant")),
+    "sensors": (("android.hardware.sensors", "ISensors"),),
+    "gnss": (("android.hardware.gnss", "IGnss"),),
+}
+
+
+def vintf_inventory(path):
+    """Inspect one bounded device manifest; no XML includes or external entities."""
+    import xml.etree.ElementTree as ET
+    from r800_android_userspace_preflight import read_regular
+    try:
+        raw = read_regular(path, 1024 * 1024)
+        # Restrict to UTF-8 before parsing so alternate encodings cannot
+        # bypass the DTD/entity prohibition.
+        xml = raw.decode("utf-8-sig")
+        if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", xml, re.IGNORECASE):
+            raise ValueError("DTD or entity declaration is not allowed")
+        root = ET.fromstring(xml)
+        if root.tag != "manifest" or root.get("type") != "device":
+            raise ValueError("Expected device VINTF manifest")
+        declarations = set()
+        for hal in root.findall("hal"):
+            if hal.get("format", "hidl") != "hidl" or hal.findtext("transport") != "hwbinder":
+                continue
+            name = (hal.findtext("name") or "").strip()
+            for version in hal.findall("version"):
+                if (version.text or "").strip() != "1.0":
+                    continue
+                for interface in hal.findall("interface"):
+                    iface = (interface.findtext("name") or "").strip()
+                    if any((i.text or "").strip() == "default" for i in interface.findall("instance")):
+                        declarations.add((name, iface))
+            for fqname in hal.findall("fqname"):
+                match = re.fullmatch(r"@1\.0::([A-Za-z0-9_]+)/default", (fqname.text or "").strip())
+                if match:
+                    declarations.add((name, match[1]))
+        missing = {group: [name + "@1.0::" + iface + "/default"
+                           for name, iface in required if (name, iface) not in declarations]
+                   for group, required in VINTF_REQUIRED.items()}
+        return {"status": "DECLARATIONS_PRESENT" if not any(missing.values()) else "REVIEW_REQUIRED",
+                "missing_by_group": missing, "compatibility_verified": False}
+    except (OSError, ValueError, ET.ParseError) as exc:
+        return {"status": "REVIEW_REQUIRED", "reason": str(exc),
+                "compatibility_verified": False}
+
+
 def vendor_identity(tree, files):
     """Report observed identity and group completeness, not donor compatibility."""
     from r800_android_linker_audit import inspect
@@ -91,7 +140,8 @@ def vendor_identity(tree, files):
         try:
             info = inspect((tree / name).read_bytes())
             elf[name] = {"status": "ARM32_DYNAMIC" if info["abi"] == "arm" and
-                         info["has_dynamic"] else "REVIEW_REQUIRED",
+                         info["has_dynamic"] and (not name.endswith(".so") or
+                         info["elf_type"] == "ET_DYN") else "REVIEW_REQUIRED",
                          "abi": info["abi"], "elf_type": info["elf_type"],
                          "needed": info["needed"]}
         except (ValueError, KeyError) as exc:
@@ -105,7 +155,12 @@ def vendor_identity(tree, files):
         invalid = [n for n in names if n in elf and elf[n]["status"] != "ARM32_DYNAMIC"]
         groups[group] = {"missing": missing, "elf_review": invalid,
                          "inventory_complete": not missing and not invalid}
+    manifest = "vendor/etc/vintf/manifest.xml"
+    vintf = vintf_inventory(tree / manifest) if files[manifest]["status"] == "EXTRACTED" else {
+        "status": "REVIEW_REQUIRED", "reason": "Missing device manifest",
+        "compatibility_verified": False}
     return {"properties": properties, "property_conflicts": sorted(set(conflicts)),
+            "vintf": vintf,
             "elf": elf, "hidl_groups": groups,
             "vintf_manifest_present": files["vendor/etc/vintf/manifest.xml"]["status"] == "EXTRACTED",
             "identity_verified": False, "dependency_closure_verified": False,
@@ -246,6 +301,7 @@ def main():
     identity = report.get("vendor_identity", {})
     review = identity.get("property_conflicts") or any(
         item["status"] != "ARM32_DYNAMIC" for item in identity.get("elf", {}).values())
+    review = review or (identity and identity["vintf"]["status"] != "DECLARATIONS_PRESENT")
     return 2 if report["missing_or_ambiguous"] or review else 0
 
 

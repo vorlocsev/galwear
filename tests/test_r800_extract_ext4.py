@@ -105,6 +105,46 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertFalse(identity["identity_verified"])
         self.assertFalse(identity["safe_to_flash"])
 
+    def test_vendor_vintf_hidl_declarations(self):
+        manifest = self.put("etc/vintf/manifest.xml", b"""<manifest type="device">
+          <hal format="hidl"><name>android.hardware.wifi</name>
+          <transport>hwbinder</transport><version>1.0</version>
+          <interface><name>IWifi</name><instance>default</instance></interface></hal>
+          <hal format="hidl"><name>android.hardware.wifi.supplicant</name>
+          <transport>hwbinder</transport><fqname>@1.0::ISupplicant/default</fqname></hal>
+          <hal format="hidl"><name>android.hardware.sensors</name>
+          <transport>hwbinder</transport><fqname>@1.0::ISensors/default</fqname></hal>
+          <hal format="hidl"><name>android.hardware.gnss</name>
+          <transport>hwbinder</transport><fqname>@1.0::IGnss/default</fqname></hal>
+        </manifest>""")
+        report = extractor.vintf_inventory(manifest)
+        self.assertEqual(report["status"], "DECLARATIONS_PRESENT")
+        self.assertFalse(report["compatibility_verified"])
+        for old, new, group in ((b"@1.0::IGnss/default", b"@2.0::IGnss/default", "gnss"),
+                                (b"@1.0::ISensors/default", b"@1.0::ISensors/other", "sensors"),
+                                (b"<version>1.0</version>", b"<version>1.1</version>", "wifi")):
+            with self.subTest(group=group):
+                raw = manifest.read_bytes()
+                manifest.write_bytes(raw.replace(old, new))
+                report = extractor.vintf_inventory(manifest)
+                self.assertEqual(report["status"], "REVIEW_REQUIRED")
+                self.assertTrue(report["missing_by_group"][group])
+                manifest.write_bytes(raw)
+        sha = self.make_image()
+        report = extract(self.image, self.output, "vendor-identity", sha)
+        self.assertEqual(report["vendor_identity"]["vintf"]["status"], "DECLARATIONS_PRESENT")
+        self.assertFalse(report["vendor_identity"]["identity_verified"])
+
+    def test_vendor_vintf_rejects_dtd_malformed_and_wrong_type(self):
+        for raw in (b'<!DOCTYPE manifest [<!ENTITY x "x">]><manifest type="device"/>',
+                    b'<manifest type="framework"/>', b'<manifest type="device">',
+                    '<!DOCTYPE manifest><manifest type="device"/>'.encode("utf-16")):
+            with self.subTest(raw=raw):
+                manifest = self.put("etc/vintf/manifest.xml", raw)
+                report = extractor.vintf_inventory(manifest)
+                self.assertEqual(report["status"], "REVIEW_REQUIRED")
+                self.assertFalse(report["compatibility_verified"])
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")
