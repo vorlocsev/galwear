@@ -5,9 +5,14 @@ import hashlib
 import json
 from pathlib import Path
 import struct
+import os
 
 BLOCK = 65536
 MAX_FILE = 512 * 1024 * 1024
+MAX_OBJECTS = 20000
+MAX_REPORT = 16 * 1024 * 1024
+GENERATED = ("include/generated/compile.h", "include/generated/utsrelease.h",
+             "include/config/kernel.release", "System.map")
 
 
 def digest(data):
@@ -53,12 +58,38 @@ def sections(data):
     return result
 
 
-def snapshot(root):
+def object_inventory(root):
+    """Hash compiled inputs and selected generated metadata; never export bytes."""
+    from r800_reproducibility_audit import hash_file
+
+    paths = []
+    for directory, subdirs, names in os.walk(root, followlinks=False):
+        subdirs.sort()
+        for name in sorted(names):
+            if name.endswith(".o"):
+                paths.append(Path(directory) / name)
+                if len(paths) > MAX_OBJECTS:
+                    raise ValueError("Too many kernel objects")
+    if not paths:
+        raise ValueError("No compiled kernel objects")
+    for name in GENERATED:
+        paths.append(root / name)
+    records = {}
+    for path in paths:
+        name = path.relative_to(root).as_posix()
+        if len(name) > 512 or not name.isascii() or not name.isprintable():
+            raise ValueError("Invalid kernel object path")
+        sha, size = hash_file(path, MAX_FILE)
+        records[name] = {"sha256": sha, "bytes": size}
+    return dict(sorted(records.items()))
+
+
+def snapshot(root, include_objects=False):
     image = read(root / "arch/arm64/boot/Image")
     if image[56:60] != b"ARM\x64":
         raise ValueError("Invalid ARM64 Image")
     elf = read(root / "vmlinux")
-    return {
+    result = {
         "schema": "galwear-kernel-diagnostic-v1",
         "image_sha256": digest(image),
         "image_bytes": len(image),
@@ -67,10 +98,13 @@ def snapshot(root):
         "sections": sections(elf),
         "safe_to_flash": False,
     }
+    if include_objects:
+        result["objects"] = object_inventory(root)
+    return result
 
 
 def read_report(path):
-    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 4 * 1024 * 1024:
+    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= MAX_REPORT:
         raise ValueError("Invalid diagnostic report: " + path.name)
 
     def unique(pairs):
@@ -114,6 +148,25 @@ def validate_diagnostic(report, manifest):
             raise ValueError("Invalid section metadata")
 
 
+def validate_objects(records):
+    from r800_reproducibility_audit import SHA256
+
+    if not isinstance(records, dict) or not 1 <= len(records) <= MAX_OBJECTS + len(GENERATED):
+        raise ValueError("Invalid kernel object inventory")
+    if not set(GENERATED).issubset(records) or not any(name.endswith(".o") for name in records):
+        raise ValueError("Incomplete kernel object inventory")
+    for name, row in records.items():
+        if (not isinstance(name, str) or not name or len(name) > 512 or
+                not name.isascii() or not name.isprintable() or
+                any(part in ("", ".", "..") for part in name.split("/")) or
+                "\\" in name or (name not in GENERATED and not name.endswith(".o"))):
+            raise ValueError("Invalid kernel object path")
+        if (not isinstance(row, dict) or set(row) != {"bytes", "sha256"} or
+                type(row["bytes"]) is not int or not 0 < row["bytes"] <= MAX_FILE or
+                not isinstance(row["sha256"], str) or not SHA256.fullmatch(row["sha256"])):
+            raise ValueError("Invalid kernel object record")
+
+
 def compare(first, second, image_a, image_b):
     validate_diagnostic(first, image_a)
     validate_diagnostic(second, image_b)
@@ -133,6 +186,16 @@ def compare(first, second, image_a, image_b):
     for name in sorted(sa.keys() | sb.keys()):
         if sa.get(name) != sb.get(name):
             differences[name] = {"a": sa.get(name), "b": sb.get(name)}
+    objects_a, objects_b = first.get("objects"), second.get("objects")
+    object_differences = None
+    if "objects" in first or "objects" in second:
+        validate_objects(objects_a)
+        validate_objects(objects_b)
+        object_differences = {
+            name: {"a": objects_a.get(name), "b": objects_b.get(name)}
+            for name in sorted(objects_a.keys() | objects_b.keys())
+            if objects_a.get(name) != objects_b.get(name)
+        }
     return {
         "schema": "galwear-kernel-diagnostic-comparison-v1",
         "status": "IMAGE_HASH_MATCH" if equal else "IMAGE_HASH_MISMATCH",
@@ -145,6 +208,8 @@ def compare(first, second, image_a, image_b):
         "last_different_block_offset": changed[-1] * BLOCK if changed else None,
         "different_block_offsets": [i * BLOCK for i in changed],
         "different_sections": differences,
+        "object_inventory_compared": object_differences is not None,
+        "different_objects": object_differences,
         "diagnostic_only": True,
         "safe_to_flash": False,
     }
@@ -163,9 +228,12 @@ def main():
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--root", type=Path)
     mode.add_argument("--compare-dir", type=Path)
+    p.add_argument("--include-objects", action="store_true")
     p.add_argument("--output", required=True, type=Path)
     a = p.parse_args()
-    result = snapshot(a.root) if a.root else compare_directory(a.compare_dir)
+    if a.include_objects and not a.root:
+        p.error("--include-objects requires --root")
+    result = snapshot(a.root, a.include_objects) if a.root else compare_directory(a.compare_dir)
     with a.output.open("x", encoding="utf-8") as f:
         json.dump(result, f, indent=2, sort_keys=True)
         f.write("\n")
