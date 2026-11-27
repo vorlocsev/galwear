@@ -390,6 +390,91 @@ jobs:
             ${{ runner.temp }}/r800-donor-hold-evidence.json
           if-no-files-found: warn
           retention-days: 7
+      - name: Fetch Debian ARM EABI glibc 2.24 reference (not a Tizen donor)
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          mkdir "$ref"
+          export REF_DIR="$ref"
+          python3 - <<'PY'
+          import hashlib, json, lzma, os, pathlib, subprocess, tarfile
+          root = pathlib.Path(os.environ["REF_DIR"])
+          base = "https://archive.debian.org/debian/"
+          def fetch(path, dest):
+              subprocess.run(["curl", "--fail", "--location", "--retry", "3",
+                              "--max-time", "180", base + path, "-o", str(dest)], check=True)
+          index = root / "Packages.xz"
+          fetch("dists/stretch/main/binary-armel/Packages.xz", index)
+          rows = []
+          with lzma.open(index, "rt", encoding="utf-8") as stream:
+              for stanza in stream.read().split("\n\n"):
+                  fields = dict(line.split(": ", 1) for line in stanza.splitlines()
+                                if ": " in line and not line.startswith(" "))
+                  if (fields.get("Package"), fields.get("Version"), fields.get("Architecture")) == (
+                          "libc6", "2.24-11+deb9u4", "armel"):
+                      rows.append(fields)
+          assert len(rows) == 1, len(rows)
+          row = rows[0]
+          name = "pool/main/g/glibc/libc6_2.24-11+deb9u4_armel.deb"
+          assert row["Filename"] == name
+          archive = root / "reference.deb"
+          fetch(name, archive)
+          data = archive.read_bytes()
+          assert len(data) == int(row["Size"]) and len(data) < 16 * 1024**2
+          sha = hashlib.sha256(data).hexdigest()
+          assert sha == row["SHA256"]
+          names = {"libc-2.24.so": "libc.so.6", "libdl-2.24.so": "libdl.so.2",
+                   "libpthread-2.24.so": "libpthread.so.0", "ld-2.24.so": "ld-linux.so.3"}
+          libs = root / "libs"
+          libs.mkdir()
+          found = {}
+          with subprocess.Popen(["dpkg-deb", "--fsys-tarfile", str(archive)], stdout=subprocess.PIPE) as proc:
+              with tarfile.open(fileobj=proc.stdout, mode="r|*") as tar:
+                  for member in tar:
+                      path = pathlib.PurePosixPath(member.name)
+                      if path.parent.as_posix() != "lib/arm-linux-gnueabi" or path.name not in names:
+                          continue
+                      dest = names[path.name]
+                      assert dest not in found and member.isfile() and 0 < member.size <= 64 * 1024**2
+                      raw = tar.extractfile(member).read()
+                      assert len(raw) == member.size
+                      (libs / dest).write_bytes(raw)
+                      found[dest] = hashlib.sha256(raw).hexdigest()
+              assert proc.wait() == 0
+          assert set(found) == set(names.values()), found
+          report = {"scope": "DEBIAN_ARMEL_REFERENCE_NOT_TIZEN",
+                    "source_sha": os.environ["GITHUB_SHA"], "archive_sha256": sha,
+                    "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
+                    "index_signature_verified": False, "files": found,
+                    "tizen_donor_verified": False, "runtime_verified": False, "safe_to_flash": False}
+          (root / "reference-origin.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+          PY
+      - name: Static reference glibc audit and real GPSBridge link (no ARM execution)
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          python3 build/r800_gps_link_gate.py --donor-only --libdir "$ref/libs" > "$ref/reference-prelink.json"
+          R800_XTRA_ABI=0 R800_TIZEN_ARCHIVE='' R800_HOST_SNAPSHOT=0 \
+            sh src/tools/gps/build.sh "$RUNNER_TEMP/android-ndk-r27c" "$ref/libs" "$ref/gpsbridge" > "$ref/reference-link.log" 2>&1 || {
+              cat "$ref/reference-link.log"; exit 2;
+            }
+          python3 build/r800_gps_link_gate.py --binary "$ref/gpsbridge" --libdir "$ref/libs" > "$ref/reference-postlink.json"
+          echo "DEBIAN_ARMEL_REFERENCE_LINK_PASS; tizen_donor_verified=false; runtime_verified=false; safe_to_flash=false"
+      - name: Upload reference link metadata only (no guest binaries)
+        if: always() && github.ref_name == 'development/r800-integration-20261127'
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-debian-glibc-reference-evidence
+          path: |
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-origin.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-prelink.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-postlink.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-link.log
+          if-no-files-found: warn
+          retention-days: 7
   kernel:
     if: github.event_name == 'workflow_dispatch' && inputs.kernel_repeatability
     uses: ./.github/workflows/r800-kernel-repeatability.yml

@@ -90,3 +90,15 @@ the private donor snapshot before the GPSBridge compiler is invoked. The
 post-link audit remains mandatory. DONOR_STATIC_CLOSURE_ONLY means only
 that the static check found no problems, not that the donor is authentic,
 the private ABI is compatible, the loader executes, or GNSS works.
+
+
+## Debian ARM reference experiment (not a Tizen donor)
+
+Integration CI uses the Debian Stretch archive libc6 2.24-11+deb9u4 armel
+only as a real ELF/linker reference. It checks the package against the
+repository index fetched over HTTPS and records both hashes; it does not
+verify the historical index signature. Only four explicit regular files
+are extracted, without package installation or guest code execution.
+A successful reference link cannot satisfy Tizen donor acceptance,
+replace original Samsung libraries, verify GNSS or authorize flashing.
+No reference binaries are published or staged in the payload.
