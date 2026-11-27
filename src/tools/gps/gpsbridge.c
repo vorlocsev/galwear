@@ -18,6 +18,11 @@
  * Built against the Tizen rootfs glibc (armv7 soft-float) with no Tizen headers
  * or C runtime: the few libc calls are declared here and _start is our own.
  */
+#include "gps_frame.h"
+#include "gps_command.h"
+#include "gps_lto.h"
+#include "gps_output.h"
+
 typedef unsigned int size_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -31,6 +36,8 @@ void *dlopen(const char *, int);
 void *dlsym(void *, const char *);
 char *dlerror(void);
 int pthread_create(pthread_t *, const void *, void *(*)(void *), void *);
+void *malloc(size_t);
+void free(void *);
 unsigned int sleep(unsigned int);
 int atoi(const char *);
 void exit(int);
@@ -43,20 +50,24 @@ int socket(int, int, int);
 int bind(int, const void *, unsigned int);
 int listen(int, int);
 int accept(int, void *, unsigned int *);
+long send(int, const void *, size_t, int);
+int shutdown(int, int);
 int close(int);
 long read(int, void *, size_t);
 long write(int, const void *, size_t);
-long send(int, const void *, size_t, int);
-int shutdown(int, int);
-#define MSG_NOSIGNAL 0x4000
-#define MSG_DONTWAIT 0x40
 int unlink(const char *);
 int chmod(const char *, unsigned int);
 long long strtoll(const char *, char **, int);
 double strtod(const char *, char **);
 int open(const char *, int, ...);
 int rename(const char *, const char *);
+int mkstemp(char *);
+int fsync(int);
+long syscall(long, ...);
 #define O_RDONLY 0
+#define O_NONBLOCK 04000
+#define O_NOFOLLOW 0100000 /* Linux ARM UAPI, not asm-generic */
+#define O_CLOEXEC 02000000
 #define O_WRONLY_CREAT_TRUNC 01101
 int strcmp(const char *, const char *);
 int strncmp(const char *, const char *, size_t);
@@ -66,77 +77,23 @@ int pthread_mutex_lock(void *);
 int pthread_mutex_unlock(void *);
 #define AF_UNIX 1
 #define SOCK_STREAM 1
+#define MSG_DONTWAIT 0x40
+#define MSG_NOSIGNAL 0x4000
+#define SHUT_RDWR 2
 #define SOCK_PATH "/opt/usr/r800dev/gps.sock"
 
-/* daemon: the connected gps.r800.so, or -1 */
-static int client = -1;
-static int mtx[8];   /* glibc pthread_mutex_t (24 bytes), zero = default mutex */
-static void out(const char *line, int len)
+/* glibc ARM32 pthread_mutex_t (24 bytes), zero = default mutex. */
+typedef int gps_client_mutex_t[8];
+#define GPS_CLIENT_MUTEX_INIT {0}
+#include "gps_client.h"
+static struct gps_client connection = GPS_CLIENT_INIT;
+static void out(gps_client_epoch epoch, const char *line, int len)
 {
-	pthread_mutex_lock(mtx);
-	if (client >= 0 && send(client, line, len, MSG_NOSIGNAL | MSG_DONTWAIT) != len) {
-		/* The accept/read loop alone owns close, avoiding double-close. */
-		shutdown(client, 2);
-		client = -1;
-	}
-	pthread_mutex_unlock(mtx);
+	gps_client_send(&connection, epoch, line, len);
 }
 static int daemon_mode;
 
-/* ---- hardware/gps.h (AOSP), 32-bit ARM layout ---- */
-typedef int64_t GpsUtcTime;
-typedef struct {
-	size_t size;
-	uint16_t flags;
-	double latitude;
-	double longitude;
-	double altitude;
-	float speed;
-	float bearing;
-	float accuracy;
-	GpsUtcTime timestamp;
-} GpsLocation;
-typedef struct {
-	size_t size;
-	uint16_t status;
-} GpsStatus;
-typedef struct {
-	size_t size;
-	void (*location_cb)(GpsLocation *);
-	void (*status_cb)(GpsStatus *);
-	void (*sv_status_cb)(void *);
-	void (*nmea_cb)(GpsUtcTime, const char *, int);
-	void (*set_capabilities_cb)(uint32_t);
-	void (*acquire_wakelock_cb)(void);
-	void (*release_wakelock_cb)(void);
-	pthread_t (*create_thread_cb)(const char *, void (*)(void *), void *);
-	void (*request_utc_time_cb)(void);
-} GpsCallbacks;
-typedef struct {
-	size_t size;
-	int (*init)(GpsCallbacks *);
-	int (*start)(void);
-	int (*stop)(void);
-	void (*cleanup)(void);
-	int (*inject_time)(GpsUtcTime, int64_t, int);
-	int (*inject_location)(double, double, float);
-	void (*delete_aiding_data)(uint16_t);
-	int (*set_position_mode)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
-	const void *(*get_extension)(const char *);
-} GpsInterface;
-
-/* "gps-xtra": Broadcom LTO (long-term orbits), the file Tizen's lbs plugin
- * downloads from gllto1.glpals.com into /opt/gnss/data/lto2.dat */
-typedef struct {
-	size_t size;
-	void (*download_request_cb)(void);
-	pthread_t (*create_thread_cb)(const char *, void (*)(void *), void *);
-} GpsXtraCallbacks;
-typedef struct {
-	size_t size;
-	int (*init)(GpsXtraCallbacks *);
-	int (*inject_xtra_data)(char *, int);
-} GpsXtraInterface;
+#include "gps_abi.h"
 
 #define GPS_POSITION_MODE_STANDALONE 0
 #define GPS_POSITION_RECURRENCE_PERIODIC 0
@@ -144,41 +101,38 @@ typedef struct {
 #define LTO_PATH "/opt/gnss/data/lto2.dat"
 /* last fix "<lat> <lon> <utc_ms>", handed back to the engine as a position seed */
 #define LAST_PATH "/opt/usr/r800dev/gps.last"
-#define LAST_TMP LAST_PATH ".tmp"
+#define LAST_TMP LAST_PATH ".XXXXXX"
 
-static int64_t last_saved;   /* utc ms of the last fix written to LAST_PATH */
+#include "gps_cache.h"
+#include "gps_cache_read.h"
+#include "gps_cache_arm_stat.h"
+#include "gps_lto_file.h"
+static struct gps_cache position_cache = GPS_CACHE_INIT;
 
-static void save_fix(const GpsLocation *l)
+static void save_fix(const GpsLocation *l, gps_client_epoch epoch)
 {
-	char b[80];
-	int fd, n;
-	if (!(l->flags & 1) || l->timestamp - last_saved < 60000)
+	char tmp[] = LAST_TMP;
+	if (!(l->flags & 1))
 		return;
-	n = snprintf(b, sizeof(b), "%.6f %.6f %lld\n", l->latitude, l->longitude, l->timestamp);
-	if (n <= 0 || n >= (int)sizeof(b))
-		return;
-	fd = open(LAST_TMP, O_WRONLY_CREAT_TRUNC, 0600);
-	if (fd < 0)
-		return;
-	if (write(fd, b, n) == n) {
-		close(fd);
-		if (!rename(LAST_TMP, LAST_PATH))
-			last_saved = l->timestamp;
-	} else {
-		close(fd);
-	}
+	gps_cache_save(&position_cache, &connection, epoch, daemon_mode,
+	               LAST_PATH, tmp, l->latitude, l->longitude, l->timestamp);
 }
 
 static void location_cb(GpsLocation *l)
 {
+	gps_client_epoch epoch = gps_client_ticket(&connection, 0);
 	char b[200];
-	int n = snprintf(b, sizeof(b), "FIX %u %.8f %.8f %.2f %.3f %.2f %.2f %lld\n",
+	int n;
+	if (daemon_mode && !epoch)
+		return;
+	if (!l || l->size < sizeof(*l) || !gps_valid_seed(l->latitude, l->longitude, l->timestamp))
+		return;
+	n = snprintf(b, sizeof(b), "FIX %u %.8f %.8f %.2f %.3f %.2f %.2f %lld\n",
 			 l->flags, l->latitude, l->longitude, l->altitude, (double)l->speed,
 			 (double)l->bearing, (double)l->accuracy, l->timestamp);
-	if (n <= 0 || n >= (int)sizeof(b))
-		return;
-	out(b, n);
-	save_fix(l);
+	if (n > 0 && n < (int)sizeof(b))
+		out(epoch, b, n);
+	save_fix(l, epoch);
 	if (daemon_mode)
 		return;
 	printf("FIX flags=%x lat=%.7f lon=%.7f alt=%.1f spd=%.2f brg=%.1f acc=%.1f t=%lld\n",
@@ -188,8 +142,11 @@ static void location_cb(GpsLocation *l)
 }
 static void status_cb(GpsStatus *s)
 {
+	gps_client_epoch epoch = gps_client_ticket(&connection, 1);
 	char b[32];
-	out(b, snprintf(b, sizeof(b), "STATUS %u\n", s->status));
+	if ((daemon_mode && !epoch) || !s || s->size < sizeof(*s))
+		return;
+	out(epoch, b, snprintf(b, sizeof(b), "STATUS %u\n", s->status));
 	if (daemon_mode)
 		return;
 	printf("STATUS %u\n", s->status);
@@ -201,24 +158,23 @@ static void sv_status_cb(void *sv)
 }
 static void nmea_cb(GpsUtcTime t, const char *nmea, int len)
 {
+	gps_client_epoch epoch = gps_client_ticket(&connection, 0);
 	char b[300];
-	if (!nmea || len <= 0 || len > 250)
+	int n;
+	if (daemon_mode && !epoch)
 		return;
-	while (len > 0 && (nmea[len - 1] == '\n' || nmea[len - 1] == '\r'))
-		len--;
-	for (int i = 0; i < len; i++)
-		if (nmea[i] < 32 || nmea[i] > 126)
-			return;
-	int n = snprintf(b, sizeof(b), "NMEA %lld %.*s\n", t, len, nmea);
+	len = gps_nmea_length(nmea, len);
+	if (len <= 0 || t < 0 || t > GPS_UTC_MAX)
+		return;
+	n = snprintf(b, sizeof(b), "NMEA %lld %.*s\n", t, len, nmea);
 	if (n > 0 && n < (int)sizeof(b))
-		out(b, n);
-	if (daemon_mode)
-		return;
-	printf("NMEA %.*s", len, nmea);
-	if (len > 0 && nmea[len - 1] != '\n')
-		printf("\n");
-	fflush(0);
+		out(epoch, b, n);
+	if (!daemon_mode) {
+		printf("NMEA %.*s\n", len, nmea);
+		fflush(0);
+	}
 }
+
 static void caps_cb(uint32_t c)
 {
 	printf("CAPS %x\n", c);
@@ -229,21 +185,30 @@ static void wl_release(void) {}
 static void utc_cb(void) {}
 
 struct thr { void (*fn)(void *); void *arg; };
-static struct thr thrs[16];
-static int nthr;
 static void *thr_tramp(void *p)
 {
 	struct thr *t = p;
-	t->fn(t->arg);
+	void (*fn)(void *) = t->fn;
+	void *arg = t->arg;
+	free(t);
+	fn(arg);
 	return 0;
 }
 static pthread_t create_thread_cb(const char *name, void (*fn)(void *), void *arg)
 {
 	pthread_t th = 0;
-	struct thr *t = &thrs[nthr++ & 15];
+	struct thr *t;
+	if (!fn)
+		return 0;
+	t = malloc(sizeof(*t));
+	if (!t)
+		return 0;
 	t->fn = fn;
 	t->arg = arg;
-	pthread_create(&th, 0, thr_tramp, t);
+	if (pthread_create(&th, 0, thr_tramp, t) != 0) {
+		free(t);
+		return 0;
+	}
 	printf("THREAD %s\n", name ? name : "?");
 	fflush(0);
 	return th;
@@ -255,13 +220,15 @@ static GpsCallbacks cbs = {
 };
 
 static const GpsInterface *gps;
+static int gps_initialized;
 
 /* clock in ms: 0 = REALTIME, 1 = MONOTONIC (libbrcm's elapsed clock), 7 = BOOTTIME
  * (Android's elapsedRealtime) */
 static int64_t clk_ms(int id)
 {
 	struct { long sec, nsec; } ts = { 0, 0 };
-	clock_gettime(id, &ts);
+	if (clock_gettime(id, &ts) != 0)
+		return -1;
 	return (int64_t)ts.sec * 1000 + ts.nsec / 1000000;
 }
 
@@ -276,8 +243,14 @@ static int inject_utc(int64_t utc, int64_t boot_ref, int unc)
 {
 	int64_t mono = clk_ms(1);
 	int r;
-	if (boot_ref > 0)
-		utc += clk_ms(7) - boot_ref;
+	if (utc <= 0 || utc > GPS_UTC_MAX || unc < 0 || mono < 0)
+		return -1;
+	if (boot_ref > 0) {
+		int64_t boot = clk_ms(7);
+		if (boot < boot_ref || boot - boot_ref > GPS_UTC_MAX - utc)
+			return -1;
+		utc += boot - boot_ref;
+	}
 	r = gps->inject_time(utc, mono, unc);
 	printf("inject_time %lld ref %lld unc %d -> %d\n", utc, mono, unc, r);
 	fflush(0);
@@ -286,42 +259,39 @@ static int inject_utc(int64_t utc, int64_t boot_ref, int unc)
 /* the system clock is network-synced (Android NTP / the phone) */
 #define inject_now() inject_utc(clk_ms(0), 0, 500)
 
+#include "gps_xtra.h"
 static void xtra_download_cb(void) {}
-static GpsXtraCallbacks xcbs = { sizeof(GpsXtraCallbacks), xtra_download_cb, 0 };
-static char lto_buf[256 * 1024];
+static GpsXtraCallbacks xcbs = {
+#if R800_XTRA_ABI == 2
+	sizeof(GpsXtraCallbacks),
+#endif
+	.download_request_cb = xtra_download_cb,
+	.create_thread_cb = 0,
+};
+static char lto_buf[GPS_LTO_LIMIT];
+static const GpsXtraInterface *xtra;
 
 /* load lto2.dat into the engine (what Tizen's plugin does after downloading it) */
 static void inject_lto(void)
 {
-	static const GpsXtraInterface *x;
-	static int inited;
-	int fd, n = 0, r;
-	if (!inited) {
-		inited = 1;
-		x = gps->get_extension ? gps->get_extension("gps-xtra") : 0;
-		xcbs.create_thread_cb = cbs.create_thread_cb;
-		if (x && x->init)
-			x->init(&xcbs);
-	}
-	if (!x || !x->inject_xtra_data) {
-		printf("lto: no gps-xtra\n");
+	int n, r;
+	enum gps_xtra_result result;
+	/* Never infer the proprietary callback layout from the extension size. */
+	if (R800_XTRA_ABI == 0)
+		return;
+	n = gps_lto_file(LTO_PATH, lto_buf, sizeof(lto_buf));
+	if (n <= 0) {
+		printf("lto: missing, unsafe, oversized or changed file\n");
 		fflush(0);
 		return;
 	}
-	fd = open(LTO_PATH, O_RDONLY);
-	if (fd < 0) {
-		printf("lto: no %s\n", LTO_PATH);
+	xcbs.create_thread_cb = cbs.create_thread_cb;
+	result = gps_xtra_submit(gps, &xtra, &xcbs, lto_buf, n, &r);
+	if (result != XTRA_OK && result != XTRA_INJECT_FAILED) {
+		printf("lto: XTRA unavailable or init failed (%d, %d)\n", result, r);
 		fflush(0);
 		return;
 	}
-	for (;;) {
-		long k = read(fd, lto_buf + n, sizeof(lto_buf) - n);
-		if (k <= 0)
-			break;
-		n += k;
-	}
-	close(fd);
-	r = n > 0 ? x->inject_xtra_data(lto_buf, n) : -1;
 	printf("lto: injected %d bytes -> %d\n", n, r);
 	fflush(0);
 }
@@ -329,26 +299,13 @@ static void inject_lto(void)
 /* seed the engine with the last fix: accuracy grows with its age */
 static void inject_last(void)
 {
-	char b[96], *e;
 	double lat, lon;
-	int64_t t, age;
+	int64_t t, age, now = clk_ms(0);
 	float acc;
-	int fd = open(LAST_PATH, O_RDONLY), r;
-	long n;
-	if (fd < 0)
+	int r;
+	if (!gps_cache_load(&position_cache, LAST_PATH, now, &lat, &lon, &t, &acc))
 		return;
-	n = read(fd, b, sizeof(b) - 1);
-	close(fd);
-	if (n <= 0)
-		return;
-	b[n] = 0;
-	lat = strtod(b, &e);
-	lon = strtod(e, &e);
-	t = strtoll(e, &e, 10);
-	age = clk_ms(0) - t;
-	if (t <= 0 || age < 0 || age > 30LL * 86400000 || (lat == 0 && lon == 0))
-		return;
-	acc = age < 86400000 ? 2000.0f : 25000.0f;
+	age = now - t;
 	r = gps->inject_location(lat, lon, acc);
 	printf("inject_location (last fix, %lld min old) acc %.0f -> %d\n", age / 60000,
 	       (double)acc, r);
@@ -363,29 +320,53 @@ static void aid(void)
 	inject_last();
 }
 
+/* Enable wire callbacks immediately before start: HAL may call back
+ * synchronously. End the epoch before retrying or cleaning up. */
+static int daemon_start(void)
+{
+	int r;
+	if (!gps_client_begin(&connection))
+		return -1;
+	r = gps->start();
+	if (r != 0)
+		gps_client_end(&connection);
+	return r;
+}
+
 static int session(int on)
 {
 	int r;
-	if (!on)
-		return gps->stop();
+	if (!on) {
+		gps_client_stopping(&connection);
+		r = gps->stop();
+		gps_client_end(&connection);
+		printf("session stop -> %d\n", r);
+		fflush(0);
+		return r;
+	}
 	aid();
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				   GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-	if (!r)
-		r = gps->start();
-	if (r < 0) {
+	if (r == 0)
+		r = daemon_start();
+	if (r != 0) {
 		/* gpsd restarted under us: reconnect the client library and retry */
 		printf("start failed, re-init\n");
 		fflush(0);
+		xtra = 0;
+		gps_initialized = 0;
 		gps->cleanup();
 		r = gps->init(&cbs);
-		if (r)
+		printf("re-init %d\n", r);
+		fflush(0);
+		if (r != 0)
 			return r;
+		gps_initialized = 1;
 		aid();
 		r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE,
 				       GPS_POSITION_RECURRENCE_PERIODIC, 1000, 0, 0);
-		if (!r)
-			r = gps->start();
+		if (r == 0)
+			r = daemon_start();
 	}
 	printf("session %s -> %d\n", on ? "start" : "stop", r);
 	fflush(0);
@@ -411,69 +392,75 @@ static int serve(void)
 	printf("listening on %s\n", SOCK_PATH);
 	fflush(0);
 	for (;;) {
-		char buf[512];
-		int have = 0, on = 0;
+		char buf[256];
+		struct gps_frame frame = {{0}, 0};
+		int on = 0, fatal = 0;
 		int c = accept(ls, 0, 0);
 		if (c < 0)
 			continue;
-		pthread_mutex_lock(mtx);
-		client = c;
-		pthread_mutex_unlock(mtx);
+		if (!gps_client_attach(&connection, c)) {
+			close(c);
+			close(ls);
+			unlink(SOCK_PATH);
+			return 1;
+		}
 		printf("client connected\n");
 		fflush(0);
 		for (;;) {
-			long n = read(c, buf + have, sizeof(buf) - 1 - have);
-			char *s, *nl;
+			long n = read(c, buf, sizeof(buf));
 			if (n <= 0)
 				break;
-			have += n;
-			buf[have] = 0;
-			s = buf;
-			while ((nl = strchr(s, '\n'))) {
-				*nl = 0;
+			for (long j = 0; j < n; j++) {
+				int state = gps_frame_byte(&frame, (unsigned char)buf[j]);
+				char *s = frame.line;
+				if (state < 0)
+					goto disconnected;
+				if (state == 0)
+					continue;
+				/* Do not dispatch another buffered command after output shutdown. */
+				if (!gps_client_matches(&connection, c))
+					goto disconnected;
 				if (!strcmp(s, "START") && !on) {
-					if (session(1)) {
-						shutdown(c, 2);
-						break;
+					if (session(1) != 0) {
+						fatal = 1;
+						goto disconnected;
 					}
 					on = 1;
 				} else if (!strcmp(s, "STOP") && on) {
-					if (session(0)) {
-						shutdown(c, 2);
-						break;
+					if (session(0) != 0) {
+						fatal = 1;
+						goto disconnected;
 					}
 					on = 0;
 				} else if (!strncmp(s, "TIME ", 5)) {
 					/* TIME <utc_ms> [<elapsedRealtime_ms> <unc_ms>] */
-					char *e;
-					int64_t t = strtoll(s + 5, &e, 10), ref = strtoll(e, &e, 10);
-					int unc = (int)strtoll(e, &e, 10);
-					inject_utc(t, ref, unc > 0 ? unc : 1000);
+					struct gps_time_command t;
+					if (!gps_parse_time(s + 5, &t))
+						goto disconnected;
+					inject_utc(t.utc, t.elapsed, t.uncertainty);
 				} else if (!strncmp(s, "LOC ", 4)) {
 					/* LOC <lat> <lon> <acc_m>: Android's network location */
-					char *e;
-					double lat = strtod(s + 4, &e), lon = strtod(e, &e);
-					float acc = (float)strtod(e, &e);
-					int r = gps->inject_location(lat, lon, acc > 0 ? acc : 1000);
+					struct gps_loc_command loc;
+					if (!gps_parse_loc(s + 4, &loc))
+						goto disconnected;
+					float acc = (float)loc.accuracy;
+					int r = gps->inject_location(loc.lat, loc.lon, acc);
 					printf("inject_location (android) acc %.0f -> %d\n",
 					       (double)acc, r);
 					fflush(0);
 				}
-				s = nl + 1;
+				frame.used = 0;
 			}
-			have = 0;
-			while (*s)
-				buf[have++] = *s++;
-			if (have >= (int)sizeof(buf) - 1)
-				have = 0;
 		}
-		if (on)
-			session(0);
-		pthread_mutex_lock(mtx);
-		if (client == c)
-			client = -1;
-		pthread_mutex_unlock(mtx);
+disconnected:
+		gps_client_detach(&connection, c);
 		close(c);
+		if (fatal || (on && session(0) != 0)) {
+			/* Unknown engine state: fail closed rather than accept a new client. */
+			close(ls);
+			unlink(SOCK_PATH);
+			return 1;
+		}
 		printf("client gone\n");
 		fflush(0);
 	}
@@ -502,30 +489,54 @@ int main(int argc, char **argv, char **envp)
 	gps = get();
 	printf("GpsInterface %p size %u\n", (void *)gps, gps ? gps->size : 0);
 	fflush(0);
-	if (!gps)
+	if (!gps || gps->size < sizeof(GpsInterface) || !gps->init ||
+	    !gps->start || !gps->stop || !gps->cleanup || !gps->inject_time ||
+	    !gps->inject_location || !gps->set_position_mode)
 		return 1;
+	/* Restore the persisted watermark before init can invoke callbacks. */
+	{
+		double lat, lon;
+		int64_t utc;
+		float acc;
+		gps_cache_load(&position_cache, LAST_PATH, clk_ms(0), &lat, &lon, &utc, &acc);
+	}
 	r = gps->init(&cbs);
 	printf("init %d\n", r);
-	if (r)
+	if (r != 0)
 		return 1;
+	gps_initialized = 1;
 	if (daemon_mode) {
 		inject_now();
-		exit(serve());
+		r = serve();
+		if (gps_initialized) {
+			gps_initialized = 0;
+			gps->cleanup();
+		}
+		return r;
 	}
 	aid();
 	r = gps->set_position_mode(GPS_POSITION_MODE_STANDALONE, GPS_POSITION_RECURRENCE_PERIODIC,
 				   1000, 0, 0);
 	printf("set_position_mode %d\n", r);
+	if (r != 0) {
+		gps->cleanup();
+		return 1;
+	}
 	r = gps->start();
 	printf("start %d (running %d s)\n", r, secs);
 	fflush(0);
+	if (r != 0) {
+		gps->cleanup();
+		return 1;
+	}
 	sleep(secs);
 	r = gps->stop();
 	printf("stop %d\n", r);
 	fflush(0);
-	sleep(2);
-	exit(0);
-	return 0;
+	if (r == 0)
+		sleep(2);
+	gps->cleanup();
+	return r == 0 ? 0 : 1;
 }
 
 /* glibc ARM _start: argc/argv from the stack, rtld_fini in r0 */
