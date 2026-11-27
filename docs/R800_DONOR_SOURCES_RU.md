@@ -313,3 +313,13 @@ python3 build/r800_vendor_recipe_preflight.py --base /path/to/base-vendor.img \
 read-only снимки образов, только debugfs stat. Содержимое рекурсивных
 каталогов, ELF ABI, зависимости, SELinux и подлинность доноров не доказаны.
 Это отдельный предварительный инструмент; legacy сборщик не изменён.
+
+
+Строгий режим --check-elf проверяет выбранные обязательные bin/* и *.so
+на ARM32 dynamic ELF, тип ET_DYN для библиотек, ET_EXEC/ET_DYN для
+исполняемых файлов, отсутствие RPATH/RUNPATH. Сохраняются SHA-256,
+DT_NEEDED и SONAME, но не извлечённые бинарники. build_vendor.sh теперь
+обязательно вызывает этот режим до первого mount, по SHA-256 из
+input-evidence.json. Неподходящий ELF блокирует соответствующий донор.
+Это структурный gate, не полное разрешение зависимостей и не runtime.
+Legacy loop-mount сборка на настоящих образах не проверена.

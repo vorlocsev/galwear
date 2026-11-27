@@ -22,6 +22,8 @@ class VendorRecipeTests(unittest.TestCase):
         for label in ("SRC", "J4"):
             command = 'mount -t ext4 -o loop,ro,noload,nodev,nosuid,noexec "$' + label + '"'
             self.assertLess(gate, self.source.index(command))
+        self.assertLess(self.source.index('r800_vendor_recipe_preflight.py'), self.source.index('mount -t ext4 -o loop,ro,noload,nodev,nosuid,noexec'))
+        self.assertIn('--check-elf --report', self.source)
         self.assertIn("trap cleanup EXIT", self.source)
         self.assertNotIn("/mnt/d/", self.source)
 

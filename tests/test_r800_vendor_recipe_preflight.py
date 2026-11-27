@@ -45,6 +45,14 @@ class VendorRecipePreflightTests(unittest.TestCase):
             self.assertIsNone(report["hidl_groups"]["gnss"]["selected"])
             self.assertEqual([p.image_info(a), p.image_info(b)], before)
             self.assertFalse(report["safe_to_flash"])
+            strict = p.audit(a, before[0]["sha256"], b, before[1]["sha256"], check_elf=True)
+            self.assertEqual(strict["status"], "REVIEW_REQUIRED")
+            self.assertTrue(strict["elf_checks_requested"])
+            self.assertEqual(strict["donors"]["base"]["bin/vndservicemanager"]["status"], "REVIEW_REQUIRED")
+            self.assertIn("base:bin/vndservicemanager", strict["blockers"])
+            self.assertIsNone(strict["hidl_groups"]["wifi"]["selected"])
+            self.assertEqual([p.image_info(a), p.image_info(b)], before)
+
             with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                 p.audit(a, "0"*64, b, before[1]["sha256"])
 

@@ -14,11 +14,16 @@ for p in "$SRC" "$J4" "$S" "$EFFECTS" "$WORK"; do
 done
 [[ "$WORK/" != "$S/"* && "$WORK/" != "$REPO/"* ]] || { echo "work must be outside source trees" >&2; exit 2; }
 [[ $EUID == 0 ]] || { echo "root required for isolated loop mounts" >&2; exit 2; }
-for tool in python3 tar mount umount mountpoint llvm-readelf setfattr getfattr mkfs.ext4 e2fsck sha256sum; do
+for tool in python3 tar mount umount mountpoint llvm-readelf setfattr getfattr mkfs.ext4 e2fsck sha256sum debugfs; do
     command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 127; }
 done
 mkdir -- "$WORK"
 python3 "$REPO/build/r800_vendor_inputs.py" --base "$SRC" --j4 "$J4" --overlay "$S" --effects "$EFFECTS" > "$WORK/input-evidence.json"
+# Match the preflight to the exact donor bytes recorded by input audit.
+read -r BASE_SHA J4_SHA < <(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["base_vendor"]["sha256"],r["j4_vendor"]["sha256"])' "$WORK/input-evidence.json")
+python3 "$REPO/build/r800_vendor_recipe_preflight.py" --base "$SRC" --base-sha256 "$BASE_SHA" \
+    --j4 "$J4" --j4-sha256 "$J4_SHA" --check-elf --report "$WORK/recipe-preflight.json"
+
 OUT=$WORK/tree; BASE_MNT=$WORK/base; J4_MNT=$WORK/j4; DST_MNT=$WORK/dst
 IMAGE=$WORK/vendor.incomplete.img
 mkdir -- "$OUT" "$BASE_MNT" "$J4_MNT" "$DST_MNT"
