@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - development/r800-display-error-propagation-20261125
+      - development/r800-integration-20261127
     paths:
       - .github/workflows/r800-pit-boot-audit.yml
       - build/r800_pit_boot_audit.py
@@ -12,6 +13,10 @@ on:
       - installer/r800_geometry.py
       - installer/r800_recovery_readiness.py
       - installer/r800_preflight_report.py
+      - installer/netodin.py
+      - tests/test_netodin_protocol.py
+      - tests/test_installer_guard.py
+      - tests/test_recovery_audit.py
   workflow_dispatch:
 
 permissions:
@@ -29,3 +34,8 @@ jobs:
         run: |
           python3 -m py_compile build/r800_pit_boot_audit.py
           python3 -m unittest discover -s tests -p 'test_pit_boot_audit.py' -v
+          if [ "$GITHUB_REF_NAME" = development/r800-integration-20261127 ]; then
+            python3 -m unittest discover -s tests -p 'test_netodin_protocol.py' -v
+            python3 -m unittest discover -s tests -p 'test_recovery_audit.py' -v
+          fi
+          echo 'SYNTHETIC_OFFLINE_ONLY; safe_to_flash=false'
