@@ -476,6 +476,25 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+      - name: Compile pinned Mali KBASE ioctl layouts on ARM32 and ARM64
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          dir="$RUNNER_TEMP/kbase-pinned"
+          mkdir -p "$dir"
+          base=https://raw.githubusercontent.com/xanderlent/COMBINED_android-kernel-exynos/50db73fc799f20a7120a8b5f653b16cc123d856f/drivers/gpu/arm/t72x/r28p0
+          for f in mali_kbase_ioctl.h mali_kbase_core_linux.c mali_kbase_mem_linux.c mali_base_kernel.h; do
+            curl --fail --location --retry 3 --max-time 90 "$base/$f" -o "$dir/$f"
+          done
+          python3 build/r800_kbase_abi_check.py --source-dir "$dir" --ndk "$RUNNER_TEMP/android-ndk-r27c" --scratch "$RUNNER_TEMP/kbase-abi" --source-sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        if: github.ref_name == 'development/r800-integration-20261127'
+        with:
+          name: r800-kbase-abi-evidence
+          path: ${{ runner.temp }}/kbase-abi/kbase-abi-evidence.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Compile ARM32 Bionic HAL dlopen metadata probe (no runtime)
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
