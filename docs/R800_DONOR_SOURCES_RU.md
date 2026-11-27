@@ -583,3 +583,13 @@ OFF/NORMAL/DOZE/DOZE_SUSPEND (without opt-in suspend), injected power
 failure and recovery, timer VSync callbacks and unregister, FD count.
 Framebuffer remains unchanged. No gralloc/present/DECON zero-copy,
 real TE or actual panel verification. New CI pending.
+
+
+CI 46039388833 / job 140642933738 exact a9b3c42: 7/8 workflows,
+HWC fixture exit 172 (negative geometry combined assertion). Root cause
+not established: previous log lacked rc/FD/ioctl counts. New diagnostics
+retain all negative checks and print exact rc, FD counts, ioctl identity.
+Also fix independent HWC defects: preserve errno across framebuffer logs;
+DPI*1000 multiplier 25400 (not 25400000), e.g. 360px/33mm -> 277090.
+Add private DSIM cmd_rw fixture for normal recovery after doze, verify '2'.
+No actual sysfs or framebuffer exposed; next exact-head CI required.

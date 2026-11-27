@@ -4,6 +4,8 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <inttypes.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -49,10 +51,16 @@ int __system_property_set(const char *name,const char *value)
 }
 int ioctl(int fd,int request,...)
 {
-    struct stat st,expected;
-    if (fstat(fd,&st) || lstat(FB_PATH,&expected) || !S_ISREG(st.st_mode) ||
+    struct stat st={0},expected={0};
+    int fd_rc=fstat(fd,&st);
+    int path_rc=lstat(FB_PATH,&expected);
+    if (fd_rc || path_rc || !S_ISREG(st.st_mode) ||
         !S_ISREG(expected.st_mode) || st.st_ino!=expected.st_ino ||
         st.st_dev!=expected.st_dev || st.st_size!=360*720*4) {
+        fprintf(stderr,"HWC fixture ioctl rejected: request=%#x fd=%d stat=%d/%d mode=%o/%o ino=%" PRIu64 "/%" PRIu64 " dev=%" PRIu64 "/%" PRIu64 " size=%" PRId64 "\n",
+                (unsigned int)request,fd,fd_rc,path_rc,(unsigned int)st.st_mode,
+                (unsigned int)expected.st_mode,(uint64_t)st.st_ino,(uint64_t)expected.st_ino,
+                (uint64_t)st.st_dev,(uint64_t)expected.st_dev,(int64_t)st.st_size);
         errno=ENOTTY;
         return -1;
     }
@@ -101,5 +109,6 @@ int ioctl(int fd,int request,...)
         return 0;
     default: break;
     }
+    fprintf(stderr,"HWC fixture unexpected request=%#x\n",(unsigned int)request);
     ++bad; errno=EINVAL; return -1;
 }

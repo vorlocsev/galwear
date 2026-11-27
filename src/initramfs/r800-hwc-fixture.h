@@ -20,7 +20,9 @@ static int hwc_wait_ticks(int target)
 static int hwc_fixture(const hw_module_t *module)
 {
     struct stat st;
-    if (!fixture_read("/dev/graphics/.galwear-fixture","GALWEAR_HWC_FIXTURE_V1\n") ||
+    if (!fixture_read("/sys/devices/platform/148e0000.dsim/.galwear-fixture","GALWEAR_DSIM_FIXTURE_V1\n") ||
+        !regular_fixture("/sys/devices/platform/148e0000.dsim/cmd_rw") ||
+        !fixture_read("/dev/graphics/.galwear-fixture","GALWEAR_HWC_FIXTURE_V1\n") ||
         lstat("/dev/graphics/fb0",&st) || !S_ISREG(st.st_mode) ||
         st.st_size!=360*720*4 || !missing("/dev/fb0") ||
         !missing("/sys/devices/platform/148b0000.decon_f/vsync"))
@@ -31,15 +33,22 @@ static int hwc_fixture(const hw_module_t *module)
     int baseline=fd_count();
     hw_device_t *base=NULL;
     mode(1);
-    if (module->methods->open(module,HWC_HARDWARE_COMPOSER,&base)!=-EINVAL ||
-        base || fd_count()!=baseline) return 172;
+    int rc=module->methods->open(module,HWC_HARDWARE_COMPOSER,&base);
+    int after=fd_count();
+    fprintf(stderr,"HWC negative geometry: rc=%d expected=%d base=%p fd=%d/%d fixed=%u variable=%u bad=%u\n",
+            rc,-EINVAL,(void *)base,baseline,after,get(1),get(2),get(0));
+    if (rc!=-EINVAL || base || after!=baseline || get(1)!=1 || get(2)!=1 || get(0))
+        return 172;
     mode(0);
     static const hwc_procs_t procs={.vsync=hwc_fixture_vsync};
     for (int cycle=0;cycle<4;++cycle) {
-        if (module->methods->open(module,HWC_HARDWARE_COMPOSER,&base) || !base ||
-            base->tag!=HARDWARE_DEVICE_TAG || base->module!=module ||
-            base->version!=HWC_DEVICE_API_VERSION_1_4 || !base->close)
+        rc=module->methods->open(module,HWC_HARDWARE_COMPOSER,&base);
+        if (rc || !base || base->tag!=HARDWARE_DEVICE_TAG || base->module!=module ||
+            base->version!=HWC_DEVICE_API_VERSION_1_4 || !base->close) {
+            fprintf(stderr,"HWC open failed cycle=%d rc=%d base=%p fixed=%u variable=%u bad=%u\n",
+                    cycle,rc,(void *)base,get(1),get(2),get(0));
             return 173;
+        }
         hwc_composer_device_1_t *dev=(hwc_composer_device_1_t *)base;
         if (!dev->query || !dev->getDisplayConfigs || !dev->getDisplayAttributes ||
             !dev->setPowerMode || !dev->registerProcs || !dev->eventControl ||
@@ -66,7 +75,8 @@ static int hwc_fixture(const hw_module_t *module)
             return 176;
         mode(2);
         if (dev->setPowerMode(dev,0,HWC_POWER_MODE_DOZE)!=-EIO ||
-            dev->setPowerMode(dev,0,HWC_POWER_MODE_NORMAL)) return 177;
+            dev->setPowerMode(dev,0,HWC_POWER_MODE_NORMAL) ||
+            !fixture_read("/sys/devices/platform/148e0000.dsim/cmd_rw","2")) return 177;
         dev->registerProcs(dev,&procs);
         int prior=atomic_load(&hwc_ticks);
         if (dev->eventControl(dev,0,HWC_EVENT_VSYNC,1) ||

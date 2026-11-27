@@ -324,12 +324,14 @@ static int fb_open(struct r800_hwc *h)
 	if (h->fb_fd < 0)
 		h->fb_fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
 	if (h->fb_fd < 0) {
-		LOGE("open fb0: %s", strerror(errno));
-		return -errno;
+		int e = errno;
+		LOGE("open fb0: %s", strerror(e));
+		return -e;
 	}
 	if (ioctl(h->fb_fd, FBIOGET_FSCREENINFO, &h->fix) || ioctl(h->fb_fd, FBIOGET_VSCREENINFO, &h->var)) {
-		LOGE("FBIOGET_*SCREENINFO: %s", strerror(errno));
-		return -errno;
+		int e = errno;
+		LOGE("FBIOGET_*SCREENINFO: %s", strerror(e));
+		return -e;
 	}
 	/* CPU copy supports only the existing 32bpp framebuffer geometry. */
 	if (!h->var.xres || !h->var.yres || h->var.bits_per_pixel != 32 ||
@@ -342,9 +344,10 @@ static int fb_open(struct r800_hwc *h)
 	}
 	h->fb_mem = mmap(NULL, h->fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, h->fb_fd, 0);
 	if (h->fb_mem == MAP_FAILED) {
-		LOGE("mmap fb0 (%u bytes): %s", h->fix.smem_len, strerror(errno));
+		int e = errno;
+		LOGE("mmap fb0 (%u bytes): %s", h->fix.smem_len, strerror(e));
 		h->fb_mem = NULL;
-		return -errno;
+		return -e;
 	}
 	LOGI("fb0 %ux%u (virt %ux%u) %ubpp line %u smem %u, %ux%u mm",
 	     h->var.xres, h->var.yres, h->var.xres_virtual, h->var.yres_virtual,
@@ -1391,8 +1394,8 @@ static int r800_get_display_attributes(hwc_composer_device_1_t *dev, int disp, u
 {
 	struct r800_hwc *h = (struct r800_hwc *)dev;
 	/* 33 mm panel, 360 px -> ~277 dpi; HWC wants dpi * 1000 */
-	int32_t dpi_x = h->var.width ? (int32_t)(h->var.xres * 25400000LL / h->var.width) : 277000;
-	int32_t dpi_y = h->var.height ? (int32_t)(h->var.yres * 25400000LL / h->var.height) : 277000;
+	int32_t dpi_x = h->var.width ? (int32_t)(h->var.xres * 25400LL / h->var.width) : 277000;
+	int32_t dpi_y = h->var.height ? (int32_t)(h->var.yres * 25400LL / h->var.height) : 277000;
 	int i;
 	(void)config;
 	if (disp != 0)

@@ -169,6 +169,11 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             fixture.mkdir()
             (fixture/".galwear-fixture").write_text("GALWEAR_HWC_FIXTURE_V1\n")
             (fixture/"fb0").write_bytes(bytes(360*720*4))
+            dsim = Path(tmp)/"hwc-dsim"
+            dsim.mkdir()
+            (dsim/".galwear-fixture").write_text("GALWEAR_DSIM_FIXTURE_V1\n")
+            (dsim/"cmd_rw").write_text("0")
+            (root/"sys/devices/platform/148e0000.dsim").mkdir(parents=True)
         elif audio_pcm_fixture:
             add(probe_dir/"libpcm-fixture.so", "system/lib/libpcm-fixture.so",
                 evidence["pcm_fixture_sha256"], True)
@@ -248,7 +253,9 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     "-E", "LD_PRELOAD=/system/lib/libpcm-fixture.so"]
                 cmd.append("--audio-pcm-fixture")
             if hwc_fixture:
-                cmd[cmd.index("--chdir"):cmd.index("--chdir")] = ["--bind", str(fixture), "/dev/graphics"]
+                cmd[cmd.index("--chdir"):cmd.index("--chdir")] = [
+                    "--bind", str(fixture), "/dev/graphics",
+                    "--bind", str(dsim), "/sys/devices/platform/148e0000.dsim"]
                 cmd[cmd.index("/system/bin/hal-probe"):cmd.index("/system/bin/hal-probe")] = [
                     "-E", "LD_PRELOAD=/system/lib/libhwc-fixture.so"]
                 cmd.append("--hwc-fixture")
@@ -295,7 +302,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 if hwc_fixture:
                     fixture_marker = "HAL_HWC_FIXTURE_PASS geometry=360x360 cycles=4 invalid_bpp=1 power_recovery=4 timer_vsync=4"
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
-                                  (fixture/"fb0").read_bytes() == bytes(360*720*4))
+                                  (fixture/"fb0").read_bytes() == bytes(360*720*4) and
+                                  (dsim/"cmd_rw").read_bytes() == b"2")
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
                           (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture) or fixture_ok))
