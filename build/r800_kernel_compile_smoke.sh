@@ -38,6 +38,10 @@ done
 git -C "$SOURCE" apply --check "$REPO/src/kernel/r800-wearos.patch"
 # Writes ONLY into the disposable checkout, never into Galwear or a remote.
 git -C "$SOURCE" apply "$REPO/src/kernel/r800-wearos.patch"
+# Opt-in deterministic dummy IKHEADERS experiment; retain storage isolation.
+if [ "${R800_REPRO_KHEADERS:-0}" = 1 ]; then
+    python3 "$REPO/build/r800_kheaders_repro.py" --source "$SOURCE"
+fi
 mkdir -p "$OUT"
 cp "$REPO/src/kernel/r800.config" "$OUT/.config"
 
