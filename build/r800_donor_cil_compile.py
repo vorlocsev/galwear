@@ -68,7 +68,60 @@ def audit_context_labels(policy, checker, entries):
             "policy_loaded": False, "safe_to_flash": False}
 
 
-def compile_cil(inputs, tool, checker=None, context_entries=()):
+CHECKFC_MODES = {"file": [], "property": ["-p"], "service": ["-s"],
+                 "hwservice": ["-l"], "vndservice": ["-v"]}
+
+
+def audit_checkfc(policy, tool, expected_tool_sha, entries):
+    """Use explicit AOSP host checkfc on the same temporary compiled policy."""
+    if not 1 <= len(entries) <= 32:
+        raise ValueError("Expected 1..32 checkfc context files")
+    tool = Path(tool).resolve(strict=True)
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_tool_sha):
+        raise ValueError("Expected checkfc SHA-256")
+    if sha(read_regular(tool, MAX_POLICY)) != expected_tool_sha:
+        raise ValueError("checkfc SHA-256 mismatch")
+    policy_sha = sha(read_regular(policy, MAX_POLICY))
+    rows = []
+    total = 0
+    seen = set()
+    with tempfile.TemporaryDirectory(prefix="r800-checkfc-") as tmp:
+        root = Path(tmp)
+        for i, (kind, path, expected) in enumerate(entries):
+            if kind not in CHECKFC_MODES:
+                raise ValueError("Unsupported checkfc context kind")
+            raw = read_regular(Path(path), MAX_INPUT)
+            if sha(raw) != expected:
+                raise ValueError("checkfc context SHA-256 mismatch")
+            total += len(raw)
+            if total > MAX_TOTAL or b"\0" in raw:
+                raise ValueError("checkfc context size or text invalid")
+            raw.decode("utf-8")
+            if (kind, expected) in seen:
+                raise ValueError("Duplicate checkfc context input")
+            seen.add((kind, expected))
+            dest = root / ("%02d.contexts" % i)
+            dest.write_bytes(raw)
+            result = subprocess.run([str(tool), *CHECKFC_MODES[kind], str(policy),
+                                     str(dest)], cwd=root, capture_output=True,
+                                    timeout=30, check=False)
+            rows.append({"kind": kind, "sha256": expected, "bytes": len(raw),
+                         "exit_code": result.returncode,
+                         "status": "PASS" if result.returncode == 0 else "REVIEW_REQUIRED",
+                         "diagnostic": result.stderr[-8192:].decode("utf-8", "replace")})
+            if sha(read_regular(policy, MAX_POLICY)) != policy_sha:
+                raise ValueError("Policy changed during checkfc")
+            if sha(read_regular(tool, MAX_POLICY)) != expected_tool_sha:
+                raise ValueError("checkfc changed during audit")
+    return {"status": "CHECKFC_SELECTED_CONTEXTS_ONLY" if all(row["status"] == "PASS"
+            for row in rows) else "REVIEW_REQUIRED", "policy_sha256": policy_sha,
+            "checkfc_sha256": expected_tool_sha, "checks": rows,
+            "tool_source_authenticity_verified": False, "all_contexts_verified": False,
+            "policy_loaded": False, "runtime_verified": False, "safe_to_flash": False}
+
+
+def compile_cil(inputs, tool, checker=None, context_entries=(), checkfc=None,
+                checkfc_sha=None, checkfc_entries=()):
     if not 1 <= len(inputs) <= 32:
         raise ValueError("Expected 1..32 explicit CIL files")
     tool = Path(tool).resolve(strict=True)
@@ -109,6 +162,10 @@ def compile_cil(inputs, tool, checker=None, context_entries=()):
             if checker is not None:
                 report["context_audit"] = audit_context_labels(policy, checker, context_entries)
                 if report["context_audit"]["status"] != "CONTEXT_LABELS_VALID_ONLY":
+                    report["status"] = "REVIEW_REQUIRED"
+            if checkfc is not None:
+                report["checkfc_audit"] = audit_checkfc(policy, checkfc, checkfc_sha, checkfc_entries)
+                if report["checkfc_audit"]["status"] != "CHECKFC_SELECTED_CONTEXTS_ONLY":
                     report["status"] = "REVIEW_REQUIRED"
         if sha(read_regular(tool, MAX_POLICY)) != tool_sha:
             raise ValueError("Compiler changed during audit")
@@ -177,15 +234,21 @@ def main():
     p.add_argument("--fixture", action="store_true")
     p.add_argument("--context-checker", type=Path)
     p.add_argument("--contexts", nargs=2, action="append", metavar=("FILE", "SHA256"))
+    p.add_argument("--checkfc", type=Path)
+    p.add_argument("--checkfc-sha256")
+    p.add_argument("--checkfc-context", nargs=3, action="append", metavar=("KIND", "FILE", "SHA256"))
     p.add_argument("--report", type=Path, required=True)
     a = p.parse_args()
     if not a.tool or bool(a.input) == a.fixture:
         p.error("Specify compiler and exactly one of --fixture or --input")
     if (a.fixture and a.contexts) or (not a.fixture and bool(a.context_checker) != bool(a.contexts)):
         p.error("Explicit contexts require the context checker; fixture supplies its own")
+    if len({bool(a.checkfc), bool(a.checkfc_sha256), bool(a.checkfc_context)}) != 1 or (a.fixture and a.checkfc):
+        p.error("Provide checkfc, its SHA-256 and context inputs together outside fixture mode")
     try:
         report = fixture(a.tool, a.context_checker) if a.fixture else compile_cil(
-            a.input, a.tool, a.context_checker, a.contexts or ())
+            a.input, a.tool, a.context_checker, a.contexts or (), a.checkfc,
+            a.checkfc_sha256, a.checkfc_context or ())
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         report = {"status": "REVIEW_REQUIRED", "reason": str(exc), "safe_to_flash": False}
     with a.report.open("x", encoding="utf-8") as f:

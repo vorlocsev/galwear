@@ -204,3 +204,14 @@ cc -std=c11 -Wall -Wextra -Werror build/r800_context_check.c -lsepol -o /path/to
 policy; отрицательная fixture содержит неизвестный тип. Это не AOSP
 checkfc: правила regex, Android type attributes, seapp и реальные
 переходы доменов не проверены.
+
+
+Для проверки штатным AOSP checkfc по тому же скомпилированному policy
+передаются --checkfc PATH --checkfc-sha256 SHA256 и один или несколько
+--checkfc-context KIND FILE SHA256. KIND: file, property, service,
+hwservice, vndservice. Проверки выполняются без -e и без загрузки
+policy. Отчёт содержит digest инструмента, policy и каждого context,
+код возврата и ограниченную диагностику. CI проверяет контракт
+передачи аргументов с mock; реальный AOSP host checkfc должен быть
+получен из существующей pinned AOSP сборки. Подлинность tool и
+полнота контекстов не устанавливаются одним digest.
