@@ -494,3 +494,13 @@ invalid handle EINVAL, malformed mask rollback, close ENOENT + retry,
 16 повторных open/close с проверкой FD 0..255. Файлы фиксированной ширины
 имитируют только операции read/write; input events, SSP MCU, Tizen
 sensord concurrency и аппаратные датчики не проверяются. Новый CI pending.
+
+
+CI 46032267044 / job 140618755991 exact 1b6a58a: synthetic SSP control PASS.
+Новый --sensors-context использует отдельный guest FIFO /dev/r800_context,
+реальный poll() с capacity=1 и canary за 104-byte event. Проверяются
+W/D gestures, offbody duplicate suppression, два step counter handles,
+step detector, монотонность после сброса P, malformed/NUL/overlong records,
+disabled wrist gesture, flush metadata и сохранение total при reopen.
+Тест ограничен 30s, guest изолирован; EV_REL/SSP MCU и реальные датчики
+не проверяются. Новый CI pending.

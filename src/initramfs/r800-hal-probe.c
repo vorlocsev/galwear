@@ -1,6 +1,7 @@
 /* ARM32 Bionic diagnostic only. Lifecycle mode requires hardware-free guest. */
 #include <dlfcn.h>
 #include <errno.h>
+#include <stdint.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -174,13 +175,24 @@ static int lights_fixture(const hw_module_t *module)
     return 0;
 }
 
-/* Legacy sensors poll-device prefix; only activate/setDelay are called. */
-struct sensors_event_t;
+/* Legacy sensors ABI, matching the implementation's ARM32 layout. */
+struct sensors_event_t {
+    int32_t version, sensor, type, reserved0;
+    int64_t timestamp;
+    union { float values[16]; uint64_t step[8]; int32_t meta[16]; };
+    uint32_t flags, reserved1[3];
+};
+_Static_assert(sizeof(struct sensors_event_t) == 104, "sensor event ABI");
 struct sensors_poll_device_t {
     hw_device_t common;
     int (*activate)(struct sensors_poll_device_t *, int, int);
     int (*setDelay)(struct sensors_poll_device_t *, int, int64_t);
     int (*poll)(struct sensors_poll_device_t *, struct sensors_event_t *, int);
+};
+struct probe_sensors_v1 {
+    struct sensors_poll_device_t v0;
+    int (*batch)(struct probe_sensors_v1 *, int, int, int64_t, int64_t);
+    int (*flush)(struct probe_sensors_v1 *, int);
 };
 #define SSP_FIXTURE "/sys/class/sensors/ssp_sensor"
 #define SSP_ENABLE SSP_FIXTURE "/enable"
@@ -254,13 +266,111 @@ static int sensors_fixture(const hw_module_t *module)
     return 0;
 }
 
+#define CONTEXT_FIFO "/dev/r800_context"
+
+static int context_send(int fd, const void *data, size_t len)
+{
+    return write(fd, data, len) == (ssize_t)len;
+}
+
+static int context_event(struct sensors_poll_device_t *dev, int handle, int type,
+                         float value, uint64_t steps)
+{
+    struct {
+        struct sensors_event_t ev;
+        uint64_t guard;
+    } out;
+    memset(&out, 0, sizeof(out));
+    out.guard = UINT64_C(0xabcdef1276543210);
+    int n = dev->poll(dev, &out.ev, 1);
+    if (n != 1 || out.guard != UINT64_C(0xabcdef1276543210) ||
+        out.ev.version != 104 || out.ev.sensor != handle ||
+        out.ev.type != type || out.ev.timestamp <= 0 ||
+        (type == 19 ? out.ev.step[0] != steps : out.ev.values[0] != value)) {
+        fprintf(stderr, "context event mismatch n=%d handle=%d type=%d expected=%d/%d\n",
+                n, out.ev.sensor, out.ev.type, handle, type);
+        return 0;
+    }
+    return 1;
+}
+
+static int sensors_context(const hw_module_t *module)
+{
+    struct statfs fs;
+    struct stat st;
+    if (statfs(SSP_FIXTURE, &fs) || (unsigned long)fs.f_type == 0x62656572UL ||
+        !fixture_read(SSP_FIXTURE "/.galwear-fixture", "GALWEAR_SSP_FIXTURE_V1\n") ||
+        !regular_fixture(SSP_ENABLE) || !fixture_read(SSP_ENABLE, "262144") ||
+        !missing("/dev/input") || lstat(CONTEXT_FIFO, &st) || !S_ISFIFO(st.st_mode))
+        return 50;
+    int fd = open(CONTEXT_FIFO, O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 51;
+    hw_device_t *base = NULL;
+    if (module->methods->open(module, "poll", &base) || !base ||
+        base->tag != HARDWARE_DEVICE_TAG || base->module != module ||
+        base->version != HARDWARE_DEVICE_API_VERSION_2(1, 3, 1) || !base->close)
+        return 52;
+    struct probe_sensors_v1 *v1 = (struct probe_sensors_v1 *)base;
+    struct sensors_poll_device_t *dev = &v1->v0;
+    if (!dev->activate || !dev->poll || !v1->flush) return 53;
+    for (int h = 7; h <= 12; ++h)
+        if (dev->activate(dev, h, 1)) return 54;
+    /* Initial reports for both step counters, before any FIFO data. */
+    if (!context_event(dev, 11, 19, 0, 0) || !context_event(dev, 12, 19, 0, 0))
+        return 55;
+    static const char first[] = "W 100\nD 101\nO 1\nO 1\nO 2\nP 5\nP 7\nP 1\n";
+    if (!context_send(fd, first, sizeof(first)-1) ||
+        !context_event(dev, 7, 26, 1, 0) ||
+        !context_event(dev, 9, 65537, 1, 0) ||
+        !context_event(dev, 8, 34, 1, 0) ||
+        !context_event(dev, 8, 34, 0, 0) ||
+        !context_event(dev, 11, 19, 0, 5) ||
+        !context_event(dev, 12, 19, 0, 5) ||
+        !context_event(dev, 11, 19, 0, 7) ||
+        !context_event(dev, 12, 19, 0, 7) ||
+        !context_event(dev, 10, 18, 1, 0) ||
+        !context_event(dev, 10, 18, 1, 0) ||
+        !context_event(dev, 11, 19, 0, 8) ||
+        !context_event(dev, 12, 19, 0, 8) ||
+        !context_event(dev, 10, 18, 1, 0))
+        return 56;
+    /* Malformed, NUL-containing and overlong lines must be discarded in full. */
+    static const char invalid[] = "O 9\nP -1\nW 1\0D 2\n";
+    char overlong[300];
+    memset(overlong, '9', sizeof(overlong));
+    overlong[0] = 'W'; overlong[1] = ' ';
+    overlong[sizeof(overlong)-1] = '\n';
+    if (dev->activate(dev, 7, 0) ||
+        !context_send(fd, invalid, sizeof(invalid)-1) ||
+        !context_send(fd, overlong, sizeof(overlong)) ||
+        !context_send(fd, "W 200\nD 201\n", sizeof("W 200\nD 201\n")-1) ||
+        !context_event(dev, 9, 65537, 1, 0))
+        return 57;
+    struct sensors_event_t ev;
+    memset(&ev, 0, sizeof(ev));
+    if (v1->flush(v1, 7) != -EINVAL || v1->flush(v1, 11) ||
+        dev->poll(dev, &ev, 1) != 1 || ev.version != 0x103 ||
+        ev.type != 0 || ev.meta[0] != 1 || ev.meta[1] != 11)
+        return 58;
+    if (base->close(base)) return 59;
+    base = NULL;
+    if (module->methods->open(module, "poll", &base) || !base) return 60;
+    dev = (struct sensors_poll_device_t *)base;
+    if (dev->activate(dev, 11, 1) || !context_event(dev, 11, 19, 0, 8) ||
+        base->close(base) || close(fd) || !fixture_read(SSP_ENABLE, "262144"))
+        return 61;
+    puts("HAL_SENSORS_CONTEXT_PASS single_slot=1 gestures=3 offbody=2 step_events=12 malformed=3 flush=1 reopen=1");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3 && (argc != 4 ||
         (strcmp(argv[3], "--lifecycle") && strcmp(argv[3], "--lights-fixture") &&
-         strcmp(argv[3], "--sensors-fixture")))) return 2;
+         strcmp(argv[3], "--sensors-fixture") && strcmp(argv[3], "--sensors-context")))) return 2;
     if (argc == 4 && !strcmp(argv[3], "--lights-fixture") && strcmp(argv[2], "lights")) return 2;
-    if (argc == 4 && !strcmp(argv[3], "--sensors-fixture") && strcmp(argv[2], "sensors")) return 2;
+    if (argc == 4 && (!strcmp(argv[3], "--sensors-fixture") ||
+        !strcmp(argv[3], "--sensors-context")) && strcmp(argv[2], "sensors")) return 2;
     void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fprintf(stderr, "dlopen failed: %s\n", dlerror());
@@ -283,7 +393,8 @@ int main(int argc, char **argv)
     int rc = 0;
     if (argc == 4)
         rc = !strcmp(argv[3], "--lights-fixture") ? lights_fixture(module) :
-             !strcmp(argv[3], "--sensors-fixture") ? sensors_fixture(module) : lifecycle(module, argv[2]);
+             !strcmp(argv[3], "--sensors-fixture") ? sensors_fixture(module) :
+             !strcmp(argv[3], "--sensors-context") ? sensors_context(module) : lifecycle(module, argv[2]);
     int close_rc = dlclose(handle);
     return rc ? rc : close_rc ? 5 : 0;
 }
