@@ -54,3 +54,15 @@ wait даёт -EIO. Video-mode policy (проверка только wait) не 
 12 host-only сценариев проверяют pinned оригинал и применённый патч.
 Не изменены decon_update_regs, rollback буферов и политика сигнализации
 retire. Физическая проверка sync_file, владения буферами и вывода не проведена.
+
+## Command-mode rejected frame ownership
+
+R800 DTS: psr_mode=2, out_type=0 (DSI command mode). При отказе
+acquire wait default decon_trivial=0 ранее вызывал save_cur_buf_info
+для ещё не применённого кадра и освобождал старый snapshot. Патч
+выбирает существующий acquire_cur_bufs для DSI command mode независимо
+от debug bit: сохраняются старые записи, освобождается отклонённый кадр.
+Video/DP/WB policy и сигнализация retire не изменены. 10 host-only
+случаев используют извлечённые функции pinned patched decon_core.c,
+разные plane counts, пустой кадр и модель следующего принятого кадра.
+Это модель владения ID, не проверка реальных DMA mapping или GPU.
