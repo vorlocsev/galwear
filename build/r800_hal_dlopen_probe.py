@@ -72,19 +72,26 @@ def compile_probe(ndk, hals, output, source_sha):
     subprocess.run([str(cc), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2",
                     "-I"+str(ROOT/"src/hal/include"), str(ROOT/"src/initramfs/r800-hal-probe.c"),
                     "-ldl", "-Wl,--no-undefined", "-o", str(probe)], check=True, timeout=60)
+    shim = output/"libevdev-fixture.so"
+    subprocess.run([str(cc), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2", "-shared", "-fPIC",
+                    str(ROOT/"src/initramfs/r800-evdev-fixture.c"),
+                    "-Wl,-soname,libevdev-fixture.so", "-Wl,--no-undefined", "-o", str(shim)], check=True, timeout=60)
+    shim_raw, shim_info = check(shim, True)
+    if not set(shim_info["needed"]) <= HAL_COMPILE_LIBS:
+        raise ValueError("Unexpected test adapter dependency")
     raw, info = check(probe)
     if not set(info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected probe dependency")
     result = {"status": "ARM32_HAL_DLOPEN_PROBE_COMPILE_ONLY", "source_sha": source_sha,
-              "probe_sha256": sha(raw), "hal_sha256": hashes,
+              "probe_sha256": sha(raw), "evdev_fixture_sha256": sha(shim_raw), "hal_sha256": hashes,
               "runtime_verified": False, "hardware_tested": False, "safe_to_flash": False}
     (output/"hal-probe-evidence.json").write_text(json.dumps(result, indent=2, sort_keys=True)+"\n")
     return result
 
 
 def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=False,
-              lights_fixture=False, sensors_fixture=False, sensors_context=False):
-    if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context)) > 1:
+              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False):
+    if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context, sensors_evdev)) > 1:
         raise ValueError("Choose one probe mode")
     if os.geteuid() == 0:
         raise ValueError("Non-root execution required")
@@ -139,7 +146,21 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             return {p.relative_to(root).as_posix(): ("symlink:"+os.readlink(p) if p.is_symlink() else sha(p.read_bytes()))
                     for p in sorted(root.rglob("*")) if p.is_file() or p.is_symlink()}
         fixture = None
-        if lights_fixture:
+        if sensors_evdev:
+            add(probe_dir/"libevdev-fixture.so", "system/lib/libevdev-fixture.so",
+                evidence["evdev_fixture_sha256"], True)
+            fixture = Path(tmp)/"evdev-ssp"
+            fixture.mkdir()
+            (fixture/".galwear-fixture").write_text("GALWEAR_EVDEV_FIXTURE_V1\n")
+            (fixture/"enable").write_text("1073741824")
+            (fixture/"hrm_lib_poll_delay").write_text("")
+            (root/"sys/class/sensors/ssp_sensor").mkdir(parents=True)
+            inputs = Path(tmp)/"evdev-inputs"
+            inputs.mkdir()
+            (inputs/".galwear-fixture").write_text("GALWEAR_EVDEV_FIXTURE_V1\n")
+            for i in range(6):
+                os.mkfifo(inputs/("event"+str(i)), 0o600)
+        elif lights_fixture:
             fixture = Path(tmp)/"lights-fixture"
             fixture.mkdir()
             (fixture/".galwear-fixture").write_text("GALWEAR_LIGHTS_FIXTURE_V1\n")
@@ -157,7 +178,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         before = snapshot()
         selected = {name: identity for name, identity in HALS.items()
                     if (not lights_fixture or identity == "lights") and
-                       (not (sensors_fixture or sensors_context) or identity == "sensors")}
+                       (not (sensors_fixture or sensors_context or sensors_evdev) or identity == "sensors")}
         for name, identity in selected.items():
             cmd = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
                    "--clearenv", "--ro-bind", str(root), "/", "--ro-bind", qemu, "/qemu",
@@ -177,6 +198,13 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     mounts += ["--bind", str(fixture/"context"), "/dev/r800_context"]
                 cmd[cmd.index("--chdir"):cmd.index("--chdir")] = mounts
                 cmd.append("--sensors-context" if sensors_context else "--sensors-fixture")
+            if sensors_evdev:
+                cmd[cmd.index("--chdir"):cmd.index("--chdir")] = [
+                    "--bind", str(fixture), "/sys/class/sensors/ssp_sensor",
+                    "--bind", str(inputs), "/dev/input"]
+                cmd[cmd.index("/system/bin/hal-probe"):cmd.index("/system/bin/hal-probe")] = [
+                    "-E", "LD_PRELOAD=/system/lib/libevdev-fixture.so"]
+                cmd.append("--sensors-evdev")
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 log = proc.stdout + proc.stderr
@@ -200,10 +228,16 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     fixture_marker = "HAL_SENSORS_CONTEXT_PASS single_slot=1 gestures=3 offbody=2 step_events=12 malformed=3 flush=1 reopen=1"
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
                                   (fixture/"enable").read_bytes() == b"262144")
+                if sensors_evdev:
+                    fixture_marker = "HAL_SENSORS_EVDEV_PASS handles=6 events=8 pressure_reject=1 syn_dropped=1"
+                    fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
+                                  (fixture/"enable").read_bytes() == b"1073741824" and
+                                  (fixture/"hrm_lib_poll_delay").read_bytes() == b"1000000000")
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
-                          (not (lights_fixture or sensors_fixture or sensors_context) or fixture_ok))
-                results[name] = {"status": ("SENSORS_CONTEXT_PASS" if sensors_context else
+                          (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev) or fixture_ok))
+                results[name] = {"status": ("SENSORS_EVDEV_PASS" if sensors_evdev else
+                                             "SENSORS_CONTEXT_PASS" if sensors_context else
                                              "SENSORS_FIXTURE_PASS" if sensors_fixture else
                                              "LIGHTS_FIXTURE_PASS" if lights_fixture else
                                              "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
@@ -216,11 +250,13 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 results[name] = {"status": "REVIEW_REQUIRED", "reason": "Timeout"}
         if snapshot() != before:
             raise ValueError("Guest input changed")
-    expected_status = ("SENSORS_CONTEXT_PASS" if sensors_context else
+    expected_status = ("SENSORS_EVDEV_PASS" if sensors_evdev else
+                       "SENSORS_CONTEXT_PASS" if sensors_context else
                        "SENSORS_FIXTURE_PASS" if sensors_fixture else
                        "LIGHTS_FIXTURE_PASS" if lights_fixture else
                        "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
-    result = {"status": ("ARM32_SENSORS_SYNTHETIC_CONTEXT_ONLY" if sensors_context else
+    result = {"status": ("ARM32_SENSORS_SYNTHETIC_EVDEV_ONLY" if sensors_evdev else
+                         "ARM32_SENSORS_SYNTHETIC_CONTEXT_ONLY" if sensors_context else
                          "ARM32_SENSORS_SYNTHETIC_SSP_ONLY" if sensors_fixture else
                          "ARM32_LIGHTS_SYNTHETIC_SYSFS_ONLY" if lights_fixture else
                          "ARM32_HAL_LIFECYCLE_QEMU_USER_ONLY" if lifecycle
@@ -228,10 +264,13 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         v["status"] == expected_status for v in results.values()) else "REVIEW_REQUIRED",
         "source_sha": evidence["source_sha"], "runtime_sha256": pins,
         "hal_sha256": evidence["hal_sha256"], "results": results,
-        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context,
+        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context or sensors_evdev,
         "lifecycle_requested": lifecycle, "lights_fixture_requested": lights_fixture,
         "sensors_fixture_requested": sensors_fixture, "sensors_context_requested": sensors_context,
         "synthetic_context_events_passed": sensors_context and all(v["status"] == expected_status for v in results.values()),
+        "sensors_evdev_requested": sensors_evdev,
+        "synthetic_evdev_events_passed": sensors_evdev and all(v["status"] == expected_status for v in results.values()),
+        "evdev_fixture_sha256": evidence.get("evdev_fixture_sha256") if sensors_evdev else None,
         "sensor_events_tested": False,
         "hardware_io_methods_tested": False,
         "hardware_tested": False, "safe_to_flash": False}
@@ -254,10 +293,11 @@ def main():
     modes.add_argument("--lights-fixture", action="store_true")
     modes.add_argument("--sensors-fixture", action="store_true")
     modes.add_argument("--sensors-context", action="store_true")
+    modes.add_argument("--sensors-evdev", action="store_true")
     a = p.parse_args()
     result = (compile_probe(a.ndk, a.hals, a.output, a.source_sha) if a.action == "compile"
               else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output,
-                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context))
+                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev))
     print(json.dumps(result, sort_keys=True))
     return 2 if result["status"] == "REVIEW_REQUIRED" else 0
 

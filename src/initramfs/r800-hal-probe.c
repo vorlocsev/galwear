@@ -2,6 +2,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdint.h>
+#include <linux/input.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -363,14 +364,139 @@ static int sensors_context(const hw_module_t *module)
     return 0;
 }
 
+/* Real poll() over synthetic evdev FIFO records. The separately compiled
+ * test adapter implements EVIOCGNAME only for these FIFO inodes. */
+static int send_input(int fd, unsigned short type, unsigned short code, int value)
+{
+    struct input_event ev = {0};
+    ev.type = type; ev.code = code; ev.value = value;
+    return context_send(fd, &ev, sizeof(ev));
+}
+
+static int frame(int fd, int ts_code, const unsigned short *codes,
+                 const int *values, size_t count)
+{
+    for (size_t i = 0; i < count; ++i)
+        if (!send_input(fd, EV_REL, codes[i], values[i])) return 0;
+    if (!send_input(fd, EV_REL, ts_code + 2, 1) ||
+        !send_input(fd, EV_REL, ts_code + 3, 0x2345)) return 0;
+    return send_input(fd, EV_SYN, SYN_REPORT, 0);
+}
+
+static int input_event_matches(struct sensors_poll_device_t *dev, int handle,
+                               int type, const float *values, size_t n, int status)
+{
+    struct { struct sensors_event_t ev; uint64_t guard; } out;
+    memset(&out, 0, sizeof(out));
+    out.guard = UINT64_C(0xabcdef1276543210);
+    int rc = dev->poll(dev, &out.ev, 1);
+    if (rc != 1 || out.guard != UINT64_C(0xabcdef1276543210) ||
+        out.ev.version != 104 || out.ev.sensor != handle ||
+        out.ev.type != type || out.ev.timestamp != INT64_C(0x12345)) {
+        fprintf(stderr, "evdev mismatch handle=%d type=%d rc=%d timestamp=%lld\n",
+                out.ev.sensor, out.ev.type, rc, (long long)out.ev.timestamp);
+        return 0;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        float delta = out.ev.values[i] - values[i];
+        if (!(delta >= -0.0001f && delta <= 0.0001f)) return 0;
+    }
+    if (status != -128) {
+        const int8_t *raw = (const int8_t *)out.ev.values;
+        if (raw[type == 21 ? 4 : 12] != status) return 0;
+    }
+    return 1;
+}
+
+static int sensors_evdev(const hw_module_t *module)
+{
+    struct statfs fs;
+    if (statfs(SSP_FIXTURE, &fs) || (unsigned long)fs.f_type == 0x62656572UL ||
+        !fixture_read(SSP_FIXTURE "/.galwear-fixture", "GALWEAR_EVDEV_FIXTURE_V1\n") ||
+        !fixture_read("/dev/input/.galwear-fixture", "GALWEAR_EVDEV_FIXTURE_V1\n") ||
+        !regular_fixture(SSP_ENABLE) || !fixture_read(SSP_ENABLE, "1073741824"))
+        return 70;
+    int fds[6];
+    for (int i = 0; i < 6; ++i) {
+        char path[64];
+        struct stat st;
+        snprintf(path, sizeof(path), "/dev/input/event%d", i);
+        if (lstat(path, &st) || !S_ISFIFO(st.st_mode)) return 71;
+        fds[i] = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        if (fds[i] < 0) return 72;
+    }
+    hw_device_t *base = NULL;
+    if (module->methods->open(module, "poll", &base) || !base ||
+        base->tag != HARDWARE_DEVICE_TAG || base->module != module ||
+        base->version != HARDWARE_DEVICE_API_VERSION_2(1, 3, 1) || !base->close)
+        return 73;
+    struct sensors_poll_device_t *dev = (struct sensors_poll_device_t *)base;
+    if (!dev->activate || !dev->poll) return 74;
+    for (int h = 1; h <= 6; ++h)
+        if (dev->activate(dev, h, 1)) return 75;
+    /* Newly opened devices discard the first incomplete frame. */
+    for (int i = 0; i < 6; ++i)
+        if (!send_input(fds[i], EV_REL, REL_X, 999) ||
+            !send_input(fds[i], EV_SYN, SYN_REPORT, 0)) return 76;
+    const unsigned short accel[] = {REL_X, REL_Z};
+    const int av[] = {1000, -1000};
+    const float ae[] = {2.3928226f, 0.0f, -2.3928226f};
+    if (!frame(fds[0], REL_Z+1, accel, av, 2) ||
+        !input_event_matches(dev, 1, 1, ae, 3, 3)) return 77;
+    const unsigned short gyro[] = {REL_RX, REL_RY, REL_RZ};
+    const int gv[] = {1000, -500, 100};
+    const float ge[] = {1.2217305f, -0.6108652f, 0.1221731f};
+    if (!frame(fds[1], REL_RZ+1, gyro, gv, 3) ||
+        !input_event_matches(dev, 2, 4, ge, 3, 3)) return 78;
+    const unsigned short pressure[] = {REL_HWHEEL};
+    const int pv[] = {0}, pv2[] = {4096000};
+    const float pe[] = {1000.0f};
+    if (!frame(fds[2], REL_WHEEL+1, pressure, pv, 1) ||
+        !frame(fds[2], REL_WHEEL+1, pressure, pv2, 1) ||
+        !input_event_matches(dev, 3, 6, pe, 1, -128)) return 79;
+    const unsigned short lux[] = {REL_RX};
+    const int lv[] = {124};
+    const float le[] = {123.0f};
+    if (!frame(fds[3], REL_RX+1, lux, lv, 1) ||
+        !input_event_matches(dev, 4, 5, le, 1, -128)) return 80;
+    const unsigned short hr[] = {REL_X};
+    const int hv[] = {73}, hz[] = {1};
+    const float he[] = {72.0f}, hzero[] = {0.0f};
+    if (!frame(fds[4], REL_Z+1, hr, hv, 1) ||
+        !frame(fds[4], REL_Z+1, hr, hz, 1) ||
+        !input_event_matches(dev, 5, 21, he, 1, 3) ||
+        !input_event_matches(dev, 5, 21, hzero, 1, -1)) return 81;
+    const unsigned short uncal[] = {REL_RX, REL_RY, REL_RZ, REL_HWHEEL, REL_DIAL, REL_WHEEL};
+    const int uv[] = {1000, -500, 100, 10, -20, 30};
+    const float ue[] = {1.2217305f, -0.6108652f, 0.1221731f, 0.0122173f, -0.0244346f, 0.0366519f};
+    if (!frame(fds[5], REL_WHEEL+1, uncal, uv, 6) ||
+        !input_event_matches(dev, 6, 16, ue, 6, -128)) return 82;
+    /* SYN_DROPPED invalidates partial frame and the following sync. */
+    const unsigned short ax[] = {REL_X};
+    const int good[] = {100}, bad[] = {9999};
+    const float recovered[] = {0.23928226f, 0.0f, 0.0f};
+    if (!send_input(fds[0], EV_REL, REL_Y, 999) ||
+        !send_input(fds[0], EV_SYN, SYN_DROPPED, 0) ||
+        !frame(fds[0], REL_Z+1, ax, bad, 1) ||
+        !frame(fds[0], REL_Z+1, ax, good, 1) ||
+        !input_event_matches(dev, 1, 1, recovered, 3, 3)) return 83;
+    if (base->close(base) || !fixture_read(SSP_ENABLE, "1073741824")) return 84;
+    for (int i = 0; i < 6; ++i)
+        if (close(fds[i])) return 85;
+    puts("HAL_SENSORS_EVDEV_PASS handles=6 events=8 pressure_reject=1 syn_dropped=1");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3 && (argc != 4 ||
         (strcmp(argv[3], "--lifecycle") && strcmp(argv[3], "--lights-fixture") &&
-         strcmp(argv[3], "--sensors-fixture") && strcmp(argv[3], "--sensors-context")))) return 2;
+         strcmp(argv[3], "--sensors-fixture") && strcmp(argv[3], "--sensors-context") &&
+         strcmp(argv[3], "--sensors-evdev")))) return 2;
     if (argc == 4 && !strcmp(argv[3], "--lights-fixture") && strcmp(argv[2], "lights")) return 2;
     if (argc == 4 && (!strcmp(argv[3], "--sensors-fixture") ||
-        !strcmp(argv[3], "--sensors-context")) && strcmp(argv[2], "sensors")) return 2;
+        !strcmp(argv[3], "--sensors-context") || !strcmp(argv[3], "--sensors-evdev")) &&
+        strcmp(argv[2], "sensors")) return 2;
     void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fprintf(stderr, "dlopen failed: %s\n", dlerror());
@@ -394,7 +520,8 @@ int main(int argc, char **argv)
     if (argc == 4)
         rc = !strcmp(argv[3], "--lights-fixture") ? lights_fixture(module) :
              !strcmp(argv[3], "--sensors-fixture") ? sensors_fixture(module) :
-             !strcmp(argv[3], "--sensors-context") ? sensors_context(module) : lifecycle(module, argv[2]);
+             !strcmp(argv[3], "--sensors-context") ? sensors_context(module) :
+             !strcmp(argv[3], "--sensors-evdev") ? sensors_evdev(module) : lifecycle(module, argv[2]);
     int close_rc = dlclose(handle);
     return rc ? rc : close_rc ? 5 : 0;
 }

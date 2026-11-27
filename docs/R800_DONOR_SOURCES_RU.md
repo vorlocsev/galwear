@@ -504,3 +504,15 @@ step detector, монотонность после сброса P, malformed/NUL
 disabled wrist gesture, flush metadata и сохранение total при reopen.
 Тест ограничен 30s, guest изолирован; EV_REL/SSP MCU и реальные датчики
 не проверяются. Новый CI pending.
+
+
+CI 46033112247 / job 140621646487 exact 2fdc41a: synthetic context PASS.
+Новый --sensors-evdev загружает тестовый libevdev-fixture.so только в
+изолированном QEMU; ioctl EVIOCGNAME(63) сопоставляет шесть частных
+FIFO по inode/device, остальные ioctl отклоняются. Производственный
+Sensors HAL неизменён. Проверки: шесть физических handles, восемь
+синтетических событий, точная timestamp assembly, значения и status,
+нулевые отсутствующие компоненты, отказ нулевого давления, SYN_DROPPED
+recovery и сохранение внешнего бита 30. Adapter не входит в payload.
+Не тестируются реальные evdev driver, MCU, калибровка или аппаратные
+показания. Новый CI pending.

@@ -275,6 +275,14 @@ jobs:
             --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
             --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
             --output "$RUNNER_TEMP/r800-sensors-context" --sensors-context
+      - name: Test Sensors EV_REL frames with synthetic evdev FIFO adapter
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-phh-reference/runtime"
+          python3 build/r800_hal_dlopen_probe.py run \
+            --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
+            --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
+            --output "$RUNNER_TEMP/r800-sensors-evdev" --sensors-evdev
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -287,6 +295,7 @@ jobs:
             ${{ runner.temp }}/r800-lights-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-sensors-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-sensors-context/hal-runtime-evidence.json
+            ${{ runner.temp }}/r800-sensors-evdev/hal-runtime-evidence.json
           if-no-files-found: warn
           retention-days: 7
   overlay-independent:
