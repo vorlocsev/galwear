@@ -109,7 +109,7 @@ jobs:
                 --galwear-commit "$GITHUB_SHA" \
                 --container-image-id "$R800_CONTAINER_IMAGE_ID" \
                 --runner-replica "$R800_REPLICA"
-              python3 /repo/build/r800_kernel_diff_evidence.py --root /scratch/r800-embedded-kernel --output /scratch/r800-kernel-diff-evidence.json
+              python3 /repo/build/r800_kernel_diff_evidence.py --root /scratch/r800-embedded-kernel --include-objects --output /scratch/r800-kernel-diff-evidence.json
               apk info -v > /scratch/apk-after.txt
               python3 /repo/build/r800_apk_inventory.py \
                 --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
@@ -168,7 +168,16 @@ jobs:
           python3 build/r800_kernel_diff_evidence.py \
             --compare-dir "$RUNNER_TEMP/r800-two-builds" \
             --output "$RUNNER_TEMP/r800-kernel-diff-comparison.json"
-          cat "$RUNNER_TEMP/r800-kernel-diff-comparison.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads((Path(os.environ["RUNNER_TEMP"]) / "r800-kernel-diff-comparison.json").read_text())
+          assert report["object_inventory_compared"] is True
+          objects = report.pop("different_objects")
+          report["different_object_count"] = len(objects)
+          report["different_object_paths_first_100"] = sorted(objects)[:100]
+          print(json.dumps(report, indent=2, sort_keys=True))
+          PY
       - name: Compare Image, CPIO, init, compiler, configuration and container hashes
         run: |
           rc=0
