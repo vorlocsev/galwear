@@ -49,11 +49,13 @@ git -C "$tiny" archive HEAD | tar -x -C "$out/tinyalsa"
     git apply "$repo/tools/audio/tinyalsa-2.0.0-sync-ptr.patch"
 )
 python3 "$repo/build/r800_tinyalsa_sync_test.py" "$out/tinyalsa"
-for unit in pcm pcm_hw pcm_plugin snd_card_plugin mixer mixer_hw mixer_plugin; do
+for unit in limits pcm pcm_hw pcm_plugin snd_card_plugin mixer mixer_hw mixer_plugin; do
     "$cc" -std=gnu11 -O2 -fPIC -I"$out/tinyalsa/include" \
         -c "$out/tinyalsa/src/$unit.c" -o "$out/tinyalsa/$unit.o"
 done
 "$toolchain/llvm-ar" rcs "$out/tinyalsa-candidate.a" "$out/tinyalsa/"*.o
+"$toolchain/llvm-nm" --defined-only "$out/tinyalsa-candidate.a" > "$out/tinyalsa-symbols.txt"
+grep -Eq '[[:space:]][Tt][[:space:]]snd_utils_close_dev_node$' "$out/tinyalsa-symbols.txt"
 "$cc" -shared -Wl,--no-undefined -Wl,-soname,audio.primary.r800.so \
     "$out/audio_r800.o" "$out/tinyalsa-candidate.a" -llog -ldl -lm \
     -o "$out/audio.primary.r800.so"
