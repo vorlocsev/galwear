@@ -15,3 +15,14 @@ MEM_IMPORT — union 24 bytes; phandle offset 8, type 16, padding 20.
 Никаких ioctl не вызывается. Не проверяется совместимость донорского
 userspace, фактический compat pointer, job submission, DMA-BUF,
 GPU или физическое устройство. safe_to_flash=false.
+
+## DMA attachment error path
+
+В pinned dma-buf.c dma_buf_attach возвращает ERR_PTR при отказе. R28P0
+kbase_mem_from_umm проверял только NULL. Патч заменяет проверку на
+IS_ERR_OR_NULL, направляя ошибку в существующий no_attachment с dma_buf_put.
+CI проверяет точные blobs, git apply --check и применение только этого
+hunk к временной копии, затем выполняет host-only harness из извлечённых
+строк функции. Исходный guard должен пропустить ERR_PTR; исправленный
+проверяется на успехе, ошибке get, ERR_PTR/NULL attach и отказе после attach.
+Это синтетические указатели и счётчики, не GPU и не kernel runtime.

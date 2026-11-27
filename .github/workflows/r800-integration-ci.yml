@@ -495,6 +495,19 @@ jobs:
           path: ${{ runner.temp }}/kbase-abi/kbase-abi-evidence.json
           if-no-files-found: error
           retention-days: 7
+      - name: Test KBASE DMA attachment error guard on pinned disposable source
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --max-time 90 https://raw.githubusercontent.com/xanderlent/COMBINED_android-kernel-exynos/50db73fc799f20a7120a8b5f653b16cc123d856f/drivers/dma-buf/dma-buf.c -o "$RUNNER_TEMP/kbase-pinned/dma-buf.c"
+          python3 build/r800_kbase_dma_guard.py --mem-source "$RUNNER_TEMP/kbase-pinned/mali_kbase_mem_linux.c" --dma-source "$RUNNER_TEMP/kbase-pinned/dma-buf.c" --patch src/kernel/r800-wearos.patch --scratch "$RUNNER_TEMP/kbase-dma-guard" --source-sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        if: github.ref_name == 'development/r800-integration-20261127'
+        with:
+          name: r800-kbase-dma-guard-evidence
+          path: ${{ runner.temp }}/kbase-dma-guard/dma-guard-evidence.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Compile ARM32 Bionic HAL dlopen metadata probe (no runtime)
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |

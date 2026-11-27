@@ -30455,3 +30455,15 @@ diff --git a/arch/arm64/kernel/smp.c b/arch/arm64/kernel/smp.c
  		irq_enter();
  		ipi_cpu_stop(cpu);
  		irq_exit();
+diff --git a/drivers/gpu/arm/t72x/r28p0/mali_kbase_mem_linux.c b/drivers/gpu/arm/t72x/r28p0/mali_kbase_mem_linux.c
+--- a/drivers/gpu/arm/t72x/r28p0/mali_kbase_mem_linux.c
++++ b/drivers/gpu/arm/t72x/r28p0/mali_kbase_mem_linux.c
+@@ -887,7 +887,7 @@
+ 	if (IS_ERR_OR_NULL(dma_buf))
+ 		goto no_buf;
+ 
+ 	dma_attachment = dma_buf_attach(dma_buf, kctx->kbdev->dev);
+-	if (!dma_attachment)
++	if (IS_ERR_OR_NULL(dma_attachment))
+ 		goto no_attachment;
+ 
