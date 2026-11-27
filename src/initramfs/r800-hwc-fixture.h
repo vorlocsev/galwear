@@ -1,4 +1,5 @@
-/* Test-only HWC open, power transitions and timer VSync. */
+/* Test-only HWC open, power transitions, present guards and timer VSync. */
+#include <stdlib.h>
 static atomic_int hwc_ticks,hwc_bad;
 static atomic_llong hwc_last;
 static void hwc_fixture_vsync(const hwc_procs_t *procs,int disp,int64_t ts)
@@ -17,6 +18,46 @@ static int hwc_wait_ticks(int target)
     }
     return 0;
 }
+/* Exercise the real prepare/set entry points with no usable target.
+ * Pipes are synthetic pollable inputs, not kernel sync_file fences. The
+ * outer probe separately verifies that the framebuffer stays unchanged. */
+static int hwc_present_guard(hwc_composer_device_1_t *dev)
+{
+    int before=fd_count();
+    if (before<0 || !dev->prepare || !dev->set) return 0;
+    hwc_display_contents_1_t *c=calloc(1,sizeof(*c)+sizeof(hwc_layer_1_t));
+    if (!c) return 0;
+    c->numHwLayers=1;
+    hwc_display_contents_1_t *displays[]={c};
+    hwc_layer_1_t *layer=&c->hwLayers[0];
+    int p[2];
+    if (pipe(p)) { free(c); return 0; }
+    layer->compositionType=HWC_FRAMEBUFFER; /* missing final target */
+    layer->acquireFenceFd=p[0];
+    layer->releaseFenceFd=124;
+    c->retireFenceFd=123;
+    if (dev->prepare(dev,1,displays)!=-EINVAL ||
+        dev->set(dev,1,displays)!=-EINVAL ||
+        layer->acquireFenceFd!=p[0] || layer->releaseFenceFd!=124 ||
+        c->retireFenceFd!=123 || fcntl(p[0],F_GETFD)<0) return 0;
+    /* A readable pipe is accepted, but a NULL target cannot be presented. */
+    layer->compositionType=HWC_FRAMEBUFFER_TARGET;
+    layer->releaseFenceFd=c->retireFenceFd=-1;
+    if (write(p[1],"x",1)!=1 || dev->prepare(dev,1,displays) ||
+        dev->set(dev,1,displays) || layer->acquireFenceFd!=-1 ||
+        layer->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
+        fcntl(p[0],F_GETFD)!=-1 || errno!=EBADF) return 0;
+    if (close(p[1]) || pipe(p)) return 0;
+    /* A hung-up pipe must be consumed without presenting. */
+    layer->acquireFenceFd=p[0];
+    if (close(p[1]) || dev->prepare(dev,1,displays) ||
+        dev->set(dev,1,displays) || layer->acquireFenceFd!=-1 ||
+        layer->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
+        fcntl(p[0],F_GETFD)!=-1 || errno!=EBADF) return 0;
+    free(c);
+    return fd_count()==before;
+}
+
 static int hwc_fixture(const hw_module_t *module)
 {
     struct stat st;
@@ -110,6 +151,10 @@ static int hwc_fixture(const hw_module_t *module)
         if (dev->setPowerMode(dev,0,HWC_POWER_MODE_DOZE)!=-EIO ||
             dev->setPowerMode(dev,0,HWC_POWER_MODE_NORMAL) ||
             !fixture_read("/sys/devices/platform/148e0000.dsim/cmd_rw","2")) return 177;
+        if (!hwc_present_guard(dev)) {
+            fprintf(stderr,"HWC present guard failed cycle=%d\n",cycle);
+            return 182;
+        }
         dev->registerProcs(dev,&procs);
         int prior=atomic_load(&hwc_ticks);
         if (dev->eventControl(dev,0,HWC_EVENT_VSYNC,1) ||
@@ -126,6 +171,7 @@ static int hwc_fixture(const hw_module_t *module)
     if (get(0) || get(1)!=5 || get(2)!=5 || get(3)!=4 ||
         get(5)!=12 || get(6)!=4 || get(7)!=4 || atomic_load(&hwc_ticks)<12)
         return 181;
+    puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
     puts("HAL_HWC_FIXTURE_PASS geometry=360x360 cycles=4 invalid_bpp=1 power_recovery=4 timer_vsync=4");
     return 0;
 }
