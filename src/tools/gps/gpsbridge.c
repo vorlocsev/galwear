@@ -307,7 +307,9 @@ static void inject_last(void)
 		return;
 	age = now - t;
 	r = gps->inject_location(lat, lon, acc);
-	printf("inject_location (last fix, %lld min old) acc %.0f -> %d\n", age / 60000,
+	/* Keep the diagnostic age in milliseconds: freestanding ARM32 must
+	 * not introduce an implicit compiler runtime for 64-bit division. */
+	printf("inject_location (last fix, %lld ms old) acc %.0f -> %d\n", age,
 	       (double)acc, r);
 	fflush(0);
 }

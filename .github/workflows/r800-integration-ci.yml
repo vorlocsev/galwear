@@ -76,6 +76,11 @@ jobs:
             clang --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 -DR800_XTRA_ABI="$abi" --no-default-config -nostdinc -O2 -fno-pic -fno-stack-protector -fno-builtin -ffreestanding -c src/tools/gps/gpsbridge.c -o "$tmp/bridge-$abi.o"
             readelf -h "$tmp/bridge-$abi.o" > "$tmp/bridge-$abi.header"
             readelf -rW "$tmp/bridge-$abi.o" > "$tmp/bridge-$abi.reloc"
+            readelf -sW "$tmp/bridge-$abi.o" > "$tmp/bridge-$abi.symbols"
+            if grep -Eq 'UND[[:space:]]+__aeabi_(l|ul)divmod([[:space:]]|$)' "$tmp/bridge-$abi.symbols"; then
+              echo "Unexpected 64-bit division helper in freestanding GPSBridge" >&2
+              exit 2
+            fi
             grep -Eq 'R_ARM_MOVW_ABS_NC[[:space:]].*[[:space:]]main([[:space:]]|$)' "$tmp/bridge-$abi.reloc"
             grep -Eq 'R_ARM_MOVT_ABS[[:space:]].*[[:space:]]main([[:space:]]|$)' "$tmp/bridge-$abi.reloc"
             grep -Eq 'Class:[[:space:]]*ELF32' "$tmp/bridge-$abi.header"
