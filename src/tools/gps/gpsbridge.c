@@ -552,7 +552,9 @@ __attribute__((naked, noreturn)) void _start(void)
 		"mov ip, #0\n"
 		"push {ip}\n"		/* fini */
 		"mov r3, #0\n"		/* init */
-		"ldr r0, =main\n"
+		/* ARMv7 absolute relocations: do not depend on a distant literal pool. */
+		"movw r0, #:lower16:main\n"
+		"movt r0, #:upper16:main\n"
 		"bl __libc_start_main\n"
 		"udf #0\n");
 }
