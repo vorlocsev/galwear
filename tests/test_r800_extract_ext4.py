@@ -523,7 +523,10 @@ namespace.runtime.search.paths = /apex/com.android.runtime/${LIB}/bionic
         result = extract(vendor, self.output, "vendor-identity", vendor_sha,
                          self.image, system_sha, include_selinux=True)
         comparison = result["vendor_identity"]["selinux_inventory"]["comparison"]
-        self.assertEqual(comparison["status"], "SELECTED_SELINUX_METADATA_ONLY")
+        self.assertEqual(result["vendor_identity"]["selinux_inventory"]["vendor"]["files"]
+                         ["plat_sepolicy_vers.txt"]["version"], "28.0")
+        self.assertEqual(comparison["status"], "SELECTED_SELINUX_METADATA_ONLY",
+                         result["vendor_identity"]["selinux_inventory"])
         self.assertTrue(comparison["platform_policy_ids_match"])
         self.assertFalse(comparison["policy_loaded_verified"])
         self.assertFalse(comparison["safe_to_flash"])
@@ -534,6 +537,16 @@ namespace.runtime.search.paths = /apex/com.android.runtime/${LIB}/bionic
         comparison = result["vendor_identity"]["selinux_inventory"]["comparison"]
         self.assertEqual(comparison["status"], "REVIEW_REQUIRED")
         self.assertFalse(comparison["platform_policy_ids_match"])
+
+    def test_selinux_policy_version_marker_rejects_non_dot_separator(self):
+        self.put("etc/selinux/plat_sepolicy_vers.txt", b"28x0")
+        sha = self.make_image()
+        result = extract(self.image, self.output, "vendor-identity", sha,
+                         include_selinux=True)
+        row = result["vendor_identity"]["selinux_inventory"]["vendor"]["files"]["plat_sepolicy_vers.txt"]
+        self.assertEqual(row["status"], "REVIEW_REQUIRED")
+        self.assertIn("Invalid policy version marker", row["reason"])
+        self.assertFalse(result["safe_to_flash"])
 
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")

@@ -636,7 +636,7 @@ def selected_apex_payloads(tool, snapshot, scratch, vndk):
 
 def selected_selinux_inventory(tool, snapshot, scratch, partition):
     """Read fixed SELinux files from one verified donor snapshot, metadata only."""
-    from r800_selinux_inventory import policy_header, contexts, MAX_POLICY, MAX_TEXT, CONTEXT
+    from r800_selinux_inventory import policy_header, contexts, MAX_POLICY, MAX_TEXT, CONTEXT, VERSION
     base = "/etc/selinux/"
     prefixes = ("", "/system") if partition == "system" else ("", "/vendor")
     suffix = "plat_sepolicy_and_mapping.sha256"
@@ -686,7 +686,7 @@ def selected_selinux_inventory(tool, snapshot, scratch, partition):
                 row["identifier"] = value
             elif kind == "version":
                 value = raw.decode("ascii").strip()
-                if not re.fullmatch(r"[0-9]{1,4}\\.[0-9]{1,4}", value):
+                if not VERSION.fullmatch(value):
                     raise ValueError("Invalid policy version marker")
                 row["version"] = value
             elif kind.endswith("_contexts"):
