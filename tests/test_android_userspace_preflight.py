@@ -5,6 +5,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
 import r800_android_userspace_preflight as audit
@@ -99,6 +100,94 @@ class UserspaceTests(unittest.TestCase):
     def test_nonexecutable_init(self):
         (self.root / "init").chmod(0o644)
         self.assertTrue(audit.audit(self.root, self.config)["errors"])
+
+
+
+class RegularReadTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "donor"
+        self.path.write_bytes(b"abcd")
+
+    def test_regular_at_limit(self):
+        self.assertEqual(audit.read_regular(self.path, 4), b"abcd")
+
+    def test_oversized_and_empty(self):
+        with self.assertRaises(ValueError):
+            audit.read_regular(self.path, 3)
+        self.path.write_bytes(b"")
+        with self.assertRaises(ValueError):
+            audit.read_regular(self.path, 4)
+
+    def test_symlink_and_fifo(self):
+        target = self.path.with_name("target")
+        self.path.rename(target)
+        self.path.symlink_to(target)
+        with self.assertRaises(ValueError):
+            audit.read_regular(self.path, 4)
+        self.path.unlink()
+        os.mkfifo(self.path)
+        with self.assertRaises(ValueError):
+            audit.read_regular(self.path, 4)
+
+    def test_same_size_replacement_before_open(self):
+        real_open = os.open
+
+        def swap(path, flags):
+            replacement = self.path.with_name("replacement")
+            replacement.write_bytes(b"evil")
+            replacement.replace(self.path)
+            return real_open(path, flags)
+
+        with mock.patch.object(audit.os, "open", side_effect=swap):
+            with self.assertRaisesRegex(ValueError, "before reading"):
+                audit.read_regular(self.path, 4)
+
+    def test_symlink_replacement_before_open(self):
+        real_open = os.open
+        target = self.path.with_name("target")
+        target.write_bytes(b"evil")
+
+        def swap(path, flags):
+            self.path.unlink()
+            self.path.symlink_to(target)
+            return real_open(path, flags)
+
+        with mock.patch.object(audit.os, "open", side_effect=swap):
+            with self.assertRaises(OSError):
+                audit.read_regular(self.path, 4)
+
+    def test_same_size_mutation_during_read(self):
+        real_read = os.read
+
+        def mutate(fd, size):
+            data = real_read(fd, size)
+            if data:
+                self.path.write_bytes(b"evil")
+                # Force distinct metadata even on coarse timestamp filesystems.
+                old = self.path.stat()
+                os.utime(self.path, ns=(old.st_atime_ns, old.st_mtime_ns - 10**9))
+            return data
+
+        with mock.patch.object(audit.os, "read", side_effect=mutate):
+            with self.assertRaisesRegex(ValueError, "while reading"):
+                audit.read_regular(self.path, 4)
+
+    def test_path_replacement_during_read(self):
+        real_read = os.read
+
+        def swap(fd, size):
+            data = real_read(fd, size)
+            if data:
+                replacement = self.path.with_name("replacement")
+                replacement.write_bytes(b"evil")
+                replacement.replace(self.path)
+            return data
+
+        with mock.patch.object(audit.os, "read", side_effect=swap):
+            with self.assertRaisesRegex(ValueError, "while reading"):
+                audit.read_regular(self.path, 4)
 
 
 if __name__ == "__main__":
