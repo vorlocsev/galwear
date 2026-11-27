@@ -69,13 +69,105 @@ def snapshot(root):
     }
 
 
+def read_report(path):
+    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 4 * 1024 * 1024:
+        raise ValueError("Invalid diagnostic report: " + path.name)
+
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("Duplicate JSON key")
+            obj[key] = value
+        return obj
+
+    return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique)
+
+
+def validate_diagnostic(report, manifest):
+    from r800_reproducibility_audit import SHA256, validate_manifest
+
+    validate_manifest(manifest)
+    if not isinstance(report, dict) or report.get("schema") != "galwear-kernel-diagnostic-v1":
+        raise ValueError("Unknown diagnostic schema")
+    if report.get("safe_to_flash") is not False or report.get("block_bytes") != BLOCK:
+        raise ValueError("Invalid diagnostic flags or block size")
+    for field in ("image_sha256", "image_bytes"):
+        if type(report.get(field)) is not type(manifest[field]) or report[field] != manifest[field]:
+            raise ValueError("Diagnostic not bound to Image manifest: " + field)
+    blocks = report.get("blocks")
+    if not isinstance(blocks, list) or len(blocks) != (manifest["image_bytes"] + BLOCK - 1) // BLOCK:
+        raise ValueError("Incorrect Image block count")
+    if not all(isinstance(value, str) and SHA256.fullmatch(value) for value in blocks):
+        raise ValueError("Invalid Image block hash")
+    entries = report.get("sections")
+    if not isinstance(entries, dict) or not 0 < len(entries) <= 4096:
+        raise ValueError("Invalid section inventory")
+    for name, row in entries.items():
+        if not isinstance(name, str) or not name or not name.isascii() or not name.isprintable():
+            raise ValueError("Invalid section name")
+        if not isinstance(row, dict) or set(row) != {"address", "bytes", "sha256"}:
+            raise ValueError("Invalid section record")
+        if (type(row["address"]) is not int or not 0 <= row["address"] < 2**64 or
+                type(row["bytes"]) is not int or not 0 <= row["bytes"] <= MAX_FILE or
+                not isinstance(row["sha256"], str) or not SHA256.fullmatch(row["sha256"])):
+            raise ValueError("Invalid section metadata")
+
+
+def compare(first, second, image_a, image_b):
+    validate_diagnostic(first, image_a)
+    validate_diagnostic(second, image_b)
+    for field in ("galwear_commit", "run_id", "run_attempt"):
+        if image_a[field] != image_b[field]:
+            raise ValueError("Diagnostic build identity mismatch: " + field)
+    if (image_a["runner_replica"], image_b["runner_replica"]) != ("a", "b"):
+        raise ValueError("Expected distinct matrix replicas a and b")
+    a, b = first["blocks"], second["blocks"]
+    changed = [i for i in range(max(len(a), len(b)))
+               if i >= len(a) or i >= len(b) or a[i] != b[i]]
+    equal = image_a["image_sha256"] == image_b["image_sha256"]
+    if equal != (not changed and first["image_bytes"] == second["image_bytes"]):
+        raise ValueError("Inconsistent whole Image and block hashes")
+    sa, sb = first["sections"], second["sections"]
+    differences = {}
+    for name in sorted(sa.keys() | sb.keys()):
+        if sa.get(name) != sb.get(name):
+            differences[name] = {"a": sa.get(name), "b": sb.get(name)}
+    return {
+        "schema": "galwear-kernel-diagnostic-comparison-v1",
+        "status": "IMAGE_HASH_MATCH" if equal else "IMAGE_HASH_MISMATCH",
+        "galwear_commit": image_a["galwear_commit"],
+        "run_id": image_a["run_id"],
+        "run_attempt": image_a["run_attempt"],
+        "block_bytes": BLOCK,
+        "different_blocks": len(changed),
+        "first_different_block_offset": changed[0] * BLOCK if changed else None,
+        "last_different_block_offset": changed[-1] * BLOCK if changed else None,
+        "different_block_offsets": [i * BLOCK for i in changed],
+        "different_sections": differences,
+        "diagnostic_only": True,
+        "safe_to_flash": False,
+    }
+
+
+def compare_directory(root):
+    a, b = (root / ("r800-image-evidence-" + replica) for replica in ("a", "b"))
+    return compare(read_report(a / "r800-kernel-diff-evidence.json"),
+                   read_report(b / "r800-kernel-diff-evidence.json"),
+                   read_report(a / "r800-image-repeatability.json"),
+                   read_report(b / "r800-image-repeatability.json"))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--root", required=True, type=Path)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--root", type=Path)
+    mode.add_argument("--compare-dir", type=Path)
     p.add_argument("--output", required=True, type=Path)
     a = p.parse_args()
+    result = snapshot(a.root) if a.root else compare_directory(a.compare_dir)
     with a.output.open("x", encoding="utf-8") as f:
-        json.dump(snapshot(a.root), f, indent=2, sort_keys=True)
+        json.dump(result, f, indent=2, sort_keys=True)
         f.write("\n")
 
 
