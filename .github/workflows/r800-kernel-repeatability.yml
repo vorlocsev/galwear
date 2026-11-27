@@ -163,6 +163,12 @@ jobs:
             --second "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-apk-inventory.json" \
             --image-a "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-a/r800-image-repeatability.json" \
             --image-b "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json"
+      - name: Localize kernel differences before strict comparison
+        run: |
+          python3 build/r800_kernel_diff_evidence.py \
+            --compare-dir "$RUNNER_TEMP/r800-two-builds" \
+            --output "$RUNNER_TEMP/r800-kernel-diff-comparison.json"
+          cat "$RUNNER_TEMP/r800-kernel-diff-comparison.json"
       - name: Compare Image, CPIO, init, compiler, configuration and container hashes
         run: |
           rc=0
@@ -196,5 +202,6 @@ jobs:
           path: |
             ${{ runner.temp }}/r800-two-image-comparison.json
             ${{ runner.temp }}/r800-apk-comparison.json
+            ${{ runner.temp }}/r800-kernel-diff-comparison.json
           if-no-files-found: warn
           retention-days: 7
