@@ -95,11 +95,18 @@ def compile_probe(ndk, hals, output, source_sha):
     hwc_raw, hwc_info = check(hwc_shim, True)
     if not set(hwc_info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected HWC test adapter dependency")
+    gralloc = output/"libhardware.so"
+    subprocess.run([str(cc), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2", "-shared", "-fPIC",
+                    "-I"+str(ROOT/"src/hal/include"), str(ROOT/"src/initramfs/r800-gralloc-fixture.c"),
+                    "-Wl,-soname,libhardware.so", "-Wl,--no-undefined", "-o", str(gralloc)], check=True, timeout=60)
+    gralloc_raw, gralloc_info = check(gralloc, True)
+    if not set(gralloc_info["needed"]) <= HAL_COMPILE_LIBS:
+        raise ValueError("Unexpected gralloc test adapter dependency")
     raw, info = check(probe)
     if not set(info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected probe dependency")
     result = {"status": "ARM32_HAL_DLOPEN_PROBE_COMPILE_ONLY", "source_sha": source_sha,
-              "probe_sha256": sha(raw), "evdev_fixture_sha256": sha(shim_raw), "pcm_fixture_sha256": sha(pcm_raw), "hwc_fixture_sha256": sha(hwc_raw), "hal_sha256": hashes,
+              "probe_sha256": sha(raw), "gralloc_fixture_sha256": sha(gralloc_raw), "evdev_fixture_sha256": sha(shim_raw), "pcm_fixture_sha256": sha(pcm_raw), "hwc_fixture_sha256": sha(hwc_raw), "hal_sha256": hashes,
               "runtime_verified": False, "hardware_tested": False, "safe_to_flash": False}
     (output/"hal-probe-evidence.json").write_text(json.dumps(result, indent=2, sort_keys=True)+"\n")
     return result
@@ -165,10 +172,20 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         if hwc_fixture:
             add(probe_dir/"libhwc-fixture.so", "system/lib/libhwc-fixture.so",
                 evidence["hwc_fixture_sha256"], True)
+            add(probe_dir/"libhardware.so", "system/lib/libhardware.so",
+                evidence["gralloc_fixture_sha256"], True)
             fixture = Path(tmp)/"hwc-fb"
             fixture.mkdir()
             (fixture/".galwear-fixture").write_text("GALWEAR_HWC_FIXTURE_V1\n")
             (fixture/"fb0").write_bytes(bytes(360*720*4))
+            raw_rows = [b"".join(bytes((x & 255, y & 255, (x+y) & 255, 255))
+                                 for x in range(360)) for y in range(360)]
+            pixel_input = b"".join(row + bytes([0xa5])*32 for row in raw_rows)
+            (fixture/"pixels").write_bytes(pixel_input)
+            (fixture/"pixels").chmod(0o444)
+            swapped = b"".join(bytes(((x+y) & 255, y & 255, x & 255, 255))
+                               for y in range(360) for x in range(360))
+            expected_fb = b"".join(raw_rows) + swapped
             dsim = Path(tmp)/"hwc-dsim"
             dsim.mkdir()
             (dsim/".galwear-fixture").write_text("GALWEAR_DSIM_FIXTURE_V1\n")
@@ -302,7 +319,10 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 if hwc_fixture:
                     fixture_marker = "HAL_HWC_FIXTURE_PASS geometry=360x360 cycles=4 invalid_bpp=1 power_recovery=4 timer_vsync=4"
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
-                                  (fixture/"fb0").read_bytes() == bytes(360*720*4) and
+                                  log.splitlines().count("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4") == 1 and
+                                  log.splitlines().count("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8") == 1 and
+                                  (fixture/"fb0").read_bytes() == expected_fb and
+                                  (fixture/"pixels").read_bytes() == pixel_input and
                                   (dsim/"cmd_rw").read_bytes() == b"2")
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
@@ -369,6 +389,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "hwc_fixture_requested": hwc_fixture,
         "hwc_synthetic_fb_lifecycle_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_fixture_sha256": evidence.get("hwc_fixture_sha256") if hwc_fixture else None,
+        "hwc_synthetic_cpu_present_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
+        "gralloc_fixture_sha256": evidence.get("gralloc_fixture_sha256") if hwc_fixture else None,
         "hwc_frame_present_verified": False, "hwc_hardware_verified": False,
         "sensor_events_tested": False,
         "hardware_io_methods_tested": False,

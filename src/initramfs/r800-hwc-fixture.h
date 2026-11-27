@@ -1,5 +1,6 @@
 /* Test-only HWC open, power transitions, present guards and timer VSync. */
 #include <stdlib.h>
+#include <hardware/gralloc.h>
 static atomic_int hwc_ticks,hwc_bad;
 static atomic_llong hwc_last;
 static void hwc_fixture_vsync(const hwc_procs_t *procs,int disp,int64_t ts)
@@ -20,7 +21,7 @@ static int hwc_wait_ticks(int target)
 }
 /* Exercise the real prepare/set entry points with no usable target.
  * Pipes are synthetic pollable inputs, not kernel sync_file fences. The
- * outer probe separately verifies that the framebuffer stays unchanged. */
+ * caller checks unchanged framebuffer bytes before and after this test. */
 static int hwc_present_guard(hwc_composer_device_1_t *dev)
 {
     int before=fd_count();
@@ -56,6 +57,56 @@ static int hwc_present_guard(hwc_composer_device_1_t *dev)
         fcntl(p[0],F_GETFD)!=-1 || errno!=EBADF) return 0;
     free(c);
     return fd_count()==before;
+}
+
+/* Compare every visible pixel; format 0 = zero, 1 = raw, 2 = R/B swapped. */
+static int hwc_fb_matches(int first,int second)
+{
+    int fd=open("/dev/graphics/fb0",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if (fd<0) return 0;
+    unsigned char row[360*4];
+    int ok=1;
+    for (int half=0;ok && half<2;++half) {
+        int fmt=half?second:first;
+        for (int y=0;ok && y<360;++y) {
+            if (pread(fd,row,sizeof(row),(off_t)(half*360+y)*sizeof(row))!=(ssize_t)sizeof(row)) { ok=0; break; }
+            for (int x=0;x<360;++x) {
+                unsigned char r=(unsigned char)x,g=(unsigned char)y,b=(unsigned char)(x+y);
+                unsigned char want[4]={0,0,0,0};
+                if (fmt) {
+                    want[0]=fmt==1?r:b; want[1]=g; want[2]=fmt==1?b:r; want[3]=255;
+                }
+                if (memcmp(row+x*4,want,4)) { ok=0; break; }
+            }
+        }
+    }
+    return close(fd)==0 && ok;
+}
+static int hwc_cpu_present(hwc_composer_device_1_t *dev,int cycle)
+{
+    int before=fd_count();
+    int fd=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    struct stat s;
+    if (before<0 || fd<0 || fstat(fd,&s) || !S_ISREG(s.st_mode) || s.st_size!=368*360*4) return 0;
+    native_handle_t *buf=calloc(1,sizeof(*buf)+5*sizeof(int));
+    hwc_display_contents_1_t *c=calloc(1,sizeof(*c)+sizeof(hwc_layer_1_t));
+    if (!buf || !c) return 0;
+    buf->version=sizeof(*buf); buf->numFds=1; buf->numInts=4;
+    buf->data[0]=fd; buf->data[2]=360; buf->data[3]=360; buf->data[4]=368;
+    c->numHwLayers=1;
+    hwc_display_contents_1_t *displays[]={c};
+    hwc_layer_1_t *l=&c->hwLayers[0];
+    l->compositionType=HWC_FRAMEBUFFER_TARGET;
+    l->handle=buf;
+    l->acquireFenceFd=l->releaseFenceFd=c->retireFenceFd=-1;
+    for (int i=0;i<2;++i) {
+        buf->data[1]=i?HAL_PIXEL_FORMAT_BGRA_8888:HAL_PIXEL_FORMAT_RGBA_8888;
+        if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
+            l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
+            fcntl(fd,F_GETFD)<0 || !hwc_fb_matches(i||cycle?1:0,2)) return 0;
+    }
+    free(c); free(buf);
+    return close(fd)==0 && fd_count()==before;
 }
 
 static int hwc_fixture(const hw_module_t *module)
@@ -151,9 +202,14 @@ static int hwc_fixture(const hw_module_t *module)
         if (dev->setPowerMode(dev,0,HWC_POWER_MODE_DOZE)!=-EIO ||
             dev->setPowerMode(dev,0,HWC_POWER_MODE_NORMAL) ||
             !fixture_read("/sys/devices/platform/148e0000.dsim/cmd_rw","2")) return 177;
-        if (!hwc_present_guard(dev)) {
+        if (!hwc_fb_matches(cycle?1:0,cycle?2:0) || !hwc_present_guard(dev) ||
+            !hwc_fb_matches(cycle?1:0,cycle?2:0)) {
             fprintf(stderr,"HWC present guard failed cycle=%d\n",cycle);
             return 182;
+        }
+        if (!hwc_cpu_present(dev,cycle) || get(8)!=(unsigned int)(2*(cycle+1))) {
+            fprintf(stderr,"HWC CPU present failed cycle=%d pans=%u\n",cycle,get(8));
+            return 183;
         }
         dev->registerProcs(dev,&procs);
         int prior=atomic_load(&hwc_ticks);
@@ -172,6 +228,7 @@ static int hwc_fixture(const hw_module_t *module)
         get(5)!=12 || get(6)!=4 || get(7)!=4 || atomic_load(&hwc_ticks)<12)
         return 181;
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
+    puts("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8");
     puts("HAL_HWC_FIXTURE_PASS geometry=360x360 cycles=4 invalid_bpp=1 power_recovery=4 timer_vsync=4");
     return 0;
 }

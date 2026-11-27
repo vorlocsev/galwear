@@ -15,7 +15,7 @@
 #define FB_PATH "/dev/graphics/fb0"
 #define VSYNC_CMD _IOW('F',206,uint32_t)
 #define POWER_CMD _IOW('F',223,uint32_t)
-static atomic_uint bad, invalid_geometry, fail_power, fixed, variable, wake, blanks, power, vsync_on, vsync_off;
+static atomic_uint bad, invalid_geometry, fail_power, fixed, variable, wake, blanks, power, vsync_on, vsync_off, pans;
 unsigned int r800_hwc_fixture_get(unsigned int k)
 {
     switch(k) {
@@ -27,6 +27,7 @@ unsigned int r800_hwc_fixture_get(unsigned int k)
     case 5: return power;
     case 6: return vsync_on;
     case 7: return vsync_off;
+    case 8: return pans;
     default: return UINT32_MAX;
     }
 }
@@ -40,6 +41,7 @@ int __system_property_get(const char *name,char *value)
     const char *v="";
     if (!strcmp(name,"debug.r800.layer_stride")) v="96";
     else if (!strcmp(name,"debug.r800.realblank")) v="1";
+    else if (!strcmp(name,"debug.r800.zerocopy")) v="0";
     strcpy(value,v);
     return (int)strlen(v);
 }
@@ -94,6 +96,13 @@ int ioctl(int fd,int request,...)
         const struct fb_var_screeninfo *v=arg;
         if (v->xres!=360 || v->yres!=360 || v->bits_per_pixel!=32) break;
         ++wake; return 0;
+    }
+    case FBIOPAN_DISPLAY: {
+        const struct fb_var_screeninfo *v=arg;
+        unsigned int want=(atomic_load(&pans)%2==0)?360:0;
+        if (v->xoffset || v->yoffset!=want || v->xres!=360 || v->yres!=360 ||
+            v->bits_per_pixel!=32) break;
+        ++pans; return 0;
     }
     case VSYNC_CMD: {
         uint32_t v=*(uint32_t *)arg;
