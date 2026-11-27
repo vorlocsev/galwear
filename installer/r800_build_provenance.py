@@ -29,7 +29,7 @@ REQUIRED_COMBINATION = frozenset((*COPIED_FROM_COMBINATION, "user.img", "csc.img
 # mkpayload-release.sh must strip flags from the *device's* /android tree.
 NEVER_SHIP_ANDROID_FILES = frozenset((
     "DEV", "STAY", "SLEEP", "CPUIDLE_DEEP", "OVERLAY",
-    "gemini.tries", "userdata.img", "RESET_DATA",
+    "gemini.tries", "userdata.img", "RESET_DATA", "TZTRACE", "GPU_SCALE", "DIAG",
 ))
 SOURCE_FILES = (
     "build/mkrelease.sh",
@@ -237,14 +237,14 @@ def prebuild(release: Path) -> dict:
     }
 
 
-def finalize(release: Path, previous: dict) -> dict:
+def finalize(release: Path, previous: dict, package: Path | None = None) -> dict:
     """Require identical inputs since preflight; compare final recovery images."""
     if previous.get("schema") != SCHEMA or previous.get("status") != "PREBUILD_INPUTS_CHECKED":
         raise SafetyError("Missing/invalid initial build evidence")
     current = prebuild(release)
     if previous["sources"] != current["sources"] or previous["inputs"] != current["inputs"]:
         raise SafetyError("Build input/source changed since preflight")
-    package = release / RELEASE_IMAGE
+    package = release / RELEASE_IMAGE if package is None else package
     members = preflight_file(package)
     comparison = audit_release(package, release / IMAGE_FILES[0])
     result = dict(current)
@@ -266,6 +266,7 @@ def main(argv=None) -> int:
     parser.add_argument("--release-tree", type=Path, required=True)
     parser.add_argument("--input-manifest", type=Path,
                         help="Preflight JSON for finalize")
+    parser.add_argument("--package", type=Path, help="Explicit experimental archive for finalize")
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -275,7 +276,7 @@ def main(argv=None) -> int:
             if args.input_manifest is None:
                 raise SafetyError("Finalize requires --input-manifest")
             result = finalize(args.release_tree,
-                              json.loads(args.input_manifest.read_text(encoding="utf-8")))
+                              json.loads(args.input_manifest.read_text(encoding="utf-8")), args.package)
         args.report.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n",
                                encoding="utf-8")
         print(f"[PASS] {result['status']}; NOT authenticity or flash safety proof.")
