@@ -17,7 +17,7 @@ from r800_peripheral_firmware import REQUIRED, check_bytes
 from r800_android_userspace_preflight import read_regular
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "installer"))
-from r800_build_provenance import validate_payload
+from r800_build_provenance import validate_payload, NEVER_SHIP_ANDROID_FILES
 
 MAX_BYTES = 1800 * 1024**2
 MAX_FILES = 30000
