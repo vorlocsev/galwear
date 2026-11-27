@@ -12,7 +12,7 @@ MAX_FILE = 512 * 1024 * 1024
 MAX_OBJECTS = 20000
 MAX_REPORT = 16 * 1024 * 1024
 GENERATED = ("include/generated/compile.h", "include/generated/utsrelease.h",
-             "include/config/kernel.release", "System.map")
+             "include/config/kernel.release", "System.map", "kernel/kheaders_data.tar.xz")
 
 
 def digest(data):
