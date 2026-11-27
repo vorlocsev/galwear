@@ -30,15 +30,48 @@ static int hwc_fixture(const hw_module_t *module)
     unsigned int (*get)(unsigned int)=dlsym(RTLD_DEFAULT,"r800_hwc_fixture_get");
     void (*mode)(unsigned int)=dlsym(RTLD_DEFAULT,"r800_hwc_fixture_mode");
     if (!get || !mode || get(0)) return 171;
+    /* liblog may open a process-lifetime descriptor on its first write.
+     * Warm it independently of HWC so framebuffer leaks cannot become part
+     * of the baseline. The HAL is already loaded; use its liblog dependency. */
+    void *loglib=dlopen("liblog.so",RTLD_NOW | RTLD_NOLOAD);
+    if (!loglib) { fprintf(stderr,"HWC log warmup: liblog not loaded\n"); return 171; }
+    int (*log_write)(int,const char *,const char *)=dlsym(loglib,"__android_log_write");
+    if (!log_write) { dlclose(loglib); return 171; }
+    int cold=fd_count();
+    int log_rc=log_write(6,"galwear-hwc-fixture","warm up log transport before FD baseline");
+    dlclose(loglib);
     int baseline=fd_count();
+    fprintf(stderr,"HWC log warmup: rc=%d fd=%d/%d\n",log_rc,cold,baseline);
+    if (cold<0 || baseline<cold || baseline>cold+1) return 171;
+    /* The framebuffer must never be open before the first HWC attempt. */
+    for (int fd=0;fd<256;++fd) {
+        struct stat opened;
+        if (!fstat(fd,&opened) && opened.st_dev==st.st_dev && opened.st_ino==st.st_ino)
+            return 171;
+    }
     hw_device_t *base=NULL;
     mode(1);
     int rc=module->methods->open(module,HWC_HARDWARE_COMPOSER,&base);
     int after=fd_count();
     fprintf(stderr,"HWC negative geometry: rc=%d expected=%d base=%p fd=%d/%d fixed=%u variable=%u bad=%u\n",
             rc,-EINVAL,(void *)base,baseline,after,get(1),get(2),get(0));
-    if (rc!=-EINVAL || base || after!=baseline || get(1)!=1 || get(2)!=1 || get(0))
+    int fb_leaks=0;
+    for (int fd=0;fd<256;++fd) {
+        struct stat opened;
+        if (!fstat(fd,&opened) && opened.st_dev==st.st_dev && opened.st_ino==st.st_ino)
+            ++fb_leaks;
+    }
+    if (rc!=-EINVAL || base || after!=baseline || get(1)!=1 || get(2)!=1 || get(0) || fb_leaks) {
+        fprintf(stderr,"HWC negative geometry: framebuffer_fd_leaks=%d\n",fb_leaks);
+        for (int fd=0;fd<256;++fd) {
+            if (fcntl(fd,F_GETFD)==-1) continue;
+            char path[48],target[256];
+            snprintf(path,sizeof(path),"/proc/self/fd/%d",fd);
+            ssize_t n=readlink(path,target,sizeof(target)-1);
+            if (n>=0) { target[n]='\0'; fprintf(stderr,"HWC open fd %d: %s\n",fd,target); }
+        }
         return 172;
+    }
     mode(0);
     static const hwc_procs_t procs={.vsync=hwc_fixture_vsync};
     for (int cycle=0;cycle<4;++cycle) {
