@@ -239,3 +239,19 @@ allow transition/execute/entrypoint. Условные правила и пере
 атрибуты в type_transition требуют дополнительной проверки. CI компилирует
 синтетическую политику, затем проверяет разрешённый и неподходящий домен.
 Это не проверка полного запуска HIDL, ограничений MLS, binder или enforcing.
+
+
+Для статического аудита выбранной пары клиент/HIDL:
+```sh
+python3 build/r800_donor_hidl_permissions.py --policy /path/to/sepolicy \
+  --policy-sha256 "$POLICY_SHA256" --server HAL_DOMAIN --client CLIENT_DOMAIN \
+  --manager hwservicemanager --service-type HWSERVICE_TYPE \
+  --report /path/to/new-hidl-report.json
+```
+Имена типов берутся из реальных контекстов и политики. Проверяется
+консервативный профиль из 13 unconditional allow для add/find,
+call/transfer. Это не исчерпывающий набор правил для всех вариантов HIDL;
+callback, fd use, устройство /dev/hwbinder, MLS constraints и регистрация
+runtime не проверены. Синтетическая CI fixture удаляет find и должна
+получить REVIEW_REQUIRED ровно по этому правилу. Рабочие политики
+не изменяются.
