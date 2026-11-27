@@ -1,0 +1,50 @@
+name: SM-R800 BusyBox compile (non-release)
+
+on:
+  push:
+    branches:
+      - "development/r800-android-linker-audit-20261125"
+      - "development/r800-integration-20261127"
+    paths:
+      - "build/r800_build_busybox.sh"
+      - ".github/workflows/r800-busybox-compile.yml"
+      - "payload/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arm32-busybox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm exact triggering checkout
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install cross-compiler and user-mode emulator
+        run: |
+          set -eu
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi libc6-dev-armel-cross qemu-user
+      - name: Compile and inspect static ARM32 BusyBox
+        run: |
+          sh -n build/r800_build_busybox.sh
+          sh build/r800_build_busybox.sh "$RUNNER_TEMP/r800-busybox"
+      - name: Upload build evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-busybox-evidence-only
+          path: |
+            ${{ runner.temp }}/r800-busybox/busybox-evidence.txt
+            ${{ runner.temp }}/r800-busybox/busybox.elf.txt
+            ${{ runner.temp }}/r800-busybox/busybox.config
+            ${{ runner.temp }}/r800-busybox/applets.txt
+            ${{ runner.temp }}/r800-busybox/build.log
+          if-no-files-found: warn
+          retention-days: 7
