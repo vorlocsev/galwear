@@ -120,6 +120,35 @@ def compile_probe(ndk, hals, output, source_sha):
         if set(ns_info["needed"]) - HAL_COMPILE_LIBS != private:
             raise ValueError("Unexpected synthetic namespace dependency graph")
         ns_hashes[name] = sha(ns_raw)
+    # Same SONAME, different symbol version. Link clients against distinct
+    # providers; only V1 is staged in the guest.
+    version_name = "libgalwear-ns-version.so"
+    version_dir = output/"version-v2"
+    version_dir.mkdir()
+    readelf = cc.parent/"llvm-readelf"
+    for version, directory, client in (
+        ("GALWEAR_1", output, "libgalwear-ns-version-good.so"),
+        ("GALWEAR_2", version_dir, "libgalwear-ns-version-bad.so"),
+    ):
+        script = directory/"version.map"
+        script.write_text(version+" { global: r800_namespace_version; local: *; };\n")
+        provider = directory/version_name
+        common = [str(cc), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2",
+                  "-shared", "-fPIC", str(ROOT/"src/initramfs/r800-namespace-fixture.c")]
+        subprocess.run(common+["-DR800_NAMESPACE_VERSION_PROVIDER",
+                        "-Wl,--version-script="+str(script), "-Wl,-soname,"+version_name,
+                        "-Wl,--no-undefined", "-o", str(provider)], check=True, timeout=60)
+        subprocess.run(common+["-DR800_NAMESPACE_VERSION_CLIENT", "-L"+str(directory),
+                        "-lgalwear-ns-version", "-Wl,-soname,"+client,
+                        "-Wl,--no-undefined", "-o", str(output/client)], check=True, timeout=60)
+        for target, private in ((provider, set()), (output/client, {version_name})):
+            raw_version, info_version = check(target, True)
+            versions = subprocess.run([str(readelf), "--version-info", str(target)],
+                                      check=True, capture_output=True, text=True, timeout=30).stdout
+            if (set(info_version["needed"]) - HAL_COMPILE_LIBS != private or
+                    version not in versions or ("GALWEAR_2" if version=="GALWEAR_1" else "GALWEAR_1") in versions):
+                raise ValueError("Unexpected synthetic symbol version graph")
+            ns_hashes[target.relative_to(output).as_posix()] = sha(raw_version)
     raw, info = check(probe)
     if not set(info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected probe dependency")
@@ -192,16 +221,24 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 "libgalwear-ns-parent.so": ("libgalwear-ns-leaf.so",),
                 "libgalwear-ns-missing.so": ("libgalwear-ns-absent.so",),
                 "libgalwear-ns-bad-symbol.so": (),
+                "libgalwear-ns-version.so": (),
+                "libgalwear-ns-version-good.so": ("libgalwear-ns-version.so",),
+                "libgalwear-ns-version-bad.so": ("libgalwear-ns-version.so",),
             }
             absent = "libgalwear-ns-absent.so"
             ns_hashes = evidence["namespace_fixture_sha256"]
-            if set(ns_hashes) != set(ns_graph) | {absent}:
+            alternate = "version-v2/libgalwear-ns-version.so"
+            if set(ns_hashes) != set(ns_graph) | {absent, alternate}:
                 raise ValueError("Unexpected synthetic namespace inventory")
             # Verify the intentionally omitted provider, but do not stage it.
             absent_raw, absent_info = check(probe_dir/absent, True)
             if sha(absent_raw) != ns_hashes[absent]:
                 raise ValueError("Omitted provider digest mismatch")
             runtime_dependencies(absent, absent_info, linker_soname)
+            alt_raw, alt_info = check(probe_dir/alternate, True)
+            if sha(alt_raw) != ns_hashes[alternate] or sha(alt_raw) == ns_hashes["libgalwear-ns-version.so"]:
+                raise ValueError("Alternate version provider identity mismatch")
+            runtime_dependencies(alternate, alt_info, linker_soname)
             for name, private_needed in ns_graph.items():
                 add(probe_dir/name, "vendor/lib/hw/"+name, ns_hashes[name], True,
                     private_needed=private_needed)
@@ -213,7 +250,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 "namespace.default.isolated = true\n"
                 "namespace.default.search.paths = /apex/com.android.runtime/lib/bionic:/system/lib\n"
                 "namespace.default.links = vendor\n"
-                "namespace.default.link.vendor.shared_libs = lights.r800.so:libgalwear-ns-parent.so:libgalwear-ns-missing.so:libgalwear-ns-bad-symbol.so\n"
+                "namespace.default.link.vendor.shared_libs = lights.r800.so:libgalwear-ns-parent.so:libgalwear-ns-missing.so:libgalwear-ns-bad-symbol.so:libgalwear-ns-version-good.so:libgalwear-ns-version-bad.so\n"
                 "namespace.vendor.isolated = true\n"
                 "namespace.vendor.search.paths = /vendor/lib/hw\n"
                 "namespace.vendor.links = default\n"
@@ -391,7 +428,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     fixture_marker = "HAL_NAMESPACE_FIXTURE_PASS linked_lights=1 denied_name=2 denied_absolute=2"
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
                                   log.splitlines().count("HAL_NAMESPACE_TRANSITIVE_PASS parent=1 relocated=1 private_denials=6") == 1 and
-                                  log.splitlines().count("HAL_NAMESPACE_FAILURE_RECOVERY_PASS missing_needed=3 missing_symbol=3 recovered=6 fd_stable=1") == 1)
+                                  log.splitlines().count("HAL_NAMESPACE_FAILURE_RECOVERY_PASS missing_needed=3 missing_symbol=3 recovered=6 fd_stable=1") == 1 and
+                                  log.splitlines().count("HAL_NAMESPACE_VERSION_PASS compatible=4 incompatible=3 recovered=3 fd_stable=1") == 1)
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
                           (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture or namespace_fixture) or fixture_ok))
@@ -409,7 +447,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                                  "marker": matches[0] if len(matches) == 1 else None,
                                  "lifecycle_marker": life_marker if lifecycle and life_ok else None,
                                  "fixture_marker": fixture_marker if fixture_ok else None,
-                                 "log": log[-8192:]}
+                                 "log": log[-16384:] if namespace_fixture else log[-8192:]}
             except subprocess.TimeoutExpired:
                 results[name] = {"status": "REVIEW_REQUIRED", "reason": "Timeout"}
         if snapshot() != before:
@@ -441,6 +479,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "namespace_fixture_requested": namespace_fixture,
         "synthetic_namespace_link_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_config_sha256": namespace_config_sha if namespace_fixture else None,
+        "synthetic_namespace_symbol_versions_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_failure_recovery_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_transitive_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "namespace_fixture_sha256": evidence.get("namespace_fixture_sha256") if namespace_fixture else None,

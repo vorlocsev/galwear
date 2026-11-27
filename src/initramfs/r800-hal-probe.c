@@ -579,6 +579,39 @@ static int namespace_failure_recovery(void)
     return 1;
 }
 
+static int namespace_version_good(void)
+{
+    void *h=dlopen("libgalwear-ns-version-good.so",RTLD_NOW|RTLD_LOCAL);
+    if (!h) { fprintf(stderr,"version good load: %s\n",dlerror()); return 0; }
+    dlerror();
+    int (*call)(void)=dlsym(h,"r800_namespace_version_call");
+    const char *err=dlerror();
+    int ok=!err && call && call()==0x812;
+    return dlclose(h)==0 && ok;
+}
+static int namespace_versions(void)
+{
+    struct stat st;
+    const char *files[]={"/vendor/lib/hw/libgalwear-ns-version.so",
+                         "/vendor/lib/hw/libgalwear-ns-version-good.so",
+                         "/vendor/lib/hw/libgalwear-ns-version-bad.so"};
+    for (int i=0;i<3;++i)
+        if (lstat(files[i],&st) || !S_ISREG(st.st_mode) || st.st_size<=0) return 0;
+    int before=fd_count();
+    if (before<0 || !namespace_version_good() || fd_count()!=before) return 0;
+    for (int i=0;i<3;++i) {
+        dlerror();
+        void *bad=dlopen("libgalwear-ns-version-bad.so",RTLD_NOW|RTLD_LOCAL);
+        const char *err=dlerror();
+        if (bad) { dlclose(bad); return 0; }
+        fprintf(stderr,"namespace expected version failure: %s\n",err?err:"none");
+        if (!err || !strstr(err,"GALWEAR_2") ||
+            (!strstr(err,"version") && !strstr(err,"cannot locate symbol")) ||
+            !namespace_version_good() || fd_count()!=before) return 0;
+    }
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3 && (argc != 4 ||
@@ -620,6 +653,8 @@ int main(int argc, char **argv)
         puts("HAL_NAMESPACE_TRANSITIVE_PASS parent=1 relocated=1 private_denials=6");
         if (!namespace_failure_recovery()) { dlclose(handle); return 189; }
         puts("HAL_NAMESPACE_FAILURE_RECOVERY_PASS missing_needed=3 missing_symbol=3 recovered=6 fd_stable=1");
+        if (!namespace_versions()) { dlclose(handle); return 190; }
+        puts("HAL_NAMESPACE_VERSION_PASS compatible=4 incompatible=3 recovered=3 fd_stable=1");
         if (dlclose(handle)) return 5;
         puts("HAL_NAMESPACE_FIXTURE_PASS linked_lights=1 denied_name=2 denied_absolute=2");
         return 0;

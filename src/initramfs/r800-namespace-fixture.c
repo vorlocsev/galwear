@@ -1,5 +1,10 @@
 /* Synthetic ELF dependency graph, not a donor graphics library. */
-#ifdef R800_NAMESPACE_LEAF
+#if defined(R800_NAMESPACE_VERSION_PROVIDER)
+int r800_namespace_version(void) { return 0x811; }
+#elif defined(R800_NAMESPACE_VERSION_CLIENT)
+extern int r800_namespace_version(void);
+int r800_namespace_version_call(void) { return r800_namespace_version()+1; }
+#elif defined(R800_NAMESPACE_LEAF)
 int r800_namespace_leaf(void) { return 0x800; }
 #elif defined(R800_NAMESPACE_BAD_SYMBOL)
 /* Intentionally unresolved strong import, only in the negative fixture. */
