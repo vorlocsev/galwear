@@ -16,7 +16,9 @@ from r800_android_linker_audit import inspect
 HALS = {"audio.primary.r800.so": "audio", "gps.r800.so": "gps",
         "sensors.r800.so": "sensors", "lights.r800.so": "lights",
         "hwcomposer.r800.so": "hwcomposer"}
-RUNTIME = ("linker", "libc.so", "libdl.so", "libm.so", "liblog.so")
+RUNTIME = ("linker", "libc.so", "libdl.so", "libm.so", "liblog.so", "libc++.so")
+SYSTEM_RUNTIME_LIBS = ("liblog.so", "libc++.so")
+HAL_COMPILE_LIBS = {"libc.so", "libdl.so", "libm.so", "liblog.so"}
 LINKER_SONAME = "ld-android.so"
 LIMIT = 64*1024**2
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,7 +63,7 @@ def compile_probe(ndk, hals, output, source_sha):
         raw, info = check(hals/name, True)
         expected = (report["audio_candidate"] if name.startswith("audio.") else
                     report["linked_libraries"][name.split(".")[0]])
-        if sha(raw) != expected["sha256"] or not set(info["needed"]) <= set(RUNTIME[1:]):
+        if sha(raw) != expected["sha256"] or not set(info["needed"]) <= HAL_COMPILE_LIBS:
             raise ValueError("HAL evidence/dependency mismatch: " + name)
         hashes[name] = sha(raw)
     output.mkdir(exist_ok=False)
@@ -71,7 +73,7 @@ def compile_probe(ndk, hals, output, source_sha):
                     "-I"+str(ROOT/"src/hal/include"), str(ROOT/"src/initramfs/r800-hal-probe.c"),
                     "-ldl", "-Wl,--no-undefined", "-o", str(probe)], check=True, timeout=60)
     raw, info = check(probe)
-    if not set(info["needed"]) <= set(RUNTIME[1:]):
+    if not set(info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected probe dependency")
     result = {"status": "ARM32_HAL_DLOPEN_PROBE_COMPILE_ONLY", "source_sha": source_sha,
               "probe_sha256": sha(raw), "hal_sha256": hashes,
@@ -117,8 +119,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output):
         for name in RUNTIME:
             if name == "linker":
                 rel = "apex/com.android.runtime/bin/linker"
-            elif name == "liblog.so":
-                rel = "system/lib/liblog.so"
+            elif name in SYSTEM_RUNTIME_LIBS:
+                rel = "system/lib/" + name
             else:
                 rel = "apex/com.android.runtime/lib/bionic/" + name
             add(runtime/name, rel, pins[name], name != "linker", name == "linker")

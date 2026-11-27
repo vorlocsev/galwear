@@ -35,6 +35,7 @@ class Arm32RuntimeExtractTests(unittest.TestCase):
             (system/"apex").mkdir(parents=True)
             (system/"lib").mkdir()
             (system/"lib/liblog.so").write_bytes(b"liblog.so")
+            (system/"lib/libc++.so").write_bytes(b"libc++.so")
             with zipfile.ZipFile(system/"apex/com.android.runtime.apex", "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(payload, "apex_payload.img")
             image = root/"system.img"
@@ -53,6 +54,8 @@ class Arm32RuntimeExtractTests(unittest.TestCase):
             self.assertEqual(set(pins), set(runtime.RUNTIME))
             self.assertEqual(pins["libc.so"], hashlib.sha256(b"libc.so").hexdigest())
             self.assertEqual(report["files"]["liblog.so"]["origin"], "system")
+            self.assertEqual(report["files"]["libc++.so"]["origin"], "system")
+            self.assertEqual(pins["libc++.so"], hashlib.sha256(b"libc++.so").hexdigest())
             self.assertFalse(report["runtime_verified"])
             self.assertEqual(runtime.image_info(image)["sha256"], expected)
             with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
@@ -70,6 +73,7 @@ class Arm32RuntimeExtractTests(unittest.TestCase):
             tree = root/"tree"
             (tree/"lib").mkdir(parents=True)
             (tree/"lib/liblog.so").write_bytes(b"liblog.so")
+            (tree/"lib/libc++.so").write_bytes(b"libc++.so")
             for name, guest in runtime.FILES.items():
                 dest = tree/"apex/com.android.runtime"/guest.lstrip("/")
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +88,13 @@ class Arm32RuntimeExtractTests(unittest.TestCase):
                 report = runtime.extract(image, expected, root/"out")
             self.assertEqual(report["apex_layout"], "FLATTENED_APEX")
             self.assertIsNone(report["apex_sha256"])
+            (tree/"lib/libc++.so").unlink()
+            missing = root/"missing.img"
+            mkimage(tree, missing)
+            with patch.object(runtime, "check", side_effect=fake_check):
+                with self.assertRaisesRegex(ValueError, r"libc\+\+\.so"):
+                    runtime.extract(missing, runtime.image_info(missing)["sha256"], root/"missing-out")
+            self.assertFalse((root/"missing-out").exists())
             archive = root/"fixture.xz"
             archive.write_bytes(lzma.compress(b"fixture"))
             size = archive.stat().st_size
@@ -106,6 +117,8 @@ class Arm32RuntimeExtractTests(unittest.TestCase):
     def test_linker_soname_dependency_is_not_external_library(self):
         from r800_hal_dlopen_probe import runtime_dependencies
         libc = {"elf_type": "ET_DYN", "needed": ["libdl.so", "ld-android.so"]}
+        runtime_dependencies("liblog.so", {"elf_type": "ET_DYN", "needed": ["libc++.so"]}, "ld-android.so")
+        runtime_dependencies("libc++.so", {"elf_type": "ET_DYN", "needed": ["libc.so", "libm.so", "libdl.so"]}, "ld-android.so")
         runtime_dependencies("libc.so", libc, "ld-android.so")
         with self.assertRaisesRegex(ValueError, "ld-android.so"):
             runtime_dependencies("libc.so", libc, None)

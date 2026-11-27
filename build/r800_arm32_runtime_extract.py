@@ -17,11 +17,13 @@ from r800_android_runtime_extract import unpack_system, extract_payload, MAX_APE
 from r800_extract_ext4 import snapshot_image, locate, command
 from r800_vendor_inputs import image_info
 from r800_android_userspace_preflight import read_regular
-from r800_hal_dlopen_probe import check, RUNTIME, LIMIT, runtime_dependencies, LINKER_SONAME
+from r800_hal_dlopen_probe import (check, RUNTIME, LIMIT, runtime_dependencies,
+                                   LINKER_SONAME, SYSTEM_RUNTIME_LIBS)
 
-# Android 10/11 runtime APEX layout. liblog is outside Runtime APEX.
+# Android 10/11 runtime APEX layout. liblog and libc++ are outside Runtime APEX.
 APEX_PATHS = ("/apex/com.android.runtime.apex", "/system/apex/com.android.runtime.apex")
-LIBLOG_PATHS = ("/lib/liblog.so", "/system/lib/liblog.so")
+SYSTEM_LIB_PATHS = {name: ("/lib/" + name, "/system/lib/" + name)
+                    for name in SYSTEM_RUNTIME_LIBS}
 FILES = {"linker": "/bin/linker", "libc.so": "/lib/bionic/libc.so",
          "libdl.so": "/lib/bionic/libdl.so", "libm.so": "/lib/bionic/libm.so"}
 
@@ -90,8 +92,8 @@ def extract(system, expected, output):
         rows = {}
         linker_soname = None
         for name in RUNTIME:
-            if name == "liblog.so":
-                guest, raw = get_member(tool, raw_system, LIBLOG_PATHS, scratch, LIMIT)
+            if name in SYSTEM_RUNTIME_LIBS:
+                guest, raw = get_member(tool, raw_system, SYSTEM_LIB_PATHS[name], scratch, LIMIT)
                 origin = "system"
             else:
                 filesystem = payload if payload is not None else raw_system
