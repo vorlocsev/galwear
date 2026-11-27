@@ -4,6 +4,7 @@ on:
     branches:
       - development/r800-integration-ci-20261125
       - development/r800-display-error-propagation-20261125
+      - development/r800-integration-20261127
   workflow_dispatch:
     inputs:
       kernel_repeatability:
@@ -73,6 +74,15 @@ jobs:
           git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
           git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
           git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
+      - name: Compare DECON ABI against pinned kernel on ARM32 and ARM64
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          base=https://raw.githubusercontent.com/xanderlent/COMBINED_android-kernel-exynos/50db73fc799f20a7120a8b5f653b16cc123d856f
+          curl --fail --location --retry 3 --max-time 90 "$base/drivers/video/fbdev/exynos/dpu30/decon.h" -o "$RUNNER_TEMP/decon.h"
+          python3 build/r800_decon_abi_check.py \
+            --kernel-header "$RUNNER_TEMP/decon.h" --mirror src/hal/r800_decon_abi.h \
+            --ndk "$RUNNER_TEMP/android-ndk-r27c" --scratch "$RUNNER_TEMP/decon-layout"
       - name: Compile and link five HALs (Audio experimental)
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
