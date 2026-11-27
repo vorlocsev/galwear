@@ -541,6 +541,19 @@ jobs:
           path: ${{ runner.temp }}/decon-retire/retire-evidence.json
           if-no-files-found: error
           retention-days: 7
+      - name: Test DECON acquire wait error precedence on pinned source
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_decon_acquire_guard.py --fence-source "$RUNNER_TEMP/decon-fence.c" --patch src/kernel/r800-wearos.patch --scratch "$RUNNER_TEMP/decon-acquire" --source-sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        if: github.ref_name == 'development/r800-integration-20261127'
+        with:
+          name: r800-decon-acquire-evidence
+          path: ${{ runner.temp }}/decon-acquire/acquire-evidence.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Compile ARM32 Bionic HAL dlopen metadata probe (no runtime)
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |

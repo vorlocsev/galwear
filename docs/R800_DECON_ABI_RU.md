@@ -44,3 +44,13 @@ kernel races, DMA, timeline или аппаратную презентацию. 
 к точному pinned blob и компилирует реальные функции в host-only harness:
 20 сценариев, в том числе ENOMEM, EMFILE, откат низких FD и баланс ссылок
 retire. Фактические kernel FD table races и sync_file не проверены.
+
+## Acquire wait errno
+
+Сохраняется отрицательная ошибка dma_fence_wait_timeout, нулевой результат
+преобразуется в -ETIMEDOUT. Command-mode status не перезаписывает уже
+полученную ошибку ожидания; неожиданно активный fence после положительного
+wait даёт -EIO. Video-mode policy (проверка только wait) не меняется.
+12 host-only сценариев проверяют pinned оригинал и применённый патч.
+Не изменены decon_update_regs, rollback буферов и политика сигнализации
+retire. Физическая проверка sync_file, владения буферами и вывода не проведена.
