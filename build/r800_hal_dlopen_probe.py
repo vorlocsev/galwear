@@ -269,7 +269,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     fixture_ok = log.splitlines().count(fixture_marker) == 1
                 if audio_pcm_fixture:
                     fixture_marker = "HAL_AUDIO_PCM_PASS out_frames=2000 in_frames=4000 mono=1 stereo=1 mute=2 retry=1 opens=4 closes=4"
-                    fixture_ok = log.splitlines().count(fixture_marker) == 1
+                    fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
+                                  log.splitlines().count("HAL_AUDIO_HFP_PASS sco=8000,16000 starts=10 stops=10 rollback=1 media_resume=2") == 1)
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
                           (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture) or fixture_ok))
@@ -326,6 +327,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "audio_pcm_fixture_requested": audio_pcm_fixture,
         "audio_synthetic_pcm_verified": audio_pcm_fixture and all(v["status"] == expected_status for v in results.values()),
         "pcm_fixture_sha256": evidence.get("pcm_fixture_sha256") if audio_pcm_fixture else None,
+        "audio_synthetic_hfp_verified": audio_pcm_fixture and all(v["status"] == expected_status for v in results.values()),
+        "audio_hfp_hardware_verified": False,
         "audio_pcm_hardware_verified": False,
         "sensor_events_tested": False,
         "hardware_io_methods_tested": False,

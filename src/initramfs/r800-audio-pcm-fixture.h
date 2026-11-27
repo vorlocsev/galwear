@@ -1,4 +1,73 @@
 /* Test-only successful PCM operations, production HAL unchanged. */
+static int audio_hfp_fixture(const hw_module_t *module,
+                             unsigned int (*get)(unsigned int),
+                             void (*fail)(unsigned int))
+{
+    hw_device_t *base=NULL;
+    if (module->methods->open(module,AUDIO_HARDWARE_INTERFACE,&base) || !base)
+        return 151;
+    struct audio_hw_device *dev=(struct audio_hw_device *)base;
+    struct audio_config oc={.sample_rate=48000,.channel_mask=AUDIO_CHANNEL_OUT_STEREO,
+                            .format=AUDIO_FORMAT_PCM_16_BIT};
+    struct audio_config ic={.sample_rate=48000,.channel_mask=AUDIO_CHANNEL_IN_MONO,
+                            .format=AUDIO_FORMAT_PCM_16_BIT};
+    struct audio_stream_out *out=NULL;
+    struct audio_stream_in *in=NULL;
+    if (dev->open_output_stream(dev,1,AUDIO_DEVICE_OUT_SPEAKER,0,&oc,&out,"") || !out ||
+        dev->open_input_stream(dev,2,AUDIO_DEVICE_IN_BUILTIN_MIC,&ic,&in,0,"",AUDIO_SOURCE_MIC) || !in)
+        return 152;
+    int16_t playback[2000],capture[1000];
+    for (int i=0;i<1000;++i) { playback[2*i]=i+1; playback[2*i+1]=-(i+1); }
+    if (out->write(out,playback,sizeof(playback))!=(ssize_t)sizeof(playback) ||
+        in->read(in,capture,sizeof(capture))!=(ssize_t)sizeof(capture) ||
+        get(0)!=6 || get(1)!=4 || get(5)!=3000 || get(6)!=5000 || get(4))
+        return 153;
+    if (dev->set_parameters(dev,"hfp_set_sampling_rate=8000;hfp_enable=true") ||
+        get(8)!=15 || get(14)!=15 || !get(9) || get(10)!=8000 ||
+        get(11)!=4 || get(12)!=0 || get(0)!=10 || get(1)!=6 || get(4))
+        return 154;
+    if (dev->set_parameters(dev,"hfp_enable=true") || get(0)!=10)
+        return 155;
+    unsigned int writes=get(2),reads=get(3);
+    memset(capture,0x55,sizeof(capture));
+    if (out->write(out,playback,sizeof(playback))!=(ssize_t)sizeof(playback) ||
+        in->read(in,capture,sizeof(capture))!=(ssize_t)sizeof(capture) ||
+        get(2)!=writes || get(3)!=reads || get(0)!=10)
+        return 156;
+    for (int i=0;i<1000;++i) if (capture[i]) return 157;
+    if (dev->set_parameters(dev,"hfp_set_sampling_rate=16000") ||
+        get(8)!=15 || get(14)!=15 || !get(9) || get(10)!=16000 ||
+        get(11)!=8 || get(12)!=4 || get(0)!=14 || get(1)!=10 || get(4))
+        return 158;
+    if (dev->set_parameters(dev,"hfp_enable=false") ||
+        get(8) || get(14) || get(9) || get(12)!=8 || get(0)!=14 || get(1)!=14 ||
+        dev->set_parameters(dev,"hfp_enable=false") || get(1)!=14 || get(4))
+        return 159;
+    if (out->write(out,playback,sizeof(playback))!=(ssize_t)sizeof(playback) ||
+        in->read(in,capture,sizeof(capture))!=(ssize_t)sizeof(capture) ||
+        get(0)!=16 || get(5)!=4000 || get(6)!=6000 || get(4))
+        return 160;
+    for (int i=0;i<1000;++i) if (capture[i]!=i+1) return 161;
+    /* Fail third HFP start, leaving two started and one unstarted handle.
+     * Verify all three are closed, active channels stopped in reverse order,
+     * and the mixer is restored before media starts again. */
+    fail(3);
+    if (dev->set_parameters(dev,"hfp_enable=true")!=-EIO ||
+        get(8) || get(14) || get(9) || get(0)!=19 || get(1)!=19 ||
+        get(11)!=10 || get(12)!=10 || get(13)!=11 || get(4))
+        return 162;
+    if (out->write(out,playback,sizeof(playback))!=(ssize_t)sizeof(playback) ||
+        in->read(in,capture,sizeof(capture))!=(ssize_t)sizeof(capture) ||
+        get(0)!=21 || get(5)!=5000 || get(6)!=7000 || get(4))
+        return 163;
+    for (int i=0;i<1000;++i) if (capture[i]!=i+1) return 164;
+    dev->close_output_stream(dev,out);
+    dev->close_input_stream(dev,in);
+    if (base->close(base) || get(0)!=21 || get(1)!=21 || get(8) || get(14) ||
+        get(9) || get(4)) return 165;
+    puts("HAL_AUDIO_HFP_PASS sco=8000,16000 starts=10 stops=10 rollback=1 media_resume=2");
+    return 0;
+}
 static int audio_pcm_fixture(const hw_module_t *module)
 {
     if (!missing("/dev/snd") || !missing("/sys/class/sound")) return 130;
@@ -68,5 +137,5 @@ static int audio_pcm_fixture(const hw_module_t *module)
     if (base->close(base) || get(0)!=4 || get(1)!=4 || get(4) ||
         get(5)!=2000 || get(6)!=4000 || get(3)<=8 || !get(7)) return 150;
     puts("HAL_AUDIO_PCM_PASS out_frames=2000 in_frames=4000 mono=1 stereo=1 mute=2 retry=1 opens=4 closes=4");
-    return 0;
+    return audio_hfp_fixture(module,get,fail);
 }

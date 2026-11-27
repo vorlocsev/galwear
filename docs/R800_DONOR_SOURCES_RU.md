@@ -560,3 +560,14 @@ failed read silence and retry backoff. Адаптер считает 2000 output
 frames и 4 opens/closes; если interposition не сработает, тест не проходит.
 Не тестируется tinyalsa implementation, ALSA ioctl, real mixer routing,
 DSP or HFP success. New CI pending.
+
+
+CI 46037698758 / job 140637184239 exact 290f2cb: synthetic PCM PASS,
+2000 out + 4000 in frames. Extended fixture checks HFP 8/16 kHz SCO,
+all four DSP PCM channels and exact open/prepare/start/stop order,
+media suspended during call, renegotiation, idempotent enable/disable,
+third start injected failure with reverse stop, mixer NORMAL rollback,
+media resumes after both normal and failed call. Expected 10 starts/stops,
+21 total opens/closes across PCM and HFP tests. Production HAL unchanged;
+real Bluetooth stack, SCO signal, ALSA ioctl, codec and DSP unverified.
+New CI pending.
