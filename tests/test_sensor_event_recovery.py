@@ -14,7 +14,7 @@ class SensorRecoveryTests(unittest.TestCase):
         cls.source = SOURCE.read_text()
         s = cls.source
         mask = s[s.index("static int parse_enable_mask("):s.index("static int read_enable_mask(")]
-        overrun = s[s.index("static int discard_overrun("):s.index("static int dev_poll(")]
+        overrun = s[s.index("static int discard_overrun("):s.index("static int poll_events(")]
         harness = r'''
 #include <assert.h>
 #include <errno.h>
