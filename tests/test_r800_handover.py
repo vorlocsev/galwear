@@ -53,10 +53,15 @@ class HandoverTests(unittest.TestCase):
             self.assertNotIn("telnetd", source)
             self.assertNotIn("tnet()", source)
             self.assertNotIn("telnet on 23", source)
-        # Packaging candidate is integrated separately; scripts must be safe now.
-        candidate = ROOT / "build/r800_payload_candidate.py"
-        if candidate.is_file():
-            self.assertNotIn('"busybox-extras"', candidate.read_text())
+        candidate = (ROOT / "build/r800_payload_candidate.py").read_text()
+        self.assertNotIn('"busybox-extras"', candidate)
+
+    def test_wifi_uses_staged_static_binary(self):
+        source = (ROOT / "payload/android-helper.sh").read_text()
+        self.assertIn("WPA=/oem/r800dev/bin/wpa_supplicant", source)
+        self.assertIn('if [ "$(/system/bin/getprop init.svc.wpa_supplicant)" = stopped ]; then', source)
+        self.assertIn('"$WPA" -i wlan0 -D nl80211', source)
+        self.assertNotIn("ld-musl-aarch64.so.1", source)
 
     def test_existing_display_and_wifi_guards_retained(self):
         source = (ROOT / "payload/android-helper.sh").read_text()
