@@ -459,3 +459,17 @@ raw system, APEX и APEX payload. Новый job arm32-hal-qemu на Ubuntu
 Reference не является Wear OS; runtime authenticity не подтверждена.
 Даже успешный HMI не проверяет methods->open, реальные namespaces,
 Android boot, устройства или безопасность прошивки.
+
+
+CI 46029789905 / job 140610408100, exact d228f16: реальный ARM32
+Bionic reference загрузил все пять HAL, 5/5 HMI_ONLY_PASS, exit 0.
+Следующая проверка --lifecycle выполняет после HMI один warm-up и
+16 циклов: Audio/GPS/Lights open + проверка hw_device_t + close;
+Audio также локальный mic mute roundtrip; HWC/Sensors должны
+возвращать -ENOENT без объекта устройства при отсутствии fb0/SSP.
+Перед запуском проверяется отсутствие аппаратных узлов, в каждом
+цикле сравнивается число открытых FD в окне 0..255 после warm-up.
+Старый HMI-only job step сохранён. Не вызываются GPS init, sensor poll,
+PCM streams или brightness; не моделируется железо и не проверяется
+полная утечка ресурсов за пределами окна FD. Новая lifecycle фаза
+ожидает CI, NON-RELEASE.

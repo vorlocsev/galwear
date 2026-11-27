@@ -82,7 +82,7 @@ def compile_probe(ndk, hals, output, source_sha):
     return result
 
 
-def run_probe(probe_dir, hals, runtime, runtime_manifest, output):
+def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=False):
     if os.geteuid() == 0:
         raise ValueError("Non-root execution required")
     qemu = shutil.which("qemu-arm-static")
@@ -143,24 +143,35 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output):
                    "/qemu", "-cpu", "cortex-a15", "-L", "/",
                    "-E", "LD_LIBRARY_PATH=/apex/com.android.runtime/lib/bionic:/system/lib", "/system/bin/hal-probe",
                    "/vendor/lib/hw/"+name, identity]
+            if lifecycle:
+                cmd.append("--lifecycle")
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 log = proc.stdout + proc.stderr
                 marker = re.compile(r"HAL_HMI_PASS "+re.escape(identity)+r" module_api=\d+ hal_api=\d+")
                 matches = [line for line in log.splitlines() if marker.fullmatch(line)]
-                results[name] = {"status": "HMI_ONLY_PASS" if proc.returncode == 0 and len(matches) == 1
-                                 else "REVIEW_REQUIRED", "exit_code": proc.returncode,
+                expected = -2 if identity in ("hwcomposer", "sensors") else 0
+                life_marker = ("HAL_LIFECYCLE_PASS " + identity +
+                               " repeats=16 open_rc=" + str(expected) + " fd_window=256")
+                life_ok = log.splitlines().count(life_marker) == 1
+                passed = proc.returncode == 0 and len(matches) == 1 and (not lifecycle or life_ok)
+                results[name] = {"status": ("LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
+                                 if passed else "REVIEW_REQUIRED", "exit_code": proc.returncode,
                                  "marker": matches[0] if len(matches) == 1 else None,
+                                 "lifecycle_marker": life_marker if lifecycle and life_ok else None,
                                  "log": log[-8192:]}
             except subprocess.TimeoutExpired:
                 results[name] = {"status": "REVIEW_REQUIRED", "reason": "Timeout"}
         if snapshot() != before:
             raise ValueError("Guest input changed")
-    result = {"status": "ARM32_HAL_HMI_QEMU_USER_ONLY" if all(
-        v["status"] == "HMI_ONLY_PASS" for v in results.values()) else "REVIEW_REQUIRED",
+    expected_status = "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS"
+    result = {"status": ("ARM32_HAL_LIFECYCLE_QEMU_USER_ONLY" if lifecycle
+                         else "ARM32_HAL_HMI_QEMU_USER_ONLY") if all(
+        v["status"] == expected_status for v in results.values()) else "REVIEW_REQUIRED",
         "source_sha": evidence["source_sha"], "runtime_sha256": pins,
         "hal_sha256": evidence["hal_sha256"], "results": results,
-        "android_namespace_runtime_verified": False, "hal_open_called": False,
+        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle,
+        "lifecycle_requested": lifecycle, "hardware_io_methods_tested": False,
         "hardware_tested": False, "safe_to_flash": False}
     (output/"hal-runtime-evidence.json").write_text(json.dumps(result, indent=2, sort_keys=True)+"\n")
     return result
@@ -176,9 +187,10 @@ def main():
     q = sub.add_parser("run")
     for name in ("probe-dir", "hals", "runtime", "runtime-manifest", "output"):
         q.add_argument("--"+name, type=Path, required=True)
+    q.add_argument("--lifecycle", action="store_true")
     a = p.parse_args()
     result = (compile_probe(a.ndk, a.hals, a.output, a.source_sha) if a.action == "compile"
-              else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output))
+              else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output, a.lifecycle))
     print(json.dumps(result, sort_keys=True))
     return 2 if result["status"] == "REVIEW_REQUIRED" else 0
 

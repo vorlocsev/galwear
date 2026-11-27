@@ -243,6 +243,14 @@ jobs:
             --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
             --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
             --output "$RUNNER_TEMP/r800-hal-runtime"
+      - name: Repeat HAL open close and missing-device refusal in hardware-free QEMU
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-phh-reference/runtime"
+          python3 build/r800_hal_dlopen_probe.py run \
+            --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
+            --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
+            --output "$RUNNER_TEMP/r800-hal-lifecycle" --lifecycle
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -251,6 +259,7 @@ jobs:
             ${{ runner.temp }}/r800-phh-reference/reference-evidence.json
             ${{ runner.temp }}/r800-hal-probe/hal-probe-evidence.json
             ${{ runner.temp }}/r800-hal-runtime/hal-runtime-evidence.json
+            ${{ runner.temp }}/r800-hal-lifecycle/hal-runtime-evidence.json
           if-no-files-found: warn
           retention-days: 7
   overlay-independent:
