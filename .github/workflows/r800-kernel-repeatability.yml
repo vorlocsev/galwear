@@ -15,6 +15,7 @@ on:
       - "build/r800_initramfs_spec.py"
       - "build/r800_embedded_initramfs_config.py"
       - "build/r800_cpio_audit.py"
+      - "tests/test_cpio_audit.py"
       - "tests/test_reproducibility_audit.py"
       - "src/initramfs/init-readonly.c"
       - "src/kernel/r800.config"
@@ -122,6 +123,18 @@ jobs:
             ${{ runner.temp }}/r800-apk-inventory.json
             ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve timestamp diagnostics if a build gate fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-failed-build-diagnostics-${{ matrix.replica }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/r800-embedded-initramfs/initramfs-evidence.json
+            ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
+            ${{ runner.temp }}/r800-apk-inventory.json
+          if-no-files-found: warn
           retention-days: 7
 
   compare-images:
