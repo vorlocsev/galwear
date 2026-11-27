@@ -148,7 +148,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Observe exact phh Android 11 release asset (static only)
+      - name: Install Android sparse image converter
+        run: |
+          set -eu
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends android-sdk-libsparse-utils
+          command -v simg2img
+          command -v debugfs
+          dpkg-query -W android-sdk-libsparse-utils
+      - name: Verify observed phh Android 11 release asset (static only)
         run: |
           set -eu
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"

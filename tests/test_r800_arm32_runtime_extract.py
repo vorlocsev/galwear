@@ -89,6 +89,17 @@ class Arm32RuntimeExtractTests(unittest.TestCase):
             size = archive.stat().st_size
             result = expand(archive, root/"expanded", expected_size=size, limit=7)
             self.assertEqual(result["system_sha256"], hashlib.sha256(b"fixture").hexdigest())
+            good = expand(archive, root/"pinned", expected_size=size, limit=7,
+                          expected_sha=hashlib.sha256(archive.read_bytes()).hexdigest(),
+                          expected_system_sha=hashlib.sha256(b"fixture").hexdigest(),
+                          expected_system_bytes=7)
+            self.assertEqual(good, result)
+            with self.assertRaisesRegex(ValueError, "Reference asset SHA-256"):
+                expand(archive, root/"wrong-pin", expected_size=size, expected_sha="0"*64)
+            self.assertFalse((root/"wrong-pin").exists())
+            with self.assertRaisesRegex(ValueError, "Expanded system SHA-256"):
+                expand(archive, root/"wrong-system", expected_size=size, expected_system_sha="0"*64)
+
             with self.assertRaisesRegex(ValueError, "exceeds limit"):
                 expand(archive, root/"oversized", expected_size=size, limit=6)
 
