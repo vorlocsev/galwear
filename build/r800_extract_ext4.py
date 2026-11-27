@@ -395,10 +395,97 @@ def snapshot_image(image, snapshot, expected_sha):
     return identity(initial)
 
 
-def extract(image, output, profile, expected_sha):
+def system_dependency_candidates(tool, image, expected_sha, scratch, walk, properties):
+    """Probe explicit raw EXT4 system paths for vendor external names.
+
+    No APEX activation, symlink resolution, namespace ordering or guest execution.
+    """
+    from r800_android_linker_audit import inspect
+    image = Path(image).absolute()
+    snapshot = scratch / "system.img"
+    identity = snapshot_image(image, snapshot, expected_sha)
+    before = image_info(snapshot)
+    if before["sha256"] != expected_sha:
+        raise ValueError("System snapshot SHA-256 mismatch")
+    vndk = properties.get("ro.vndk.version")
+    dirs = ["/lib", "/system/lib"]
+    if vndk and re.fullmatch(r"[1-9][0-9]{0,2}", vndk):
+        dirs += [base + "/" + sub + "-" + vndk
+                 for base in ("/lib", "/system/lib") for sub in ("vndk", "vndk-sp")]
+    results = {}
+    total = 0
+    probes = 0
+    exhausted = False
+    for name in sorted(set(walk["external_names"])):
+        if not re.fullmatch(r"[A-Za-z0-9_@.+~-]{1,255}", name) or name in (".", ".."):
+            raise ValueError("Invalid system dependency basename")
+        candidates = []
+        problems = []
+        for directory in dirs:
+            guest = directory + "/" + name
+            if probes >= MAX_WALK_EDGES or total >= MAX_WALK_BYTES:
+                exhausted = True
+                break
+            probes += 1
+            try:
+                found = locate(tool, snapshot, guest)
+                if found is None:
+                    continue
+                inode, length = found
+                if total + length > MAX_WALK_BYTES:
+                    exhausted = True
+                    break
+                total += length
+                target = scratch / "system-member"
+                try:
+                    command(tool, snapshot, "dump <%d> system-member" % inode, cwd=scratch)
+                    st = target.lstat()
+                    if not stat.S_ISREG(st.st_mode) or st.st_size != length:
+                        raise ValueError("System dependency size mismatch")
+                    raw = target.read_bytes()
+                finally:
+                    target.unlink(missing_ok=True)
+                info = inspect(raw)
+                if (info["abi"] != "arm" or info["elf_type"] != "ET_DYN" or
+                        not info["has_dynamic"] or info["soname"] not in (None, name) or
+                        info["custom_search_path"]):
+                    raise ValueError("System candidate ELF/SONAME/search path requires review")
+                candidates.append({"path": guest, "sha256": hashlib.sha256(raw).hexdigest(),
+                                   "bytes": len(raw), "needed": info["needed"]})
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+                problems.append({"path": guest, "reason": str(exc)})
+        status = ("REVIEW_REQUIRED" if exhausted or problems else
+                  "NOT_FOUND_IN_SELECTED_PATHS" if not candidates else
+                  "AMBIGUOUS" if len(candidates) > 1 else "CANDIDATE_ONLY")
+        results[name] = {"status": status, "candidates": candidates, "problems": problems}
+        if exhausted:
+            break
+    current = image.lstat()
+    if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
+            current.st_mtime_ns, current.st_ctime_ns) != identity:
+        raise ValueError("System donor image changed")
+    if image_info(snapshot) != before:
+        raise ValueError("System snapshot changed")
+    complete = (not exhausted and not walk["budget_exhausted"] and not walk["problems"]
+                and set(results) == set(walk["external_names"]) and
+                all(row["status"] == "CANDIDATE_ONLY" for row in results.values()))
+    return {"status": "SYSTEM_PATH_CANDIDATES_ONLY" if complete else "REVIEW_REQUIRED",
+            "system_image_sha256": expected_sha, "snapshot_verified": True,
+            "search_paths": dirs, "observed_vndk_version": vndk,
+            "external_candidates": results, "budget_exhausted": exhausted,
+            "bytes_inspected": total, "apex_inspected": False,
+            "dependency_closure_verified": False, "namespace_resolution_verified": False,
+            "runtime_verified": False, "safe_to_flash": False}
+
+
+def extract(image, output, profile, expected_sha, system_image=None, system_sha=None):
     image, output = Path(image).absolute(), Path(output).absolute()
     if profile not in PROFILES or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         raise ValueError("Expected donor profile and SHA-256")
+    if ((system_image is None) != (system_sha is None) or
+            (system_image is not None and (profile != "vendor-identity" or
+             not re.fullmatch(r"[0-9a-f]{64}", system_sha)))):
+        raise ValueError("System image and SHA-256 require vendor-identity profile")
     if output.exists() or output.is_symlink():
         raise ValueError("Output already exists")
     tool = shutil.which("debugfs")
@@ -444,6 +531,12 @@ def extract(image, output, profile, expected_sha):
         dependency_walk = None
         if profile == "vendor-identity":
             dependency_walk = vendor_dependency_walk(tool, snapshot, scratch, tree, files)
+        identity_report = None
+        if profile == "vendor-identity":
+            identity_report = vendor_identity(tree, files)
+            if system_image is not None:
+                identity_report["system_dependency_candidates"] = system_dependency_candidates(
+                    tool, system_image, system_sha, scratch, dependency_walk, identity_report["properties"])
         current = image.lstat()
         if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
                 current.st_mtime_ns, current.st_ctime_ns) != source_identity:
@@ -456,7 +549,7 @@ def extract(image, output, profile, expected_sha):
                   "donor_compatibility_verified":False,"xattrs_preserved":False,
                   "safe_to_flash":False}
         if profile == "vendor-identity":
-            report["vendor_identity"] = vendor_identity(tree, files)
+            report["vendor_identity"] = identity_report
             report["vendor_identity"]["vendor_dependency_walk"] = dependency_walk
         (tree/"ext4-evidence.json").write_text(json.dumps(report,indent=2,sort_keys=True))
         os.rename(tree,output)
@@ -469,8 +562,10 @@ def main():
     p.add_argument("--output",type=Path,required=True)
     p.add_argument("--profile",choices=PROFILES,required=True)
     p.add_argument("--sha256",required=True)
+    p.add_argument("--system-image", type=Path)
+    p.add_argument("--system-sha256")
     a=p.parse_args()
-    report=extract(a.image,a.output,a.profile,a.sha256)
+    report=extract(a.image,a.output,a.profile,a.sha256,a.system_image,a.system_sha256)
     print(json.dumps(report,sort_keys=True))
     identity = report.get("vendor_identity", {})
     review = identity.get("property_conflicts") or any(

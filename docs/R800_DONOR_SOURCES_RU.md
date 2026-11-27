@@ -122,3 +122,23 @@ EXT4 snapshot. Поиск только в vendor/lib, без lib/hw и lib64; н
 Некорректные имена, ELF, SONAME, RPATH и превышения лимитов требуют review.
 Граф диагностический; его статус не подтверждает Android namespace,
 символьную совместимость, запуск HAL или возможность прошивки.
+
+
+Для сопоставления внешних имён DT_NEEDED можно дополнительно передать
+чистый raw EXT4 Android system:
+
+```sh
+python3 build/r800_extract_ext4.py --profile vendor-identity \
+  --image /path/to/vendor.img --sha256 "$VENDOR_SHA256" \
+  --system-image /path/to/system.img --system-sha256 "$SYSTEM_SHA256" \
+  --output /path/to/new-vendor-system-report
+```
+
+Поиск ограничен /lib и /system/lib, а также vndk-N/vndk-sp-N при
+наблюдаемом числовом ro.vndk.version. Кандидаты проверяются на ARM32
+ET_DYN, SONAME и RPATH/RUNPATH; неоднозначность требует review.
+Оригиналы и приватные снимки проверяются на изменения. Выход содержит
+только метаданные дополнительных библиотек. Не анализируются APEX,
+транзитивные зависимости system-кандидатов, namespace или symbol binding.
+Диагностический статус не является release gate; исходный код завершения
+vendor-identity не изменён.

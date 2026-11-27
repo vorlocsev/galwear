@@ -285,6 +285,46 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertEqual(walk["edges"][0]["status"], "NOT_INSPECTED")
         self.assertFalse(walk["safe_to_flash"])
 
+    def test_system_dependency_candidates_use_verified_image(self):
+        self.put("bin/hw/android.hardware.gnss@1.0-service", b"service")
+        self.put("build.prop", b"ro.vndk.version=28\n")
+        vendor_sha = self.make_image()
+        vendor = self.image
+        self.tree = self.root / "system-tree"
+        self.tree.mkdir()
+        self.image = self.root / "system.img"
+        self.put("system/lib/vndk-28/libfixture.so", b"fixture")
+        self.put("system/lib/libduplicate.so", b"duplicate")
+        self.put("lib/libduplicate.so", b"duplicate")
+        self.put("system/lib64/libmissing.so", b"wrong ABI directory")
+        system_sha = self.make_image()
+
+        def inspect(raw):
+            return {"abi": "arm", "has_dynamic": True, "elf_type": "ET_DYN",
+                    "needed": ["libfixture.so", "libduplicate.so", "libmissing.so"]
+                    if raw == b"service" else [],
+                    "soname": None, "custom_search_path": False}
+        with mock.patch("r800_android_linker_audit.inspect", side_effect=inspect):
+            report = extract(vendor, self.output, "vendor-identity", vendor_sha,
+                             self.image, system_sha)
+        result = report["vendor_identity"]["system_dependency_candidates"]
+        rows = result["external_candidates"]
+        self.assertEqual(rows["libfixture.so"]["status"], "CANDIDATE_ONLY")
+        self.assertEqual(rows["libfixture.so"]["candidates"][0]["sha256"],
+                         hashlib.sha256(b"fixture").hexdigest())
+        self.assertEqual(rows["libduplicate.so"]["status"], "AMBIGUOUS")
+        self.assertEqual(rows["libmissing.so"]["status"], "NOT_FOUND_IN_SELECTED_PATHS")
+        self.assertEqual(result["status"], "REVIEW_REQUIRED")
+        self.assertFalse(result["dependency_closure_verified"])
+        self.assertFalse(result["apex_inspected"])
+        self.assertEqual(hashlib.sha256(self.image.read_bytes()).hexdigest(), system_sha)
+        self.assertEqual(hashlib.sha256(vendor.read_bytes()).hexdigest(), vendor_sha)
+        self.assertFalse((self.output / "system").exists())
+        with mock.patch("r800_android_linker_audit.inspect", side_effect=inspect):
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                extract(vendor, self.root/"bad-system", "vendor-identity", vendor_sha,
+                        self.image, "0"*64)
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")
