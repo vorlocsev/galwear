@@ -163,6 +163,54 @@ jobs:
             ${{ runner.temp }}/r800-hal/pcm-compat.json
           if-no-files-found: error
           retention-days: 7
+      - name: Compile Broadcom Bluetooth vendor library (ARM32, no radio access)
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh src/vendor/libbt/build.sh "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/r800-bt"
+          echo "BLUETOOTH_COMPILE_ONLY; runtime_verified=false; safe_to_flash=false"
+      - name: Upload Bluetooth text evidence only
+        if: always() && github.ref_name == 'development/r800-integration-20261127'
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-bluetooth-compile-evidence
+          path: |
+            ${{ runner.temp }}/r800-bt/bt-build-evidence.txt
+            ${{ runner.temp }}/r800-bt/libbt-vendor.elf.txt
+          if-no-files-found: warn
+          retention-days: 7
+  keepwifi-compile:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Android API 30 and Build Tools 30.0.3
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          command -v javac
+          command -v sdkmanager
+          sdkmanager --sdk_root="$ANDROID_HOME" --install "platforms;android-30" "build-tools;30.0.3"
+          test -s "$ANDROID_HOME/platforms/android-30/android.jar"
+          test -x "$ANDROID_HOME/build-tools/30.0.3/d8"
+          test -x "$ANDROID_HOME/build-tools/30.0.3/dexdump"
+      - name: Compile KeepWifi Java and inspect DEX (never execute)
+        run: |
+          set -eu
+          sh src/tools/keepwifi/build.sh "$ANDROID_HOME/platforms/android-30/android.jar" "$ANDROID_HOME/build-tools/30.0.3" "$RUNNER_TEMP/r800-keepwifi"
+          echo "KEEPWIFI_COMPILE_ONLY; runtime_verified=false; safe_to_flash=false"
+      - name: Upload KeepWifi text evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-keepwifi-compile-evidence
+          path: |
+            ${{ runner.temp }}/r800-keepwifi/keepwifi-build-evidence.txt
+            ${{ runner.temp }}/r800-keepwifi/keepwifi-dex-evidence.txt
+          if-no-files-found: warn
+          retention-days: 7
   kernel:
     if: github.event_name == 'workflow_dispatch' && inputs.kernel_repeatability
     uses: ./.github/workflows/r800-kernel-repeatability.yml
