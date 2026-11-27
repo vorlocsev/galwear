@@ -5,7 +5,8 @@ from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
-from r800_merged_vendor_graph import graph, external_audit, vndk_version
+from r800_merged_vendor_graph import graph, external_audit, vndk_version, merged_symbol_audit
+from r800_extract_ext4 import DonorSymbolInventory
 
 
 def elf(sha, name, needed=(), kind="ET_DYN"):
@@ -61,6 +62,42 @@ class MergedVendorGraphTests(unittest.TestCase):
             (root/"default.prop").write_text("ro.vndk.version=29\n")
             with self.assertRaisesRegex(ValueError, "Conflicting"):
                 vndk_version(root)
+
+    def test_merged_symbols_use_external_provider_and_versions(self):
+        objects = {"bin/service": elf("a", None, ["liboutside.so"], "ET_EXEC")}
+        report = {"objects": objects, "status": "MERGED_VENDOR_SYSTEM_CANDIDATES_ONLY",
+                  "rejected_objects": [], **graph(objects)}
+        system = {"status": "SYSTEM_PATH_CANDIDATES_ONLY",
+                  "system_candidate_graph": {"liboutside.so": {
+                      "status": "CANDIDATE_ONLY",
+                      "candidates": [{"origin": "system", "path": "/lib/liboutside.so", "needed": []}]}},
+                  "system_dependency_edges": []}
+        def metadata(imports=(), exports=(), needs=(), definitions=()):
+            return {"abi": "arm", "has_dynamic": True, "dynamic_symbol_count": 2,
+                    "symbol_imports": list(imports), "symbol_exports": list(exports),
+                    "unsupported_symbols": [], "version_needs": list(needs),
+                    "version_definitions": list(definitions)}
+        required = {"name": "fixture", "type": 2, "weak": False,
+                    "version": "FIXTURE_1", "version_library": "liboutside.so"}
+        provider = {"name": "fixture", "type": 2, "weak": False,
+                    "version": "FIXTURE_1", "version_hidden": False}
+        inventory = DonorSymbolInventory()
+        inventory.add("vendor/bin/service", metadata(
+            imports=[required], needs=[{"library": "liboutside.so", "version": "FIXTURE_1"}]))
+        inventory.add("system:/lib/liboutside.so", metadata(
+            exports=[provider], definitions=[{"version": "FIXTURE_1", "base": False}]))
+        good = merged_symbol_audit(report, inventory, system)
+        self.assertEqual(good["status"], "SYMBOL_CANDIDATES_ONLY")
+        self.assertEqual(good["symbol_candidates"]["matched"], 1)
+        self.assertFalse(good["symbol_resolution_verified"])
+        inventory.objects["system:/lib/liboutside.so"]["symbol_exports"] = []
+        bad = merged_symbol_audit(report, inventory, system)
+        self.assertEqual(bad["status"], "REVIEW_REQUIRED")
+        self.assertEqual(len(bad["symbol_candidates"]["missing_strong"]), 1)
+        inventory.objects["system:/lib/liboutside.so"]["version_definitions"] = []
+        self.assertTrue(merged_symbol_audit(report, inventory, system)["version_review"])
+        inventory.exhausted = True
+        self.assertTrue(merged_symbol_audit(report, inventory, system)["inventory_budget_exhausted"])
 
 
 if __name__ == "__main__":

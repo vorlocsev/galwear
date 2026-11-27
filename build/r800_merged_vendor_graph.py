@@ -68,7 +68,7 @@ def vndk_version(root):
     return next(iter(values), None)
 
 
-def external_audit(root, report, system_image, system_sha, include_apex):
+def external_audit(root, report, system_image, system_sha, include_apex, symbols=None):
     from r800_extract_ext4 import system_dependency_candidates
     if not re.fullmatch(r"[0-9a-f]{64}", system_sha):
         raise ValueError("Expected system SHA-256")
@@ -85,7 +85,7 @@ def external_audit(root, report, system_image, system_sha, include_apex):
     with tempfile.TemporaryDirectory(prefix="r800-merged-system-") as tmp:
         result = system_dependency_candidates(
             tool, system_image, system_sha, Path(tmp), walk,
-            {"ro.vndk.version": version}, include_apex=include_apex)
+            {"ro.vndk.version": version}, include_apex=include_apex, symbols=symbols)
     # The same library basename may appear in system and vendor. This is
     # evidence of competing candidates, not a simulated linker order.
     overlaps = []
@@ -105,7 +105,25 @@ def external_audit(root, report, system_image, system_sha, include_apex):
     return result
 
 
-def audit(root):
+def merged_symbol_audit(report, symbols, system=None):
+    from r800_extract_ext4 import donor_symbol_candidates
+    vendor = {"objects": {"vendor/" + path: {**item, "status": "CANDIDATE_ONLY"}
+                          for path, item in report["objects"].items()},
+              "edges": [{**edge, "from": "vendor/" + edge["from"],
+                         "candidate": "vendor/" + edge["candidate"],
+                         "status": {"LOCAL_CANDIDATE_ONLY": "CANDIDATE_ONLY",
+                                    "EXTERNAL_OR_MISSING": "OUTSIDE_VENDOR_LIB",
+                                    "LOCAL_PROVIDER_REJECTED": "REVIEW_REQUIRED"}[edge["status"]]}
+                        for edge in report["edges"]],
+              "problems": report["rejected_objects"] + report["rejected_providers"] +
+                          report["soname_conflicts"],
+              "budget_exhausted": False,
+              "status": "VENDOR_LIB_CANDIDATES_ONLY" if not report["external_or_missing"]
+                        and report["status"] == "MERGED_VENDOR_LOCAL_GRAPH_ONLY" else "REVIEW_REQUIRED"}
+    return donor_symbol_candidates(symbols, vendor, system or {})
+
+
+def audit(root, symbols=None):
     root = root.resolve(strict=True)
     objects, rejected = {}, []
     total = 0
@@ -138,6 +156,8 @@ def audit(root):
                         info["elf_type"] not in (("ET_DYN",) if directory == "lib" else ("ET_DYN", "ET_EXEC")) or
                         info["custom_search_path"]):
                     raise ValueError("Unexpected ARM32 dynamic ELF structure")
+                if symbols is not None:
+                    symbols.add("vendor/" + rel, info)
                 objects[rel] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw),
                                 "elf_type": info["elf_type"], "soname": info["soname"],
                                 "needed": info["needed"]}
@@ -163,29 +183,39 @@ def main():
     p.add_argument("--system-image", type=Path)
     p.add_argument("--system-sha256")
     p.add_argument("--include-apex", action="store_true")
+    p.add_argument("--check-symbols", action="store_true")
     a = p.parse_args()
     if a.report.resolve().is_relative_to(a.tree.resolve()):
         p.error("Report must be outside vendor tree")
     if bool(a.system_image) != bool(a.system_sha256) or (a.include_apex and not a.system_image):
         p.error("System image and digest required together; APEX requires system")
     try:
-        report = audit(a.tree)
+        from r800_extract_ext4 import DonorSymbolInventory
+        symbols = DonorSymbolInventory() if a.check_symbols else None
+        report = audit(a.tree, symbols)
+        external = None
         if a.system_image is not None:
             external = external_audit(a.tree.resolve(strict=True), report,
-                                      a.system_image, a.system_sha256, a.include_apex)
+                                      a.system_image, a.system_sha256, a.include_apex, symbols)
             report["system_candidates"] = external
             if (report["status"] == "MERGED_VENDOR_LOCAL_GRAPH_ONLY" and
                     external["status"] == "SYSTEM_PATH_CANDIDATES_ONLY"):
                 report["status"] = "MERGED_VENDOR_SYSTEM_CANDIDATES_ONLY"
             else:
                 report["status"] = "REVIEW_REQUIRED"
+        if symbols is not None:
+            report["symbol_audit"] = merged_symbol_audit(report, symbols, external)
+            if report["symbol_audit"]["status"] != "SYMBOL_CANDIDATES_ONLY":
+                report["status"] = "REVIEW_REQUIRED"
+            elif report["status"] in ("MERGED_VENDOR_LOCAL_GRAPH_ONLY", "MERGED_VENDOR_SYSTEM_CANDIDATES_ONLY"):
+                report["status"] = "MERGED_VENDOR_SYMBOL_CANDIDATES_ONLY"
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         report = {"status": "REVIEW_REQUIRED", "reason": str(exc), "safe_to_flash": False}
     with a.report.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
         stream.write("\n")
     print(report["status"])
-    return 0 if report["status"] in ("MERGED_VENDOR_LOCAL_GRAPH_ONLY", "MERGED_VENDOR_SYSTEM_CANDIDATES_ONLY") else 2
+    return 0 if report["status"] in ("MERGED_VENDOR_LOCAL_GRAPH_ONLY", "MERGED_VENDOR_SYSTEM_CANDIDATES_ONLY", "MERGED_VENDOR_SYMBOL_CANDIDATES_ONLY") else 2
 
 
 if __name__ == "__main__":

@@ -345,3 +345,14 @@ Merged vendor audit поддерживает --system-image FILE --system-sha256
 R800_SYSTEM_SHA256 включает строгий аудит с APEX до упаковки.
 Без пары остаётся диагностический локальный граф NON-RELEASE.
 Namespace precedence, symbol closure и реальные доноры не доказаны.
+
+
+Merged vendor graph: --check-symbols собирает ограниченный transient
+инвентарь импортов, экспортов и version requirements из реального
+объединённого дерева и выбранных System/VNDK/APEX кандидатов. Использует
+существующую проверку достижимых провайдеров, версий, TLS/non-TLS,
+strong/weak и неоднозначности; неполнота или исчерпание бюджета дают
+REVIEW_REQUIRED. При R800_SYSTEM_IMAGE/R800_SYSTEM_SHA256 legacy
+сборщик теперь также включает --check-symbols. Отсутствие system
+оставляет локальный структурный режим. Это не симуляция Android linker
+namespace precedence и не доказательство загрузки HAL.

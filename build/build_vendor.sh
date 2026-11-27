@@ -290,7 +290,7 @@ du -sh $OUT; find $OUT -type f | wc -l
 GRAPH_ARGS=()
 if [[ -n "${R800_SYSTEM_IMAGE:-}" || -n "${R800_SYSTEM_SHA256:-}" ]]; then
     [[ -n "${R800_SYSTEM_IMAGE:-}" && -n "${R800_SYSTEM_SHA256:-}" ]] || { echo "system image and digest required together" >&2; exit 2; }
-    GRAPH_ARGS+=(--system-image "$R800_SYSTEM_IMAGE" --system-sha256 "$R800_SYSTEM_SHA256" --include-apex)
+    GRAPH_ARGS+=(--system-image "$R800_SYSTEM_IMAGE" --system-sha256 "$R800_SYSTEM_SHA256" --include-apex --check-symbols)
 fi
 python3 "$REPO/build/r800_merged_vendor_graph.py" --tree "$OUT" --report "$WORK/merged-vendor-graph.json" "${GRAPH_ARGS[@]}"
 # image: 64 MiB ext4, keep xattrs
