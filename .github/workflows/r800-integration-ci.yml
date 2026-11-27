@@ -311,6 +311,74 @@ jobs:
           assert "payload/fw/bt/libbt-vendor.so" in actual
           print("REAL_COMPONENT_TREE_PASS", len(actual), "files; safe_to_flash=false")
           PY
+      - name: Audit real component tree and enforce missing donor hold
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          mkdir "$RUNNER_TEMP/r800-empty-donors"
+          rc=0
+          python3 build/r800_donor_preflight.py \
+            --donors "$RUNNER_TEMP/r800-empty-donors" \
+            --components "$RUNNER_TEMP/r800-components" --source-sha "$GITHUB_SHA" \
+            > "$RUNNER_TEMP/r800-donor-hold-evidence.json" || rc=$?
+          test "$rc" -eq 2
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r800-donor-hold-evidence.json"
+          r = json.loads(p.read_text())
+          assert r["status"] == "DONOR_INPUTS_INCOMPLETE"
+          c = r["inputs"]["compiled-components"]
+          assert c["status"] == "STRUCTURE_PASS_ONLY"
+          assert c["source_sha"] == os.environ["GITHUB_SHA"]
+          assert c["files"] > 0
+          assert "compiled-components" not in r["blockers"]
+          expected = {"samsung/combination.tar.md5", "samsung/boot-template.img",
+                      "android/base-vendor.img", "android/j4-vendor.img", "android/system",
+                      "tizen/libc.so.6", "tizen/libdl.so.2", "tizen/libpthread.so.0",
+                      "tizen/ld-linux.so.3"}
+          assert expected <= set(r["blockers"])
+          for name, row in r["inputs"].items():
+              if name != "compiled-components":
+                  assert row["status"] == "MISSING", (name, row)
+          for flag in ("donor_authenticity_verified", "hidl_dependency_closure_verified",
+                       "persistent_input_verified", "pit_verified", "runtime_verified", "safe_to_flash"):
+              assert r[flag] is False, flag
+          print("REAL_COMPONENT_ACCEPTANCE_PASS", c["files"], "files")
+          print("EXPECTED_DONOR_HOLD", len(r["blockers"]), "missing inputs")
+          PY
+      - name: Reject stale source SHA and tampered real component bytes
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          PYTHONPATH=build python3 - <<'PY'
+          import os, pathlib, shutil
+          from r800_donor_preflight import verify_components
+          tmp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          root = tmp / "r800-components"
+          sha = os.environ["GITHUB_SHA"]
+          stale = ("0" if sha[0] != "0" else "1") + sha[1:]
+          try:
+              verify_components(root, stale)
+          except ValueError as exc:
+              assert "source SHA mismatch" in str(exc)
+          else:
+              raise AssertionError("Stale SHA accepted")
+          copy = tmp / "r800-components-negative"
+          shutil.copytree(root, copy)
+          p = copy / "payload/keepwifi.dex"
+          raw = p.read_bytes()
+          p.write_bytes(bytes([raw[0] ^ 1]) + raw[1:])
+          try:
+              verify_components(copy, sha)
+          except ValueError as exc:
+              assert "Component hash mismatch" in str(exc)
+          else:
+              raise AssertionError("Tampered component accepted")
+          finally:
+              shutil.rmtree(copy)
+          verify_components(root, sha)
+          print("REAL_COMPONENT_NEGATIVE_TESTS_PASS")
+          PY
       - name: Upload component manifest only (no binaries)
         if: always() && github.ref_name == 'development/r800-integration-20261127'
         uses: actions/upload-artifact@v4
@@ -319,6 +387,7 @@ jobs:
           path: |
             ${{ runner.temp }}/r800-components/component-evidence.json
             ${{ runner.temp }}/r800-components/hal-stage-evidence.json
+            ${{ runner.temp }}/r800-donor-hold-evidence.json
           if-no-files-found: warn
           retention-days: 7
   kernel:
