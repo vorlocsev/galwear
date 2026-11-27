@@ -66,8 +66,8 @@ timeout -k 5s 30s "$BWRAP" --unshare-all --die-with-parent --new-session \
   /qemu -cpu cortex-a15 -L / -E LD_LIBRARY_PATH=/lib /probe > "$TMP/run.log" 2>&1 || RC=$?
 # Capture both successful and failed executions; review detects identity changes.
 python3 "$EVIDENCE" capture --root "$TMP/root" --qemu "$QEMU" --bwrap "$BWRAP" > "$TMP/after.json" || true
-python3 "$EVIDENCE" review --before "$TMP/before.json" --after "$TMP/after.json" --audit "$TMP/audit.json" --log "$TMP/run.log" --exit-code "$RC"
 cat "$TMP/run.log"
+python3 "$EVIDENCE" review --before "$TMP/before.json" --after "$TMP/after.json" --audit "$TMP/audit.json" --log "$TMP/run.log" --exit-code "$RC"
 (cd "$TMP/root/lib" && sha256sum -c "$TMP/manifest")
 echo "QEMU_USER_ONLY=PASS"
 echo "GNSS_RUNTIME_VERIFIED=false"

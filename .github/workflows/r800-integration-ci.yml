@@ -491,6 +491,40 @@ jobs:
             }
           python3 build/r800_gps_link_gate.py --binary "$ref/gpsbridge" --libdir "$ref/libs" > "$ref/reference-postlink.json"
           echo "DEBIAN_ARMEL_REFERENCE_LINK_PASS; tizen_donor_verified=false; runtime_verified=false; safe_to_flash=false"
+      - name: Install isolated ARM32 QEMU reference test tools
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- install -y --no-install-recommends qemu-user-static bubblewrap
+          test "$(id -u)" -ne 0
+          command -v qemu-arm-static
+          command -v bwrap
+          qemu-arm-static --version
+          bwrap --version
+      - name: Isolated Debian ARM glibc reference probe
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          sh build/r800_gps_glibc_qemu.sh "$RUNNER_TEMP/android-ndk-r27c" "$ref/libs" 2>&1 | tee "$ref/reference-qemu-glibc.log"
+          grep -Fx 'QEMU_USER_ONLY=PASS' "$ref/reference-qemu-glibc.log"
+          echo "DEBIAN_REFERENCE_QEMU_PROBE_PASS; tizen_donor_verified=false; gnss_runtime_verified=false; safe_to_flash=false"
+      - name: Isolated synthetic GPS HAL and daemon recovery against Debian reference
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          sh build/r800_gps_mock_qemu.sh "$RUNNER_TEMP/android-ndk-r27c" "$ref/libs" 2>&1 | tee "$ref/reference-qemu-mock.log"
+          grep -Fx 'QEMU_SYNTHETIC_GPS_HAL=PASS' "$ref/reference-qemu-mock.log"
+          grep -Fx 'QEMU_SYNTHETIC_GPS_DAEMON_RECOVERY=PASS' "$ref/reference-qemu-mock.log"
+      - name: Isolated synthetic XTRA matrix against Debian reference
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          sh build/r800_gps_mock_xtra_qemu.sh "$RUNNER_TEMP/android-ndk-r27c" "$ref/libs" 2>&1 | tee "$ref/reference-qemu-xtra.log"
+          grep -Fx 'QEMU_SYNTHETIC_XTRA_MATRIX=PASS' "$ref/reference-qemu-xtra.log"
       - name: Upload reference link metadata only (no guest binaries)
         if: always() && github.ref_name == 'development/r800-integration-20261127'
         uses: actions/upload-artifact@v4
@@ -502,6 +536,9 @@ jobs:
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-symbol-review.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-postlink.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-link.log
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-glibc.log
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-mock.log
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-xtra.log
           if-no-files-found: warn
           retention-days: 7
   kernel:

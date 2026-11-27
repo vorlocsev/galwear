@@ -102,3 +102,15 @@ are extracted, without package installation or guest code execution.
 A successful reference link cannot satisfy Tizen donor acceptance,
 replace original Samsung libraries, verify GNSS or authorize flashing.
 No reference binaries are published or staged in the payload.
+
+
+The static Debian reference link passed on exact commit
+`353d16eb4b82e5e1d01e9fd3ce1845ae51376d2e` in CI run
+[45997276656](https://github.com/vorlocsev/galwear/actions/runs/45997276656).
+The next integration CI phase runs the three existing isolated QEMU
+scripts with the pinned Debian ARM reference libraries: glibc/TLS/dlopen,
+synthetic HAL/daemon recovery, and synthetic XTRA matrix. The sandbox
+remains mandatory; failure to create it is a failed test, not permission
+to execute outside isolation. These scripts build separate test guests,
+not the saved static candidate. Their results are not Tizen or GNSS
+hardware acceptance. Only metadata and logs are uploaded.
