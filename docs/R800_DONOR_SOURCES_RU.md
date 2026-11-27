@@ -215,3 +215,13 @@ policy. Отчёт содержит digest инструмента, policy и к�
 передачи аргументов с mock; реальный AOSP host checkfc должен быть
 получен из существующей pinned AOSP сборки. Подлинность tool и
 полнота контекстов не устанавливаются одним digest.
+
+
+Штатная pinned AOSP сборка build/r800_aosp_sepolicy_build.sh после
+сборки checkfc запускает r800_aosp_checkfc_matrix.py. Отдельный отчёт
+checkfc-matrix.json содержит выбранные контексты system/vendor/system_ext/
+product/odm, отсутствующие файлы, результаты каждого режима и отрицательный
+тест неизвестного типа. Требуются file/property/service/hwservice;
+vndservice может отсутствовать и отмечается отдельно. Запуск только
+на подготовленной disposable AOSP среде. Это stock AOSP, не донорская
+политика SM-R800; обычный CI проверяет контракт с mock.

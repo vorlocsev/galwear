@@ -30,5 +30,7 @@ printf '%s\n' "$(realpath "$HOST_OUT")" > "$OUT/host-out-path.txt"
 python3 "$TOOLS/r800_android_sepolicy_audit.py" --product-out "$PRODUCT_OUT" \
     --checkfc "$HOST_OUT/bin/checkfc" --report "$OUT/sepolicy-audit.json"
 git -C system/sepolicy rev-parse HEAD > "$OUT/sepolicy-source-commit.txt"
-sha256sum "$OUT/manifest-resolved.xml" "$OUT/sepolicy-audit.json" > "$OUT/source-evidence.sha256"
+python3 "$TOOLS/r800_aosp_checkfc_matrix.py" --product-out "$PRODUCT_OUT" \
+    --checkfc "$HOST_OUT/bin/checkfc" --report "$OUT/checkfc-matrix.json"
+sha256sum "$OUT/manifest-resolved.xml" "$OUT/sepolicy-audit.json" "$OUT/checkfc-matrix.json" > "$OUT/source-evidence.sha256"
 printf 'status=ANDROID_SEPOLICY_BUILD_AND_STATIC_AUDIT_ONLY\nsafe_to_flash=false\n' > "$OUT/status.txt"
