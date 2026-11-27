@@ -579,15 +579,29 @@ static int namespace_failure_recovery(void)
     return 1;
 }
 
-static int namespace_version_good(void)
+static int namespace_version_good(const char *name)
 {
-    void *h=dlopen("libgalwear-ns-version-good.so",RTLD_NOW|RTLD_LOCAL);
+    void *h=dlopen(name,RTLD_NOW|RTLD_LOCAL);
     if (!h) { fprintf(stderr,"version good load: %s\n",dlerror()); return 0; }
     dlerror();
     int (*call)(void)=dlsym(h,"r800_namespace_version_call");
     const char *err=dlerror();
     int ok=!err && call && call()==0x812;
     return dlclose(h)==0 && ok;
+}
+/* Android linker diagnostics may omit the requested symbol version.
+ * Require the exact failing symbol and client, or the exact missing version.
+ * A second fresh guest with the alternate provider proves the inverse case. */
+static int namespace_version_rejected(const char *client,const char *version)
+{
+    dlerror();
+    void *h=dlopen(client,RTLD_NOW|RTLD_LOCAL);
+    const char *err=dlerror();
+    if (h) { dlclose(h); return 0; }
+    fprintf(stderr,"namespace expected version failure: %s\n",err?err:"none");
+    return err && strstr(err,client) &&
+        ((strstr(err,"cannot locate symbol") && strstr(err,"r800_namespace_version")) ||
+         (strstr(err,"version") && strstr(err,version) && strstr(err,"not found")));
 }
 static int namespace_versions(void)
 {
@@ -598,22 +612,26 @@ static int namespace_versions(void)
     for (int i=0;i<3;++i)
         if (lstat(files[i],&st) || !S_ISREG(st.st_mode) || st.st_size<=0) return 0;
     int before=fd_count();
-    if (before<0 || !namespace_version_good() || fd_count()!=before) return 0;
+    if (before<0 || !namespace_version_good("libgalwear-ns-version-good.so") || fd_count()!=before) return 0;
     for (int i=0;i<3;++i) {
-        dlerror();
-        void *bad=dlopen("libgalwear-ns-version-bad.so",RTLD_NOW|RTLD_LOCAL);
-        const char *err=dlerror();
-        if (bad) { dlclose(bad); return 0; }
-        fprintf(stderr,"namespace expected version failure: %s\n",err?err:"none");
-        if (!err || !strstr(err,"GALWEAR_2") ||
-            (!strstr(err,"version") && !strstr(err,"cannot locate symbol")) ||
-            !namespace_version_good() || fd_count()!=before) return 0;
+        if (!namespace_version_rejected("libgalwear-ns-version-bad.so","GALWEAR_2") ||
+            !namespace_version_good("libgalwear-ns-version-good.so") || fd_count()!=before) return 0;
     }
     return 1;
 }
 
 int main(int argc, char **argv)
 {
+    if (argc==4 && !strcmp(argv[3],"--namespace-version-v2")) {
+        if (strcmp(argv[1],"lights.r800.so") || strcmp(argv[2],"lights")) return 2;
+        int before=fd_count();
+        if (before<0 || !namespace_version_good("libgalwear-ns-version-bad.so") ||
+            !namespace_version_rejected("libgalwear-ns-version-good.so","GALWEAR_1") ||
+            !namespace_version_good("libgalwear-ns-version-bad.so") ||
+            fd_count()!=before) return 191;
+        puts("HAL_NAMESPACE_VERSION_V2_PASS compatible=2 incompatible=1 fd_stable=1");
+        return 0;
+    }
     if (argc != 3 && (argc != 4 ||
         (strcmp(argv[3], "--lifecycle") && strcmp(argv[3], "--lights-fixture") &&
          strcmp(argv[3], "--sensors-fixture") && strcmp(argv[3], "--sensors-context") &&

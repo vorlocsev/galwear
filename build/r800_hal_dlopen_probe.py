@@ -452,6 +452,30 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 results[name] = {"status": "REVIEW_REQUIRED", "reason": "Timeout"}
         if snapshot() != before:
             raise ValueError("Guest input changed")
+        # Fresh QEMU process; replace only the pinned provider through a
+        # read-only mount. All clients, config and the original guest stay unchanged.
+        if namespace_fixture and results.get("lights.r800.so", {}).get("status") == "NAMESPACE_FIXTURE_PASS":
+            control = list(cmd)
+            i = control.index("--chdir")
+            control[i:i] = ["--ro-bind", str((probe_dir/alternate).resolve()),
+                            "/vendor/lib/hw/libgalwear-ns-version.so"]
+            control[-1] = "--namespace-version-v2"
+            marker_v2 = "HAL_NAMESPACE_VERSION_V2_PASS compatible=2 incompatible=1 fd_stable=1"
+            record = results["lights.r800.so"]
+            try:
+                proc_v2 = subprocess.run(control, capture_output=True, text=True, timeout=30)
+                log_v2 = proc_v2.stdout + proc_v2.stderr
+                control_ok = proc_v2.returncode == 0 and log_v2.splitlines().count(marker_v2) == 1
+                record["version_v2_control"] = {"exit_code": proc_v2.returncode,
+                                                "marker": marker_v2 if control_ok else None,
+                                                "log": log_v2[-4096:]}
+            except subprocess.TimeoutExpired:
+                control_ok = False
+                record["version_v2_control"] = {"reason": "Timeout"}
+            if not control_ok:
+                record["status"] = "REVIEW_REQUIRED"
+            if snapshot() != before or sha(read_regular(probe_dir/alternate, LIMIT)) != ns_hashes[alternate]:
+                raise ValueError("Version control input changed")
     expected_status = ("NAMESPACE_FIXTURE_PASS" if namespace_fixture else
                        "HWC_FIXTURE_PASS" if hwc_fixture else
                        "AUDIO_PCM_FIXTURE_PASS" if audio_pcm_fixture else
@@ -479,6 +503,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "namespace_fixture_requested": namespace_fixture,
         "synthetic_namespace_link_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_config_sha256": namespace_config_sha if namespace_fixture else None,
+        "synthetic_namespace_version_v2_control_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_symbol_versions_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_failure_recovery_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_transitive_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
