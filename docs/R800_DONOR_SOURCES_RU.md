@@ -538,3 +538,13 @@ and concurrent/reentrant framework lifecycle calls remain unverified.
 QEMU fixture now checks active STOP on cleanup, peer EOF, two reinits,
 cleanup with missing bridge and dlclose only after successful test.
 New CI pending; no actual GNSS.
+
+
+CI 46036056045 / job 140631634438 exact 067e8cc: GPS cleanup PASS,
+joined=3, reinit=2, active STOP, absent bridge and dlclose.
+Новый --audio-fixture тестирует неизменённый Audio HAL без /dev/snd:
+8 cycles, output 48k stereo, input 48k mono/stereo, invalid format negotiation,
+duplicate stream and busy device close, invalid frame alignment, zero bytes,
+16 silent captures with guard, playback fallback, unavailable positions,
+FD count and HFP failure without mixer. Real PCM/mixer success, DSP, speaker,
+microphone and HFP hardware remain unverified. New CI pending.
