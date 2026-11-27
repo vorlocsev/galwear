@@ -356,3 +356,14 @@ REVIEW_REQUIRED. При R800_SYSTEM_IMAGE/R800_SYSTEM_SHA256 legacy
 сборщик теперь также включает --check-symbols. Отсутствие system
 оставляет локальный структурный режим. Это не симуляция Android linker
 namespace precedence и не доказательство загрузки HAL.
+
+
+Merged vendor namespace audit: --linker-config FILE --linker-config-sha256
+HASH или R800_LINKER_CONFIG/R800_LINKER_CONFIG_SHA256 для build_vendor.sh.
+Проверяются пути поиска, секции executable roots, разрешённые namespace
+links и shared_libs по выбранным ELF-кандидатам. Невалидная конфигурация,
+неоднозначный или недоступный путь дают REVIEW_REQUIRED. Отдельно
+unreached_vendor_objects показывает объекты, не охваченные цепочками
+от bin/* (включая потенциальный dlopen HAL). Реальный порядок загрузки,
+генерация linkerconfig, dlopen и runtime не проверены. Конфигурация
+предоставляется явно; её происхождение не подтверждено.

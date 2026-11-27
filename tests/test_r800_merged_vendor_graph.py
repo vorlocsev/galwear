@@ -1,11 +1,12 @@
 import sys
 import unittest
 import tempfile
+import hashlib
 from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
-from r800_merged_vendor_graph import graph, external_audit, vndk_version, merged_symbol_audit
+from r800_merged_vendor_graph import graph, external_audit, vndk_version, merged_symbol_audit, merged_namespace_audit
 from r800_extract_ext4 import DonorSymbolInventory
 
 
@@ -98,6 +99,40 @@ class MergedVendorGraphTests(unittest.TestCase):
         self.assertTrue(merged_symbol_audit(report, inventory, system)["version_review"])
         inventory.exhausted = True
         self.assertTrue(merged_symbol_audit(report, inventory, system)["inventory_budget_exhausted"])
+
+    def test_merged_namespace_links_and_unreached_hal(self):
+        objects = {"bin/hw/service": elf("a", None, ["liboutside.so"], "ET_EXEC"),
+                   "lib/hw/gps.r800.so": elf("b", "gps.r800.so")}
+        report = {"objects": objects, "status": "MERGED_VENDOR_SYMBOL_CANDIDATES_ONLY",
+                  "rejected_objects": [], **graph(objects)}
+        system = {"status": "SYSTEM_PATH_CANDIDATES_ONLY",
+                  "system_candidate_graph": {"liboutside.so": {
+                      "status": "CANDIDATE_ONLY",
+                      "candidates": [{"origin": "com.android.runtime",
+                                      "path": "/lib/bionic/liboutside.so", "needed": []}]}},
+                  "system_dependency_edges": []}
+        raw = b"""dir.vendor = /vendor/bin
+[vendor]
+additional.namespaces = runtime
+namespace.default.search.paths = /vendor/${LIB}
+namespace.default.links = runtime
+namespace.default.link.runtime.shared_libs = liboutside.so
+namespace.runtime.search.paths = /apex/com.android.runtime/${LIB}/bionic
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp)/"ld.config.txt"
+            config.write_bytes(raw)
+            good = merged_namespace_audit(report, config, hashlib.sha256(raw).hexdigest(), system)
+            self.assertEqual(good["status"], "CONFIG_PATH_MATCHES_ONLY")
+            self.assertEqual(good["checks"][0]["matching_namespaces"], ["runtime"])
+            self.assertEqual(good["unreached_vendor_objects"], ["/vendor/lib/hw/gps.r800.so"])
+            self.assertFalse(good["dlopen_coverage_verified"])
+            bad = raw.replace(b"shared_libs = liboutside.so", b"shared_libs = libother.so")
+            config.write_bytes(bad)
+            self.assertEqual(merged_namespace_audit(report, config,
+                hashlib.sha256(bad).hexdigest(), system)["status"], "REVIEW_REQUIRED")
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                merged_namespace_audit(report, config, "0"*64, system)
 
 
 if __name__ == "__main__":

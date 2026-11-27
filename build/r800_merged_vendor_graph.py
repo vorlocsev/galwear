@@ -105,9 +105,9 @@ def external_audit(root, report, system_image, system_sha, include_apex, symbols
     return result
 
 
-def merged_symbol_audit(report, symbols, system=None):
-    from r800_extract_ext4 import donor_symbol_candidates
-    vendor = {"objects": {"vendor/" + path: {**item, "status": "CANDIDATE_ONLY"}
+def candidate_walk(report):
+    return {"roots": ["vendor/" + p for p in sorted(report["objects"])],
+              "objects": {"vendor/" + path: {**item, "status": "CANDIDATE_ONLY"}
                           for path, item in report["objects"].items()},
               "edges": [{**edge, "from": "vendor/" + edge["from"],
                          "candidate": "vendor/" + edge["candidate"],
@@ -119,8 +119,31 @@ def merged_symbol_audit(report, symbols, system=None):
                           report["soname_conflicts"],
               "budget_exhausted": False,
               "status": "VENDOR_LIB_CANDIDATES_ONLY" if not report["external_or_missing"]
-                        and report["status"] == "MERGED_VENDOR_LOCAL_GRAPH_ONLY" else "REVIEW_REQUIRED"}
-    return donor_symbol_candidates(symbols, vendor, system or {})
+                        and not (report["rejected_objects"] or report["rejected_providers"] or
+                                 report["soname_conflicts"]) else "REVIEW_REQUIRED"}
+
+
+def merged_symbol_audit(report, symbols, system=None):
+    from r800_extract_ext4 import donor_symbol_candidates
+    return donor_symbol_candidates(symbols, candidate_walk(report), system or {})
+
+
+def merged_namespace_audit(report, config, config_sha, system=None):
+    from r800_extract_ext4 import donor_namespace_candidates
+    if not re.fullmatch(r"[0-9a-f]{64}", config_sha):
+        raise ValueError("Expected linker config SHA-256")
+    walk = candidate_walk(report)
+    result = donor_namespace_candidates(config, config_sha, walk, system or {})
+    reached = {row["path"] for row in result["roots"] if row["section"] is not None}
+    for row in result["checks"]:
+        reached.add(row["from"])
+        if row["status"] == "CONFIG_PATH_MATCH_ONLY" and row["candidate"]:
+            reached.add(row["candidate"])
+    result["unreached_vendor_objects"] = sorted("/" + name for name in walk["objects"]
+                                                if "/" + name not in reached)
+    result["dlopen_coverage_verified"] = False
+    result["namespace_resolution_verified"] = False
+    return result
 
 
 def audit(root, symbols=None):
@@ -184,11 +207,15 @@ def main():
     p.add_argument("--system-sha256")
     p.add_argument("--include-apex", action="store_true")
     p.add_argument("--check-symbols", action="store_true")
+    p.add_argument("--linker-config", type=Path)
+    p.add_argument("--linker-config-sha256")
     a = p.parse_args()
     if a.report.resolve().is_relative_to(a.tree.resolve()):
         p.error("Report must be outside vendor tree")
     if bool(a.system_image) != bool(a.system_sha256) or (a.include_apex and not a.system_image):
         p.error("System image and digest required together; APEX requires system")
+    if bool(a.linker_config) != bool(a.linker_config_sha256):
+        p.error("Linker config and digest required together")
     try:
         from r800_extract_ext4 import DonorSymbolInventory
         symbols = DonorSymbolInventory() if a.check_symbols else None
@@ -209,13 +236,20 @@ def main():
                 report["status"] = "REVIEW_REQUIRED"
             elif report["status"] in ("MERGED_VENDOR_LOCAL_GRAPH_ONLY", "MERGED_VENDOR_SYSTEM_CANDIDATES_ONLY"):
                 report["status"] = "MERGED_VENDOR_SYMBOL_CANDIDATES_ONLY"
+        if a.linker_config is not None:
+            report["namespace_audit"] = merged_namespace_audit(
+                report, a.linker_config, a.linker_config_sha256, external)
+            if report["namespace_audit"]["status"] != "CONFIG_PATH_MATCHES_ONLY":
+                report["status"] = "REVIEW_REQUIRED"
+            elif report["status"] != "REVIEW_REQUIRED":
+                report["status"] = "MERGED_VENDOR_NAMESPACE_CANDIDATES_ONLY"
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         report = {"status": "REVIEW_REQUIRED", "reason": str(exc), "safe_to_flash": False}
     with a.report.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
         stream.write("\n")
     print(report["status"])
-    return 0 if report["status"] in ("MERGED_VENDOR_LOCAL_GRAPH_ONLY", "MERGED_VENDOR_SYSTEM_CANDIDATES_ONLY", "MERGED_VENDOR_SYMBOL_CANDIDATES_ONLY") else 2
+    return 0 if report["status"] in ("MERGED_VENDOR_LOCAL_GRAPH_ONLY", "MERGED_VENDOR_SYSTEM_CANDIDATES_ONLY", "MERGED_VENDOR_SYMBOL_CANDIDATES_ONLY", "MERGED_VENDOR_NAMESPACE_CANDIDATES_ONLY") else 2
 
 
 if __name__ == "__main__":
