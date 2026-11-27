@@ -512,6 +512,38 @@ static int namespace_denied(void)
     return 1;
 }
 
+static int namespace_private_denied(void)
+{
+    const char *paths[]={"libgalwear-ns-leaf.so","/vendor/lib/hw/libgalwear-ns-leaf.so"};
+    struct stat st;
+    if (lstat(paths[1],&st) || !S_ISREG(st.st_mode) || st.st_size<=0) return 0;
+    for (int i=0;i<2;++i) {
+        dlerror();
+        void *h=dlopen(paths[i],RTLD_NOW|RTLD_LOCAL);
+        const char *err=dlerror();
+        if (h) { dlclose(h); fprintf(stderr,"private dependency exposed: %s\n",paths[i]); return 0; }
+        if (!err || (!strstr(err,"not found") && !strstr(err,"not accessible"))) {
+            fprintf(stderr,"private dependency unexpected error: %s\n",err?err:"none");
+            return 0;
+        }
+        fprintf(stderr,"private dependency denied %s: %s\n",paths[i],err);
+    }
+    return 1;
+}
+static int namespace_transitive(void)
+{
+    if (!namespace_private_denied()) return 0;
+    void *h=dlopen("libgalwear-ns-parent.so",RTLD_NOW|RTLD_LOCAL);
+    if (!h) { fprintf(stderr,"namespace parent load: %s\n",dlerror()); return 0; }
+    dlerror();
+    int (*call)(void)=dlsym(h,"r800_namespace_parent");
+    const char *err=dlerror();
+    /* Calling the parent proves the private DT_NEEDED symbol was relocated. */
+    int ok=!err && call && call()==0x827 && namespace_private_denied();
+    if (dlclose(h)) return 0;
+    return ok && namespace_private_denied();
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3 && (argc != 4 ||
@@ -549,6 +581,8 @@ int main(int argc, char **argv)
            (unsigned)module->module_api_version, (unsigned)module->hal_api_version);
     if (namespace_mode) {
         if (!namespace_denied()) { dlclose(handle); return 187; }
+        if (!namespace_transitive()) { dlclose(handle); return 188; }
+        puts("HAL_NAMESPACE_TRANSITIVE_PASS parent=1 relocated=1 private_denials=6");
         if (dlclose(handle)) return 5;
         puts("HAL_NAMESPACE_FIXTURE_PASS linked_lights=1 denied_name=2 denied_absolute=2");
         return 0;

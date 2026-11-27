@@ -102,11 +102,26 @@ def compile_probe(ndk, hals, output, source_sha):
     gralloc_raw, gralloc_info = check(gralloc, True)
     if not set(gralloc_info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected gralloc test adapter dependency")
+    ns_hashes = {}
+    for name, extra in (
+        ("libgalwear-ns-leaf.so", ["-DR800_NAMESPACE_LEAF"]),
+        ("libgalwear-ns-parent.so", ["-L"+str(output), "-lgalwear-ns-leaf"]),
+    ):
+        target = output/name
+        subprocess.run([str(cc), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2",
+                        "-shared", "-fPIC", str(ROOT/"src/initramfs/r800-namespace-fixture.c"),
+                        *extra, "-Wl,-soname,"+name, "-Wl,--no-undefined", "-o", str(target)],
+                       check=True, timeout=60)
+        ns_raw, ns_info = check(target, True)
+        private = {"libgalwear-ns-leaf.so"} if name.endswith("parent.so") else set()
+        if set(ns_info["needed"]) - HAL_COMPILE_LIBS != private:
+            raise ValueError("Unexpected synthetic namespace dependency graph")
+        ns_hashes[name] = sha(ns_raw)
     raw, info = check(probe)
     if not set(info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected probe dependency")
     result = {"status": "ARM32_HAL_DLOPEN_PROBE_COMPILE_ONLY", "source_sha": source_sha,
-              "probe_sha256": sha(raw), "gralloc_fixture_sha256": sha(gralloc_raw), "evdev_fixture_sha256": sha(shim_raw), "pcm_fixture_sha256": sha(pcm_raw), "hwc_fixture_sha256": sha(hwc_raw), "hal_sha256": hashes,
+              "probe_sha256": sha(raw), "namespace_fixture_sha256": ns_hashes, "gralloc_fixture_sha256": sha(gralloc_raw), "evdev_fixture_sha256": sha(shim_raw), "pcm_fixture_sha256": sha(pcm_raw), "hwc_fixture_sha256": sha(hwc_raw), "hal_sha256": hashes,
               "runtime_verified": False, "hardware_tested": False, "safe_to_flash": False}
     (output/"hal-probe-evidence.json").write_text(json.dumps(result, indent=2, sort_keys=True)+"\n")
     return result
@@ -141,11 +156,14 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             raise ValueError("Linker digest mismatch")
         linker_soname = linker_info["soname"]
         runtime_dependencies("linker", linker_info, linker_soname)
-        def add(src, rel, digest, lib=False, executable=False):
+        def add(src, rel, digest, lib=False, executable=False, private_needed=()):
             raw, info = check(src, lib)
             if sha(raw) != digest:
                 raise ValueError("ELF digest mismatch: " + src.name)
-            runtime_dependencies(src.name, info, linker_soname)
+            # Only the explicitly compiled parent may have this private edge.
+            if private_needed and not set(private_needed) <= set(info["needed"]):
+                raise ValueError("Missing synthetic namespace dependency")
+            runtime_dependencies(src.name, {**info, "needed": [n for n in info["needed"] if n not in private_needed]}, linker_soname)
             target = root/rel
             target.write_bytes(raw)
             target.chmod(0o555 if executable else 0o444)
@@ -166,6 +184,13 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             "namespace.default.isolated = false\n"
             "namespace.default.search.paths = /apex/com.android.runtime/lib/bionic:/system/lib\n")
         if namespace_fixture:
+            ns_names = ("libgalwear-ns-leaf.so", "libgalwear-ns-parent.so")
+            ns_hashes = evidence["namespace_fixture_sha256"]
+            if set(ns_hashes) != set(ns_names):
+                raise ValueError("Unexpected synthetic namespace inventory")
+            for name in ns_names:
+                add(probe_dir/name, "vendor/lib/hw/"+name, ns_hashes[name], True,
+                    private_needed=(ns_names[0],) if name == ns_names[1] else ())
             # Deliberately no LD_LIBRARY_PATH, no permissive default namespace.
             # Only this synthetic configuration is tested, not donor policy.
             (root/"linkerconfig/ld.config.txt").write_text(
@@ -174,7 +199,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 "namespace.default.isolated = true\n"
                 "namespace.default.search.paths = /apex/com.android.runtime/lib/bionic:/system/lib\n"
                 "namespace.default.links = vendor\n"
-                "namespace.default.link.vendor.shared_libs = lights.r800.so\n"
+                "namespace.default.link.vendor.shared_libs = lights.r800.so:libgalwear-ns-parent.so\n"
                 "namespace.vendor.isolated = true\n"
                 "namespace.vendor.search.paths = /vendor/lib/hw\n"
                 "namespace.vendor.links = default\n"
@@ -350,7 +375,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                                   (dsim/"cmd_rw").read_bytes() == b"2")
                 if namespace_fixture:
                     fixture_marker = "HAL_NAMESPACE_FIXTURE_PASS linked_lights=1 denied_name=2 denied_absolute=2"
-                    fixture_ok = log.splitlines().count(fixture_marker) == 1
+                    fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
+                                  log.splitlines().count("HAL_NAMESPACE_TRANSITIVE_PASS parent=1 relocated=1 private_denials=6") == 1)
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
                           (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture or namespace_fixture) or fixture_ok))
@@ -400,6 +426,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "namespace_fixture_requested": namespace_fixture,
         "synthetic_namespace_link_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_config_sha256": namespace_config_sha if namespace_fixture else None,
+        "synthetic_namespace_transitive_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
+        "namespace_fixture_sha256": evidence.get("namespace_fixture_sha256") if namespace_fixture else None,
         "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture,
         "lifecycle_requested": lifecycle, "lights_fixture_requested": lights_fixture,
         "sensors_fixture_requested": sensors_fixture, "sensors_context_requested": sensors_context,
