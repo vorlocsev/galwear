@@ -103,6 +103,19 @@ class Arm32RuntimeExtractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exceeds limit"):
                 expand(archive, root/"oversized", expected_size=size, limit=6)
 
+    def test_linker_soname_dependency_is_not_external_library(self):
+        from r800_hal_dlopen_probe import runtime_dependencies
+        libc = {"elf_type": "ET_DYN", "needed": ["libdl.so", "ld-android.so"]}
+        runtime_dependencies("libc.so", libc, "ld-android.so")
+        with self.assertRaisesRegex(ValueError, "ld-android.so"):
+            runtime_dependencies("libc.so", libc, None)
+        with self.assertRaisesRegex(ValueError, "libunknown.so"):
+            runtime_dependencies("libc.so", {"elf_type": "ET_DYN",
+                "needed": ["ld-android.so", "libunknown.so"]}, "ld-android.so")
+        with self.assertRaisesRegex(ValueError, "Unexpected ARM32 linker"):
+            runtime_dependencies("linker", {"elf_type": "ET_DYN",
+                "needed": ["libc.so"]}, "ld-android.so")
+
 
 if __name__ == "__main__":
     unittest.main()

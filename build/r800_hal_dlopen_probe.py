@@ -17,6 +17,7 @@ HALS = {"audio.primary.r800.so": "audio", "gps.r800.so": "gps",
         "sensors.r800.so": "sensors", "lights.r800.so": "lights",
         "hwcomposer.r800.so": "hwcomposer"}
 RUNTIME = ("linker", "libc.so", "libdl.so", "libm.so", "liblog.so")
+LINKER_SONAME = "ld-android.so"
 LIMIT = 64*1024**2
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,6 +34,17 @@ def check(path, library=False):
     if library and (info["elf_type"] != "ET_DYN" or info["soname"] != path.name):
         raise ValueError("Unexpected library identity: " + path.name)
     return raw, info
+
+
+def runtime_dependencies(name, info, linker_soname):
+    allowed = set(RUNTIME[1:])
+    if linker_soname == LINKER_SONAME:
+        allowed.add(LINKER_SONAME)
+    unexpected = sorted(set(info["needed"]) - allowed)
+    if unexpected:
+        raise ValueError("Runtime dependency outside allowlist: " + name + ": " + ", ".join(unexpected))
+    if name == "linker" and (info["elf_type"] != "ET_DYN" or info["needed"]):
+        raise ValueError("Unexpected ARM32 linker structure")
 
 
 def compile_probe(ndk, hals, output, source_sha):
@@ -89,10 +101,16 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output):
                      "apex/com.android.runtime/bin", "apex/com.android.runtime/lib/bionic"):
             (root/name).mkdir(parents=True, exist_ok=True)
         (root/"qemu").touch()
+        linker_raw, linker_info = check(runtime/"linker")
+        if sha(linker_raw) != pins["linker"]:
+            raise ValueError("Linker digest mismatch")
+        linker_soname = linker_info["soname"]
+        runtime_dependencies("linker", linker_info, linker_soname)
         def add(src, rel, digest, lib=False, executable=False):
             raw, info = check(src, lib)
-            if sha(raw) != digest or not set(info["needed"]) <= set(RUNTIME[1:]):
-                raise ValueError("ELF digest/dependency mismatch: " + src.name)
+            if sha(raw) != digest:
+                raise ValueError("ELF digest mismatch: " + src.name)
+            runtime_dependencies(src.name, info, linker_soname)
             target = root/rel
             target.write_bytes(raw)
             target.chmod(0o555 if executable else 0o444)

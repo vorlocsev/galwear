@@ -17,7 +17,7 @@ from r800_android_runtime_extract import unpack_system, extract_payload, MAX_APE
 from r800_extract_ext4 import snapshot_image, locate, command
 from r800_vendor_inputs import image_info
 from r800_android_userspace_preflight import read_regular
-from r800_hal_dlopen_probe import check, RUNTIME, LIMIT
+from r800_hal_dlopen_probe import check, RUNTIME, LIMIT, runtime_dependencies, LINKER_SONAME
 
 # Android 10/11 runtime APEX layout. liblog is outside Runtime APEX.
 APEX_PATHS = ("/apex/com.android.runtime.apex", "/system/apex/com.android.runtime.apex")
@@ -88,6 +88,7 @@ def extract(system, expected, output):
         stage = scratch/"stage"
         stage.mkdir()
         rows = {}
+        linker_soname = None
         for name in RUNTIME:
             if name == "liblog.so":
                 guest, raw = get_member(tool, raw_system, LIBLOG_PATHS, scratch, LIMIT)
@@ -100,10 +101,11 @@ def extract(system, expected, output):
             dest = stage/name
             dest.write_bytes(raw)
             checked, info = check(dest, library=name != "linker")
-            if checked != raw or not set(info["needed"]) <= set(RUNTIME[1:]):
-                raise ValueError("Runtime dependency outside allowlist: " + name)
-            if name == "linker" and (info["elf_type"] != "ET_DYN" or info["needed"]):
-                raise ValueError("Unexpected ARM32 linker structure")
+            if checked != raw:
+                raise ValueError("Runtime member changed: " + name)
+            if name == "linker":
+                linker_soname = info["soname"]
+            runtime_dependencies(name, info, linker_soname)
             dest.chmod(0o555 if name == "linker" else 0o444)
             rows[name] = {"sha256": sha(raw), "bytes": len(raw), "origin": origin,
                           "guest_path": guest, "needed": info["needed"], "soname": info["soname"]}
@@ -119,6 +121,8 @@ def extract(system, expected, output):
                   "apex_path": source, "apex_layout": layout,
                   "apex_sha256": sha(apex_bytes) if apex_bytes is not None else None,
                   "apex_payload_sha256": payload_before["sha256"] if payload_before else None, "files": rows,
+                  "linker_soname": linker_soname,
+                  "linker_provides_ld_android": linker_soname == LINKER_SONAME,
                   "runtime_authenticity_verified": False, "android_version_verified": False,
                   "apex_signature_verified": False, "runtime_stub_exclusion_proven": False,
                   "runtime_verified": False, "safe_to_flash": False}
