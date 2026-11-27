@@ -34,6 +34,24 @@ class DonorPreflightTests(unittest.TestCase):
         self.assertEqual(report["inputs"]["compiled-components"]["status"], "STRUCTURE_PASS_ONLY")
         self.assertIn("samsung/combination.tar.md5", report["blockers"])
         self.assertIn("android/system", report["blockers"])
+        for name, row in report["inputs"].items():
+            if name != "compiled-components":
+                self.assertEqual(row["status"], "MISSING", name)
+        self.assertFalse(report["safe_to_flash"])
+
+    def test_existing_curated_directory_is_distinct_from_missing(self):
+        payload = self.donors / "payload"
+        payload.mkdir()
+        (payload / "lib").mkdir()
+        (payload / "tzlite").write_bytes(b"not a directory")
+        report = audit(self.donors, self.components, SHA)
+        for name in ("payload/lib", "payload/tzlite"):
+            self.assertEqual(report["inputs"][name]["status"], "REJECTED")
+            self.assertIn(name, report["blockers"])
+        (payload / "lib" / "fixture").write_bytes(b"synthetic")
+        report = audit(self.donors, self.components, SHA)
+        self.assertEqual(report["inputs"]["payload/lib"]["status"], "STRUCTURE_PASS_ONLY")
+        self.assertFalse(report["inputs"]["payload/lib"]["contents_verified"])
         self.assertFalse(report["safe_to_flash"])
 
     def test_dynamic_loader_is_required(self):

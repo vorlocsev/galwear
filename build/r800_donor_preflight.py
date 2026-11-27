@@ -159,7 +159,9 @@ def audit(donors, components, expected_sha):
         check("payload/" + name, lambda p, size=size: sized(p, size))
     for name in ("tzlite", "lib"):
         def directory(p):
-            if not p.is_dir() or not any(p.iterdir()):
+            # lstat raises FileNotFoundError for absent inputs; do not
+            # conflate a missing directory with a malformed existing one.
+            if not stat.S_ISDIR(p.lstat().st_mode) or not any(p.iterdir()):
                 raise ValueError("Expected nonempty curated directory")
             return {"contents_verified": False}
         check("payload/" + name, directory)
