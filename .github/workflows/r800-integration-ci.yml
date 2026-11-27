@@ -57,6 +57,30 @@ jobs:
           fi
           sha256sum "$out/init"
           echo "HANDOVER_INIT_COMPILE_ONLY; not executed; safe_to_flash=false"
+      - name: Verify native GPS bridge helpers and ARM32 objects (no vendor code execution)
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          export LC_ALL=C
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          for suite in frame command lto lto_file output client cache cache_read; do
+            case "$suite" in cache_read|lto_file) extra=-Wno-unused-function;; *) extra=;; esac
+            cc -O2 -Wall -Wextra -Werror $extra -pthread -DR800_XTRA_ABI=0 -Isrc/tools/gps "tests/test_r800_gps_$suite.c" -o "$tmp/$suite"
+            timeout 30 "$tmp/$suite"
+            echo "PASS: native GPS $suite"
+          done
+          for abi in 0 1 2; do
+            cc -O2 -Wall -Wextra -Werror -pthread -DR800_XTRA_ABI="$abi" -Isrc/tools/gps tests/test_r800_gps_xtra_submit.c -o "$tmp/xtra-$abi"
+            timeout 30 "$tmp/xtra-$abi"
+            clang --target=armv7a-linux-gnueabi -mfloat-abi=softfp -mfpu=vfpv3-d16 -DR800_XTRA_ABI="$abi" --no-default-config -nostdinc -O2 -fno-pic -fno-stack-protector -fno-builtin -ffreestanding -c src/tools/gps/gpsbridge.c -o "$tmp/bridge-$abi.o"
+            readelf -h "$tmp/bridge-$abi.o" > "$tmp/bridge-$abi.header"
+            grep -Eq 'Class:[[:space:]]*ELF32' "$tmp/bridge-$abi.header"
+            grep -Eq 'Type:[[:space:]]*REL' "$tmp/bridge-$abi.header"
+            grep -Eq 'Machine:[[:space:]]*ARM' "$tmp/bridge-$abi.header"
+            echo "PASS: XTRA synthetic ABI $abi and ARM32 bridge object"
+          done
+          echo "GNSS_RUNTIME_VERIFIED=false; safe_to_flash=false"
       - name: Run all offline regression suites
         run: |
           python3 build/r800_integrated_regression.py --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/r800-integrated-regression.json"
