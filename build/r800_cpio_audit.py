@@ -132,7 +132,7 @@ def inspect_cpio(archive: Path, init_binary: Path) -> dict:
                 raise CpioError("Embedded /init size differs from validated ELF")
         elif length != 0:
             raise CpioError(f"Unexpected content in CPIO device/directory: {name}")
-        names[name] = {"mode": mode, "size_bytes": length}
+        names[name] = {"mode": mode, "size_bytes": length, "mtime": fields[5]}
         pos = next_pos
         count += 1
         if count > MAX_ENTRY_COUNT:
@@ -146,6 +146,8 @@ def inspect_cpio(archive: Path, init_binary: Path) -> dict:
         "status": "SYNTHETIC_STRUCTURE_PASS_ONLY",
         "entries_checked": count,
         "archive_sha256": archive_sha256,
+        "newc_sha256": hashlib.sha256(content).hexdigest(),
+        "entry_mtimes": {name: names[name]["mtime"] for name in sorted(names)},
         "embedded_init_sha256": elf["sha256"],
         "embedded_init_exact_match": True,
         "kernel_boot_tested": False,
