@@ -191,15 +191,63 @@ jobs:
           set -eu
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           command -v javac
-          command -v sdkmanager
-          sdkmanager --sdk_root="$ANDROID_HOME" --install "platforms;android-30" "build-tools;30.0.3"
-          test -s "$ANDROID_HOME/platforms/android-30/android.jar"
-          test -x "$ANDROID_HOME/build-tools/30.0.3/d8"
-          test -x "$ANDROID_HOME/build-tools/30.0.3/dexdump"
+          # The hosted runner no longer exposes sdkmanager. Resolve exact
+          # SDK packages from Google's repository metadata and verify archives.
+          sdk="$RUNNER_TEMP/r800-android-sdk"
+          mkdir "$sdk"
+          export SDK_STAGE="$sdk"
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import pathlib
+          import subprocess
+          import xml.etree.ElementTree as ET
+
+          root = pathlib.Path(os.environ["SDK_STAGE"])
+          base = "https://dl.google.com/android/repository/"
+          def fetch(url, dest):
+              subprocess.run(["curl", "--fail", "--location", "--retry", "3",
+                              "--connect-timeout", "30", "--max-time", "300",
+                              url, "-o", str(dest)], check=True)
+          meta = root / "repository.xml"
+          fetch(base + "repository2-1.xml", meta)
+          doc = ET.parse(meta).getroot()
+          for elem in doc.iter():
+              elem.tag = elem.tag.rsplit("}", 1)[-1]
+          for package, target in (("platforms;android-30", "platform"),
+                                  ("build-tools;30.0.3", "build-tools")):
+              matches = [p for p in doc.iter("remotePackage") if p.get("path") == package]
+              assert len(matches) == 1, (package, len(matches))
+              archives = [a for a in matches[0].findall("./archives/archive")
+                          if a.findtext("host-os") in (None, "linux")
+                          and a.findtext("host-bits") in (None, "64")]
+              assert len(archives) == 1, (package, len(archives))
+              complete = archives[0].find("complete")
+              filename = complete.findtext("url")
+              assert filename and pathlib.PurePosixPath(filename).name == filename
+              checksum = complete.find("checksum")
+              expected = checksum.text.strip().lower()
+              algorithm = {40: "sha1", 64: "sha256"}[len(expected)]
+              archive = root / filename
+              fetch(base + filename, archive)
+              assert archive.stat().st_size == int(complete.findtext("size"))
+              with archive.open("rb") as stream:
+                  actual = hashlib.file_digest(stream, algorithm).hexdigest()
+              assert actual == expected, (package, algorithm)
+              print(package, filename, algorithm, actual, flush=True)
+              subprocess.run(["unzip", "-q", str(archive), "-d", str(root / target)], check=True)
+              archive.unlink()
+          PY
+          jar=$(find "$sdk/platform" -type f -name android.jar)
+          d8=$(find "$sdk/build-tools" -type f -name d8)
+          test -s "$jar"
+          test -x "$d8"
+          test -x "$(dirname "$d8")/dexdump"
+          printf 'R800_ANDROID_JAR=%s\nR800_BUILD_TOOLS=%s\n' "$jar" "$(dirname "$d8")" >> "$GITHUB_ENV"
       - name: Compile KeepWifi Java and inspect DEX (never execute)
         run: |
           set -eu
-          sh src/tools/keepwifi/build.sh "$ANDROID_HOME/platforms/android-30/android.jar" "$ANDROID_HOME/build-tools/30.0.3" "$RUNNER_TEMP/r800-keepwifi"
+          sh src/tools/keepwifi/build.sh "$R800_ANDROID_JAR" "$R800_BUILD_TOOLS" "$RUNNER_TEMP/r800-keepwifi"
           echo "KEEPWIFI_COMPILE_ONLY; runtime_verified=false; safe_to_flash=false"
       - name: Upload KeepWifi text evidence only
         if: always()
