@@ -156,7 +156,14 @@ setfattr -n security.selinux -v u:object_r:vendor_file:s0 "$OUT/lib/libeffectsco
 copy_hidl_group() {
     local group=$1 donor f complete
     shift
-    for donor in "$BASE_MNT" "$J4_MNT"; do
+    local selected
+    selected=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["hidl_groups"][sys.argv[2]]["selected"])' "$WORK/recipe-preflight.json" "$group")
+    case "$selected" in
+        base) donor=$BASE_MNT ;;
+        j4) donor=$J4_MNT ;;
+        *) echo "Missing preflight HIDL selection: $group" >&2; return 2 ;;
+    esac
+    for donor in "$donor"; do
         complete=1
         for f in "$@"; do
             [[ -f "$donor/$f" && ! -L "$donor/$f" ]] || { complete=0; break; }
@@ -279,6 +286,8 @@ P
 # identity: this is a Galaxy Watch, not the TicWatch the images came from
 sed -i -e 's/^ro.product.vendor.model=.*/ro.product.vendor.model=Galaxy Watch/'        -e 's/^ro.product.vendor.brand=.*/ro.product.vendor.brand=samsung/'        -e 's/^ro.product.vendor.manufacturer=.*/ro.product.vendor.manufacturer=Samsung/' $OUT/build.prop
 du -sh $OUT; find $OUT -type f | wc -l
+# Inspect the actual merged vendor tree before any candidate image is created.
+python3 "$REPO/build/r800_merged_vendor_graph.py" --tree "$OUT" --report "$WORK/merged-vendor-graph.json"
 # image: 64 MiB ext4, keep xattrs
 truncate -s 64M "$IMAGE"
 mkfs.ext4 -q -b 4096 -m 0 -I 256 -O ^metadata_csum,^64bit -L vendor $IMAGE
