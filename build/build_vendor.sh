@@ -287,7 +287,12 @@ P
 sed -i -e 's/^ro.product.vendor.model=.*/ro.product.vendor.model=Galaxy Watch/'        -e 's/^ro.product.vendor.brand=.*/ro.product.vendor.brand=samsung/'        -e 's/^ro.product.vendor.manufacturer=.*/ro.product.vendor.manufacturer=Samsung/' $OUT/build.prop
 du -sh $OUT; find $OUT -type f | wc -l
 # Inspect the actual merged vendor tree before any candidate image is created.
-python3 "$REPO/build/r800_merged_vendor_graph.py" --tree "$OUT" --report "$WORK/merged-vendor-graph.json"
+GRAPH_ARGS=()
+if [[ -n "${R800_SYSTEM_IMAGE:-}" || -n "${R800_SYSTEM_SHA256:-}" ]]; then
+    [[ -n "${R800_SYSTEM_IMAGE:-}" && -n "${R800_SYSTEM_SHA256:-}" ]] || { echo "system image and digest required together" >&2; exit 2; }
+    GRAPH_ARGS+=(--system-image "$R800_SYSTEM_IMAGE" --system-sha256 "$R800_SYSTEM_SHA256" --include-apex)
+fi
+python3 "$REPO/build/r800_merged_vendor_graph.py" --tree "$OUT" --report "$WORK/merged-vendor-graph.json" "${GRAPH_ARGS[@]}"
 # image: 64 MiB ext4, keep xattrs
 truncate -s 64M "$IMAGE"
 mkfs.ext4 -q -b 4096 -m 0 -I 256 -O ^metadata_csum,^64bit -L vendor $IMAGE

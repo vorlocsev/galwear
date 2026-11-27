@@ -333,3 +333,15 @@ DT_NEEDED и граф всех локальных кандидатов /vendor/l
 блокируют упаковку. EXTERNAL_OR_MISSING пока диагностический статус:
 без system/VNDK/APEX нельзя отличить отсутствующую библиотеку от внешней.
 Это не доказательство замыкания символов или Android namespaces.
+
+
+Merged vendor audit поддерживает --system-image FILE --system-sha256 HASH
+и --include-apex. Используется существующий snapshot-based рекурсивный
+анализ System/VNDK/Runtime APEX, но корнями теперь являются внешние
+зависимости фактически объединённого vendor. VNDK version извлекается
+из build.prop/default.prop; конфликт блокируется. Разные байты для
+одного имени, найденного в vendor и системном графе, требуют review.
+Для legacy build_vendor.sh опциональная пара R800_SYSTEM_IMAGE /
+R800_SYSTEM_SHA256 включает строгий аудит с APEX до упаковки.
+Без пары остаётся диагностический локальный граф NON-RELEASE.
+Namespace precedence, symbol closure и реальные доноры не доказаны.
