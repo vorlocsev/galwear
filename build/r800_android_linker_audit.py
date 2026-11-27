@@ -267,7 +267,14 @@ def symbol_inventory(tags, data, loads, cls, strings, result):
         if binding not in (1, 2) or section == 0xffff:
             unsupported.append({**record, "reason": "binding_or_extended_section"})
         elif section == 0:
-            if visibility in (1, 2, 3) or index == 0 or definition is not None:
+            # GNU ELF producers can use VER_NDX_LOCAL (0) for unversioned
+            # undefined references. Accept only the observed weak, default
+            # visibility, non-TLS NOTYPE case; preserve all other review gates.
+            weak_unversioned = (index == 0 and binding == 2 and typ == 0
+                                and visibility == 0 and raw_version == 0
+                                and requirement is None and definition is None)
+            if (visibility in (1, 2, 3) or (index == 0 and not weak_unversioned)
+                    or definition is not None):
                 unsupported.append({**record, "reason": "nonstandard_undefined_symbol"})
             else:
                 imports.append(record)

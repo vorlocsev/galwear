@@ -768,6 +768,28 @@ class LinkerTests(unittest.TestCase):
             self.assertTrue(audit.inspect(classified_symbol_fixture(
                 binding=2, section=section))[key][0]["weak"])
 
+    def test_zero_version_index_weak_notype_import(self):
+        for abi in ("arm", "arm64"):
+            for binding, visibility, typ, raw_version, accepted in (
+                    (2, 0, 0, 0, True),
+                    (1, 0, 0, 0, False),
+                    (2, 2, 0, 0, False),
+                    (2, 0, 2, 0, False),
+                    (2, 0, 0, 0x8000, False)):
+                with self.subTest(abi=abi, binding=binding, visibility=visibility,
+                                  typ=typ, version=raw_version):
+                    data = classified_symbol_fixture(abi, binding=binding, visibility=visibility)
+                    data[600 + (24 + 4 if abi == "arm64" else 16 + 12)] = binding << 4 | typ
+                    struct.pack_into("<H", data, 902, raw_version)
+                    result = audit.inspect(data)
+                    self.assertEqual(len(result["symbol_imports"]), int(accepted))
+                    self.assertEqual(len(result["unsupported_symbols"]), int(not accepted))
+                    if accepted:
+                        record = result["symbol_imports"][0]
+                        self.assertTrue(record["weak"])
+                        self.assertIsNone(record["version"])
+                        self.assertEqual(record["type"], 0)
+
     def test_local_hidden_and_internal_not_exported(self):
         for binding, visibility in ((0, 0), (1, 1), (1, 2)):
             info = audit.inspect(classified_symbol_fixture(
