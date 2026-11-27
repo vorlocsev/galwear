@@ -137,3 +137,12 @@ real links per XTRA ABI, binds all builds to the same pinned donor
 library hashes, and requires the ABI 0 hash to match its prior static
 link in the same job. Repeatability across independent hosts and original
 Tizen libraries remain unverified. Only JSON and logs are uploaded.
+
+
+Exact-head run [45998891597](https://github.com/vorlocsev/galwear/actions/runs/45998891597)
+passed six reference links (two per XTRA ABI) on one runner. The next
+check compares twelve builds in two jobs on Ubuntu 24.04 and 22.04.
+Only JSON evidence travels between jobs; the comparison validates both
+source SHA values, pinned archive, four donor hashes and binary digests
+for all three variants. This tests two hosted runner environments, not
+arbitrary platforms, and does not qualify original Tizen or GNSS hardware.
