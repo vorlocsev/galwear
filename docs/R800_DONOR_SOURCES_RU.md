@@ -300,3 +300,16 @@ manifest. Отдельный Ubuntu 24.04 runner заново компилиру
 требует совпадения состава, метаданных, инструментов mke2fs version и
 SHA-256 образа. Между jobs передаются только JSON, без ELF и образов.
 Не проверяет разные дистрибутивы или полную донорскую прошивку.
+
+
+Перед запуском legacy build_vendor.sh можно выполнить rootless preflight:
+```sh
+python3 build/r800_vendor_recipe_preflight.py --base /path/to/base-vendor.img \
+  --base-sha256 "$BASE_SHA256" --j4 /path/to/j4-vendor.img \
+  --j4-sha256 "$J4_SHA256" --report /path/to/new-recipe-preflight.json
+```
+Проверяются 30 обязательных путей BASE, 71 J4 и три HIDL-группы,
+без смешивания файлов разных доноров внутри группы. Используются приватные
+read-only снимки образов, только debugfs stat. Содержимое рекурсивных
+каталогов, ELF ABI, зависимости, SELinux и подлинность доноров не доказаны.
+Это отдельный предварительный инструмент; legacy сборщик не изменён.
