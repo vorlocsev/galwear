@@ -79,19 +79,27 @@ def compile_probe(ndk, hals, output, source_sha):
     shim_raw, shim_info = check(shim, True)
     if not set(shim_info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected test adapter dependency")
+    pcm_shim = output/"libpcm-fixture.so"
+    subprocess.run([str(cc), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2", "-shared", "-fPIC",
+                    "-I"+str(hals/"tinyalsa/include"), str(ROOT/"src/initramfs/r800-pcm-fixture.c"),
+                    "-Wl,-soname,libpcm-fixture.so", "-Wl,--no-undefined", "-o", str(pcm_shim)],
+                   check=True, timeout=60)
+    pcm_raw, pcm_info = check(pcm_shim, True)
+    if not set(pcm_info["needed"]) <= HAL_COMPILE_LIBS:
+        raise ValueError("Unexpected PCM test adapter dependency")
     raw, info = check(probe)
     if not set(info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected probe dependency")
     result = {"status": "ARM32_HAL_DLOPEN_PROBE_COMPILE_ONLY", "source_sha": source_sha,
-              "probe_sha256": sha(raw), "evdev_fixture_sha256": sha(shim_raw), "hal_sha256": hashes,
+              "probe_sha256": sha(raw), "evdev_fixture_sha256": sha(shim_raw), "pcm_fixture_sha256": sha(pcm_raw), "hal_sha256": hashes,
               "runtime_verified": False, "hardware_tested": False, "safe_to_flash": False}
     (output/"hal-probe-evidence.json").write_text(json.dumps(result, indent=2, sort_keys=True)+"\n")
     return result
 
 
 def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=False,
-              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False, gps_fixture=False, audio_fixture=False):
-    if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context, sensors_evdev, gps_fixture, audio_fixture)) > 1:
+              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False, gps_fixture=False, audio_fixture=False, audio_pcm_fixture=False):
+    if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context, sensors_evdev, gps_fixture, audio_fixture, audio_pcm_fixture)) > 1:
         raise ValueError("Choose one probe mode")
     if os.geteuid() == 0:
         raise ValueError("Non-root execution required")
@@ -146,7 +154,10 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             return {p.relative_to(root).as_posix(): ("symlink:"+os.readlink(p) if p.is_symlink() else sha(p.read_bytes()))
                     for p in sorted(root.rglob("*")) if p.is_file() or p.is_symlink()}
         fixture = None
-        if gps_fixture:
+        if audio_pcm_fixture:
+            add(probe_dir/"libpcm-fixture.so", "system/lib/libpcm-fixture.so",
+                evidence["pcm_fixture_sha256"], True)
+        elif gps_fixture:
             fixture = Path(tmp)/"gps-fixture"
             fixture.mkdir()
             (fixture/".galwear-fixture").write_text("GALWEAR_GPS_FIXTURE_V1\n")
@@ -184,7 +195,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         selected = {name: identity for name, identity in HALS.items()
                     if (not lights_fixture or identity == "lights") and
                        (not (sensors_fixture or sensors_context or sensors_evdev) or identity == "sensors") and (not gps_fixture or identity == "gps") and
-                       (not audio_fixture or identity == "audio")}
+                       (not (audio_fixture or audio_pcm_fixture) or identity == "audio")}
         for name, identity in selected.items():
             cmd = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
                    "--clearenv", "--ro-bind", str(root), "/", "--ro-bind", qemu, "/qemu",
@@ -216,6 +227,10 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 cmd.append("--gps-fixture")
             if audio_fixture:
                 cmd.append("--audio-fixture")
+            if audio_pcm_fixture:
+                cmd[cmd.index("/system/bin/hal-probe"):cmd.index("/system/bin/hal-probe")] = [
+                    "-E", "LD_PRELOAD=/system/lib/libpcm-fixture.so"]
+                cmd.append("--audio-pcm-fixture")
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 log = proc.stdout + proc.stderr
@@ -252,10 +267,14 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 if audio_fixture:
                     fixture_marker = "HAL_AUDIO_FIXTURE_PASS cycles=8 mono=4 stereo=4 silent_reads=16 missing_pcm=1 busy_close=8"
                     fixture_ok = log.splitlines().count(fixture_marker) == 1
+                if audio_pcm_fixture:
+                    fixture_marker = "HAL_AUDIO_PCM_PASS out_frames=2000 in_frames=4000 mono=1 stereo=1 mute=2 retry=1 opens=4 closes=4"
+                    fixture_ok = log.splitlines().count(fixture_marker) == 1
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
-                          (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture) or fixture_ok))
-                results[name] = {"status": ("AUDIO_FIXTURE_PASS" if audio_fixture else
+                          (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture) or fixture_ok))
+                results[name] = {"status": ("AUDIO_PCM_FIXTURE_PASS" if audio_pcm_fixture else
+                                             "AUDIO_FIXTURE_PASS" if audio_fixture else
                                              "GPS_FIXTURE_PASS" if gps_fixture else
                                              "SENSORS_EVDEV_PASS" if sensors_evdev else
                                              "SENSORS_CONTEXT_PASS" if sensors_context else
@@ -271,14 +290,16 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 results[name] = {"status": "REVIEW_REQUIRED", "reason": "Timeout"}
         if snapshot() != before:
             raise ValueError("Guest input changed")
-    expected_status = ("AUDIO_FIXTURE_PASS" if audio_fixture else
+    expected_status = ("AUDIO_PCM_FIXTURE_PASS" if audio_pcm_fixture else
+                       "AUDIO_FIXTURE_PASS" if audio_fixture else
                        "GPS_FIXTURE_PASS" if gps_fixture else
                        "SENSORS_EVDEV_PASS" if sensors_evdev else
                        "SENSORS_CONTEXT_PASS" if sensors_context else
                        "SENSORS_FIXTURE_PASS" if sensors_fixture else
                        "LIGHTS_FIXTURE_PASS" if lights_fixture else
                        "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
-    result = {"status": ("ARM32_AUDIO_NO_PCM_FALLBACK_ONLY" if audio_fixture else
+    result = {"status": ("ARM32_AUDIO_SYNTHETIC_PCM_ONLY" if audio_pcm_fixture else
+                         "ARM32_AUDIO_NO_PCM_FALLBACK_ONLY" if audio_fixture else
                          "ARM32_GPS_SYNTHETIC_BRIDGE_ONLY" if gps_fixture else
                          "ARM32_SENSORS_SYNTHETIC_EVDEV_ONLY" if sensors_evdev else
                          "ARM32_SENSORS_SYNTHETIC_CONTEXT_ONLY" if sensors_context else
@@ -289,7 +310,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         v["status"] == expected_status for v in results.values()) else "REVIEW_REQUIRED",
         "source_sha": evidence["source_sha"], "runtime_sha256": pins,
         "hal_sha256": evidence["hal_sha256"], "results": results,
-        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture,
+        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture,
         "lifecycle_requested": lifecycle, "lights_fixture_requested": lights_fixture,
         "sensors_fixture_requested": sensors_fixture, "sensors_context_requested": sensors_context,
         "synthetic_context_events_passed": sensors_context and all(v["status"] == expected_status for v in results.values()),
@@ -302,6 +323,9 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "gnss_hardware_verified": False,
         "audio_fixture_requested": audio_fixture,
         "audio_no_pcm_fallback_verified": audio_fixture and all(v["status"] == expected_status for v in results.values()),
+        "audio_pcm_fixture_requested": audio_pcm_fixture,
+        "audio_synthetic_pcm_verified": audio_pcm_fixture and all(v["status"] == expected_status for v in results.values()),
+        "pcm_fixture_sha256": evidence.get("pcm_fixture_sha256") if audio_pcm_fixture else None,
         "audio_pcm_hardware_verified": False,
         "sensor_events_tested": False,
         "hardware_io_methods_tested": False,
@@ -328,10 +352,11 @@ def main():
     modes.add_argument("--sensors-evdev", action="store_true")
     modes.add_argument("--gps-fixture", action="store_true")
     modes.add_argument("--audio-fixture", action="store_true")
+    modes.add_argument("--audio-pcm-fixture", action="store_true")
     a = p.parse_args()
     result = (compile_probe(a.ndk, a.hals, a.output, a.source_sha) if a.action == "compile"
               else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output,
-                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev, a.gps_fixture, a.audio_fixture))
+                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev, a.gps_fixture, a.audio_fixture, a.audio_pcm_fixture))
     print(json.dumps(result, sort_keys=True))
     return 2 if result["status"] == "REVIEW_REQUIRED" else 0
 

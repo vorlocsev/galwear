@@ -1,0 +1,114 @@
+/* Test-only tinyalsa interposition. Never accesses host sound devices. */
+#include <tinyalsa/asoundlib.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+
+struct pcm { unsigned int input, frames, capacity; };
+struct mixer { int live; };
+struct mixer_ctl { int unused; };
+static struct mixer m;
+static struct mixer_ctl ctl;
+static unsigned int opens, closes, writes, reads, mixer_calls, bad, fail_next;
+static unsigned int out_frames, in_frames;
+unsigned int r800_pcm_fixture_get(unsigned int key)
+{
+    switch (key) {
+    case 0: return opens;
+    case 1: return closes;
+    case 2: return writes;
+    case 3: return reads;
+    case 4: return bad;
+    case 5: return out_frames;
+    case 6: return in_frames;
+    case 7: return mixer_calls;
+    default: return 0xffffffffu;
+    }
+}
+void r800_pcm_fixture_fail(unsigned int mode) { fail_next = mode; }
+struct mixer *mixer_open(unsigned int card)
+{
+    if (card || m.live) { ++bad; return NULL; }
+    m.live=1; ++mixer_calls; return &m;
+}
+void mixer_close(struct mixer *p)
+{
+    if (p!=&m || !m.live) ++bad;
+    m.live=0;
+}
+struct mixer_ctl *mixer_get_ctl_by_name(struct mixer *p,const char *name)
+{
+    if (p!=&m || !m.live || !name || !*name) { ++bad; return NULL; }
+    return &ctl;
+}
+unsigned int mixer_ctl_get_num_values(const struct mixer_ctl *p)
+{
+    if (p!=&ctl) ++bad;
+    return 2;
+}
+int mixer_ctl_set_value(struct mixer_ctl *p,unsigned int id,int value)
+{
+    (void)value;
+    if (p!=&ctl || id>=2 || !m.live) { ++bad; return -EINVAL; }
+    return 0;
+}
+int mixer_ctl_set_enum_by_string(struct mixer_ctl *p,const char *s)
+{
+    if (p!=&ctl || !m.live || !s || !*s) { ++bad; return -EINVAL; }
+    return 0;
+}
+struct pcm *pcm_open(unsigned int card,unsigned int device,unsigned int flags,
+                     const struct pcm_config *cfg)
+{
+    unsigned int input=!!(flags & PCM_IN);
+    if (card || device!=(input?9u:0u) ||
+        flags!=(unsigned int)((input?PCM_IN:PCM_OUT)|PCM_MONOTONIC) ||
+        !cfg || cfg->channels!=2 || cfg->rate!=48000 ||
+        cfg->format!=PCM_FORMAT_S16_LE || cfg->period_size!=960 ||
+        cfg->period_count!=(input?8u:4u)) { ++bad; return NULL; }
+    struct pcm *p=calloc(1,sizeof(*p));
+    if (p) { p->input=input; p->capacity=cfg->period_size*cfg->period_count; ++opens; }
+    return p;
+}
+int pcm_close(struct pcm *p)
+{
+    if (!p) { ++bad; return -EINVAL; }
+    ++closes; free(p); return 0;
+}
+int pcm_is_ready(const struct pcm *p) { return p!=NULL; }
+const char *pcm_get_error(const struct pcm *p) { (void)p; return "synthetic PCM"; }
+unsigned int pcm_get_buffer_size(const struct pcm *p) { return p->capacity; }
+int pcm_get_htimestamp(struct pcm *p,unsigned int *avail,struct timespec *ts)
+{
+    if (!p || !avail || !ts) { ++bad; return -EINVAL; }
+    *avail=p->input?16:p->capacity-16;
+    ts->tv_sec=123; ts->tv_nsec=456; return 0;
+}
+int pcm_writei(struct pcm *p,const void *data,unsigned int n)
+{
+    if (!p || p->input || !data || !n || n>960) { ++bad; return -EINVAL; }
+    ++writes;
+    if (fail_next==1) { fail_next=0; return 0; }
+    if (n>127) n=127;
+    const int16_t *s=data;
+    for (unsigned int i=0;i<n;++i) {
+        int16_t v=(int16_t)((out_frames+i)%1000+1);
+        if (s[2*i]!=v || s[2*i+1]!=-v) ++bad;
+    }
+    out_frames+=n; p->frames+=n; return (int)n;
+}
+int pcm_readi(struct pcm *p,void *data,unsigned int n)
+{
+    if (!p || !p->input || !data || !n || n>960) { ++bad; return -EINVAL; }
+    ++reads;
+    if (fail_next==2) { fail_next=0; return -EIO; }
+    if (n>113) n=113;
+    int16_t *s=data;
+    for (unsigned int i=0;i<n;++i) {
+        int16_t v=(int16_t)((in_frames+i)%1000+1);
+        s[2*i]=v; s[2*i+1]=-v;
+    }
+    in_frames+=n; p->frames+=n; return (int)n;
+}

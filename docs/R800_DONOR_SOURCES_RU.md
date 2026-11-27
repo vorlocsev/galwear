@@ -548,3 +548,15 @@ duplicate stream and busy device close, invalid frame alignment, zero bytes,
 16 silent captures with guard, playback fallback, unavailable positions,
 FD count and HFP failure without mixer. Real PCM/mixer success, DSP, speaker,
 microphone and HFP hardware remain unverified. New CI pending.
+
+
+CI 46036845565 / job 140634296055 exact b903d64: no PCM fallback PASS,
+8 cycles, 16 silent reads, mono/stereo and busy close. Новый --audio-pcm-fixture
+использует test-only LD_PRELOAD libpcm-fixture.so, собранный с pinned tinyalsa
+headers. Production HAL SHA unchanged. Проверяются partial transfers
+127/113 frames, exact stereo output sequence, mono left extraction,
+stereo capture, mute, presentation/capture positions, zero-progress write,
+failed read silence and retry backoff. Адаптер считает 2000 output/4000 input
+frames и 4 opens/closes; если interposition не сработает, тест не проходит.
+Не тестируется tinyalsa implementation, ALSA ioctl, real mixer routing,
+DSP or HFP success. New CI pending.
