@@ -461,6 +461,43 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertTrue(result["symbol_candidates"]["incomplete"])
         self.assertFalse(result["safe_to_flash"])
 
+    def test_donor_namespace_candidates_require_explicit_links_and_digest(self):
+        root = "vendor/bin/hw/fixture"
+        lib = "libfixture.so"
+        vendor = {"roots": [root], "objects": {root: {"status": "CANDIDATE_ONLY", "needed": [lib]}},
+                  "edges": [{"from": root, "needed": lib, "candidate": "vendor/lib/" + lib,
+                             "status": "OUTSIDE_VENDOR_LIB"}],
+                  "status": "REVIEW_REQUIRED", "budget_exhausted": False, "problems": []}
+        system = {"status": "SYSTEM_PATH_CANDIDATES_ONLY",
+                  "system_candidate_graph": {lib: {"status": "CANDIDATE_ONLY",
+                      "candidates": [{"origin": "com.android.runtime",
+                                      "path": "/lib/bionic/" + lib, "needed": []}]}},
+                  "system_dependency_edges": []}
+        raw = b"""dir.vendor = /vendor/bin
+[vendor]
+additional.namespaces = runtime
+namespace.default.search.paths = /vendor/${LIB}
+namespace.default.links = runtime
+namespace.default.link.runtime.shared_libs = libfixture.so
+namespace.runtime.search.paths = /apex/com.android.runtime/${LIB}/bionic
+"""
+        config = self.put("ld.config.txt", raw)
+        def run():
+            return extractor.donor_namespace_candidates(config,
+                hashlib.sha256(config.read_bytes()).hexdigest(), vendor, system)
+        result = run()
+        self.assertEqual(result["status"], "CONFIG_PATH_MATCHES_ONLY")
+        self.assertEqual(result["checks"][0]["matching_namespaces"], ["runtime"])
+        self.assertFalse(result["runtime_resolution_verified"])
+        config.write_bytes(raw.replace(b"shared_libs = libfixture.so", b"shared_libs = libother.so"))
+        result = run()
+        self.assertEqual(result["status"], "REVIEW_REQUIRED")
+        self.assertEqual(result["checks"][0]["denied_links"], ["runtime"])
+        config.write_bytes(raw.replace(b"/vendor/bin", b"/system/bin"))
+        self.assertTrue(run()["errors"])
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            extractor.donor_namespace_candidates(config, "0"*64, vendor, system)
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")

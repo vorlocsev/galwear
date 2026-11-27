@@ -302,6 +302,113 @@ class DonorSymbolInventory:
         self.objects[path] = {key: info[key] for key in keys}
 
 
+def donor_namespace_candidates(config_path, expected_sha, vendor, system):
+    """Compare inspected graph edges with a caller-supplied linker config.
+
+    No filesystem search or precedence inference; uninspected alternatives,
+    isolation realpaths, global groups and generated config provenance remain open.
+    """
+    from collections import deque
+    from r800_android_userspace_preflight import read_regular
+    from r800_linker_namespaces import parse, section_for, MAX_CONFIG
+    raw = read_regular(Path(config_path), MAX_CONFIG)
+    if hashlib.sha256(raw).hexdigest() != expected_sha:
+        raise ValueError("Linker config SHA-256 mismatch")
+    report = {"status": "REVIEW_REQUIRED", "config_sha256": expected_sha,
+              "config_origin": "CALLER_SUPPLIED", "roots": [], "checks": [], "errors": [],
+              "runtime_resolution_verified": False, "config_provenance_verified": False,
+              "safe_to_flash": False}
+    try:
+        parsed = parse(raw.decode("utf-8"), "arm")
+    except ValueError as exc:
+        report["errors"].append(str(exc))
+        return report
+    if parsed["unsupported_properties"]:
+        report["errors"].append("Unsupported linker configuration properties")
+        report["unsupported_properties"] = parsed["unsupported_properties"]
+        return report
+    objects, edges, system_paths = {}, {}, {}
+    for path, row in vendor["objects"].items():
+        if row["status"] == "CANDIDATE_ONLY":
+            guest = "/" + path
+            objects[path] = guest
+            edges[path] = {dep: None for dep in row["needed"]}
+    for name, row in system.get("system_candidate_graph", {}).items():
+        if row["status"] != "CANDIDATE_ONLY":
+            continue
+        c = row["candidates"][0]
+        key = c["origin"] + ":" + c["path"]
+        guest = c["path"]
+        if c["origin"] == "system":
+            guest = guest if guest.startswith("/system/") else "/system" + guest
+        else:
+            guest = "/apex/" + c["origin"] + guest
+        system_paths[name] = key
+        objects[key] = guest
+        edges[key] = {dep: None for dep in c["needed"]}
+    for edge in vendor["edges"]:
+        if edge["from"] not in edges:
+            continue
+        if edge["status"] == "CANDIDATE_ONLY" and edge["candidate"] in objects:
+            edges[edge["from"]][edge["needed"]] = edge["candidate"]
+        elif edge["status"] == "OUTSIDE_VENDOR_LIB":
+            edges[edge["from"]][edge["needed"]] = system_paths.get(edge["needed"])
+    for edge in system.get("system_dependency_edges", []):
+        if edge["from"] in system_paths:
+            edges[system_paths[edge["from"]]][edge["needed"]] = system_paths.get(edge["needed"])
+    pending, visited = deque(), set()
+    for root in vendor["roots"]:
+        if not root.startswith("vendor/bin/"):
+            continue
+        section = section_for(parsed, "/" + root)
+        report["roots"].append({"path": "/" + root, "section": section})
+        if section is None or root not in objects:
+            report["errors"].append("Unmapped or uninspected root: " + root)
+        else:
+            pending.append((section, "default", root))
+    while pending:
+        section, ns_name, path = pending.popleft()
+        state = (section, ns_name, path)
+        if state in visited:
+            continue
+        if len(visited) >= 1024:
+            report["errors"].append("Namespace state budget exceeded")
+            break
+        visited.add(state)
+        spaces = parsed["sections"][section]
+        ns = spaces[ns_name]
+        for dep, candidate in edges[path].items():
+            if len(report["checks"]) >= MAX_WALK_EDGES:
+                report["errors"].append("Namespace edge budget exceeded")
+                return report
+            allowed, denied = [ns_name], []
+            for dest in ns["links"]:
+                policy = ns["link_policies"].get(dest, {})
+                if policy.get("allow_all_shared_libs") or dep in policy.get("shared_libs", []):
+                    allowed.append(dest)
+                else:
+                    denied.append(dest)
+            matches = []
+            guest = objects.get(candidate)
+            if guest is not None:
+                for dest in allowed:
+                    if guest in [p.rstrip("/") + "/" + dep for p in spaces[dest]["search_paths"]]:
+                        matches.append(dest)
+            report["checks"].append({"from": objects[path], "namespace": ns_name,
+                "section": section, "needed": dep, "candidate": guest,
+                "matching_namespaces": matches, "denied_links": denied,
+                "status": "CONFIG_PATH_MATCH_ONLY" if len(matches) == 1 else "REVIEW_REQUIRED"})
+            if len(matches) == 1:
+                pending.append((section, matches[0], candidate))
+    if (report["roots"] and report["checks"] and not report["errors"]
+            and not vendor["budget_exhausted"] and not vendor["problems"]
+            and (vendor["status"] == "VENDOR_LIB_CANDIDATES_ONLY" or
+                 system.get("status") == "SYSTEM_PATH_CANDIDATES_ONLY")
+            and all(row["status"] == "CONFIG_PATH_MATCH_ONLY" for row in report["checks"])):
+        report["status"] = "CONFIG_PATH_MATCHES_ONLY"
+    return report
+
+
 def donor_symbol_candidates(inventory, vendor, system):
     """Compare potential providers in the selected graph, not linker lookup order."""
     from r800_android_linker_audit import symbol_candidates
@@ -651,7 +758,8 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
             "runtime_verified": False, "safe_to_flash": False}
 
 
-def extract(image, output, profile, expected_sha, system_image=None, system_sha=None, include_apex=False):
+def extract(image, output, profile, expected_sha, system_image=None, system_sha=None, include_apex=False,
+            linker_config=None, linker_config_sha=None):
     image, output = Path(image).absolute(), Path(output).absolute()
     if profile not in PROFILES or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         raise ValueError("Expected donor profile and SHA-256")
@@ -659,6 +767,10 @@ def extract(image, output, profile, expected_sha, system_image=None, system_sha=
             (system_image is not None and (profile != "vendor-identity" or
              not re.fullmatch(r"[0-9a-f]{64}", system_sha)))):
         raise ValueError("System image and SHA-256 require vendor-identity profile")
+    if ((linker_config is None) != (linker_config_sha is None) or
+            (linker_config is not None and (profile != "vendor-identity" or
+             not re.fullmatch(r"[0-9a-f]{64}", linker_config_sha)))):
+        raise ValueError("Linker config and SHA-256 require vendor-identity profile")
     if include_apex and system_image is None:
         raise ValueError("APEX inspection requires system image")
     if output.exists() or output.is_symlink():
@@ -715,6 +827,10 @@ def extract(image, output, profile, expected_sha, system_image=None, system_sha=
                     tool, system_image, system_sha, scratch, dependency_walk, identity_report["properties"], include_apex, symbols)
             identity_report["symbol_candidate_audit"] = donor_symbol_candidates(
                 symbols, dependency_walk, identity_report.get("system_dependency_candidates", {}))
+            if linker_config is not None:
+                identity_report["namespace_candidate_audit"] = donor_namespace_candidates(
+                    linker_config, linker_config_sha, dependency_walk,
+                    identity_report.get("system_dependency_candidates", {}))
         current = image.lstat()
         if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
                 current.st_mtime_ns, current.st_ctime_ns) != source_identity:
@@ -743,8 +859,11 @@ def main():
     p.add_argument("--system-image", type=Path)
     p.add_argument("--system-sha256")
     p.add_argument("--include-apex", action="store_true")
+    p.add_argument("--linker-config", type=Path)
+    p.add_argument("--linker-config-sha256")
     a=p.parse_args()
-    report=extract(a.image,a.output,a.profile,a.sha256,a.system_image,a.system_sha256,a.include_apex)
+    report=extract(a.image,a.output,a.profile,a.sha256,a.system_image,a.system_sha256,a.include_apex,
+                   a.linker_config,a.linker_config_sha256)
     print(json.dumps(report,sort_keys=True))
     identity = report.get("vendor_identity", {})
     review = identity.get("property_conflicts") or any(
