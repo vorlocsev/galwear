@@ -11,11 +11,16 @@
 #include <sys/stat.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/eventfd.h>
+#include "../hal/r800_decon_abi.h"
 
 #define FB_PATH "/dev/graphics/fb0"
 #define VSYNC_CMD _IOW('F',206,uint32_t)
 #define POWER_CMD _IOW('F',223,uint32_t)
 static atomic_uint bad, invalid_geometry, fail_power, fixed, variable, wake, blanks, power, vsync_on, vsync_off, pans;
+static atomic_uint zero_copy, fail_win, win_calls, win_success;
+static atomic_int last_release=-1,last_retire=-1;
 unsigned int r800_hwc_fixture_get(unsigned int k)
 {
     switch(k) {
@@ -28,6 +33,10 @@ unsigned int r800_hwc_fixture_get(unsigned int k)
     case 6: return vsync_on;
     case 7: return vsync_off;
     case 8: return pans;
+    case 9: return win_calls;
+    case 10: return win_success;
+    case 11: return (unsigned int)last_release;
+    case 12: return (unsigned int)last_retire;
     default: return UINT32_MAX;
     }
 }
@@ -35,13 +44,15 @@ void r800_hwc_fixture_mode(unsigned int mode)
 {
     invalid_geometry=mode==1;
     fail_power=mode==2;
+    zero_copy=mode==3 || mode==4;
+    fail_win=mode==4;
 }
 int __system_property_get(const char *name,char *value)
 {
     const char *v="";
     if (!strcmp(name,"debug.r800.layer_stride")) v="96";
     else if (!strcmp(name,"debug.r800.realblank")) v="1";
-    else if (!strcmp(name,"debug.r800.zerocopy")) v="0";
+    else if (!strcmp(name,"debug.r800.zerocopy")) v=zero_copy?"1":"0";
     strcpy(value,v);
     return (int)strlen(v);
 }
@@ -96,6 +107,39 @@ int ioctl(int fd,int request,...)
         const struct fb_var_screeninfo *v=arg;
         if (v->xres!=360 || v->yres!=360 || v->bits_per_pixel!=32) break;
         ++wake; return 0;
+    }
+    case R800_S3CFB_WIN_CONFIG: {
+        struct r800_win_config_data *d=arg;
+        struct r800_win_config *c=&d->config[0];
+        struct stat pixel, expected_pixel;
+        const struct r800_frame src={0,0,360,360,368,360},dst={0,0,360,360,360,360};
+        if (!zero_copy || d->retire_fence!=-1 || d->fd_odma!=-1 ||
+            c->state!=R800_WIN_STATE_BUFFER || c->fd_idma[1]!=-1 || c->fd_idma[2]!=-1 ||
+            c->rel_fence!=-1 || c->acq_fence<0 || fcntl(c->acq_fence,F_GETFD)<0 ||
+            c->plane_alpha!=255 || c->blending!=R800_BLENDING_NONE || c->channel ||
+            c->format!=R800_FMT_RGBA_8888 || c->protection || c->compression ||
+            memcmp(&c->src,&src,sizeof(src)) || memcmp(&c->dst,&dst,sizeof(dst)) ||
+            fstat(c->fd_idma[0],&pixel) || lstat("/dev/graphics/pixels",&expected_pixel) ||
+            !S_ISREG(pixel.st_mode) || !S_ISREG(expected_pixel.st_mode) ||
+            pixel.st_dev!=expected_pixel.st_dev || pixel.st_ino!=expected_pixel.st_ino ||
+            pixel.st_size!=368*360*4) break;
+        for (int i=1;i<=R800_MAX_DECON_WIN;++i) {
+            const struct r800_win_config *w=&d->config[i];
+            if (w->state!=R800_WIN_STATE_DISABLED || w->fd_idma[0]!=-1 ||
+                w->fd_idma[1]!=-1 || w->fd_idma[2]!=-1 || w->acq_fence!=-1 || w->rel_fence!=-1) {
+                ++bad; errno=EINVAL; return -1;
+            }
+        }
+        ++win_calls;
+        if (atomic_exchange(&fail_win,0)) { errno=ENOTTY; return -1; }
+        int rel=eventfd(7,EFD_CLOEXEC|EFD_NONBLOCK);
+        if (rel<0) break;
+        int retire=eventfd(13,EFD_CLOEXEC|EFD_NONBLOCK);
+        if (retire<0) { close(rel); break; }
+        last_release=rel; last_retire=retire;
+        c->rel_fence=rel; d->retire_fence=retire;
+        ++win_success;
+        return 0;
     }
     case FBIOPAN_DISPLAY: {
         const struct fb_var_screeninfo *v=arg;

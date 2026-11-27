@@ -109,6 +109,63 @@ static int hwc_cpu_present(hwc_composer_device_1_t *dev,int cycle)
     return close(fd)==0 && fd_count()==before;
 }
 
+/* Synthetic DECON accepts one client-target window. Eventfds stand in for
+ * kernel-owned release/retire descriptors, not actual sync_file fences. */
+static int hwc_zero_copy(const hw_module_t *module,unsigned int (*get)(unsigned int),
+                         void (*mode)(unsigned int))
+{
+    int before=fd_count();
+    hw_device_t *base=NULL;
+    mode(3);
+    if (before<0 || module->methods->open(module,HWC_HARDWARE_COMPOSER,&base) || !base) return 0;
+    hwc_composer_device_1_t *dev=(hwc_composer_device_1_t *)base;
+    int fd=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    native_handle_t *buf=calloc(1,sizeof(*buf)+5*sizeof(int));
+    hwc_display_contents_1_t *c=calloc(1,sizeof(*c)+sizeof(hwc_layer_1_t));
+    if (fd<0 || !buf || !c) return 0;
+    buf->version=sizeof(*buf); buf->numFds=1; buf->numInts=4;
+    buf->data[0]=fd; buf->data[1]=HAL_PIXEL_FORMAT_RGBA_8888;
+    buf->data[2]=360; buf->data[3]=360; buf->data[4]=368;
+    c->numHwLayers=1;
+    hwc_display_contents_1_t *displays[]={c};
+    hwc_layer_1_t *l=&c->hwLayers[0];
+    l->compositionType=HWC_FRAMEBUFFER_TARGET; l->handle=buf;
+    l->releaseFenceFd=c->retireFenceFd=-1;
+    int pair[2];
+    if (pipe(pair) || write(pair[1],"x",1)!=1) return 0;
+    l->acquireFenceFd=pair[0];
+    if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
+        l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 ||
+        get(9)!=1 || get(10)!=1 || get(8)!=8 ||
+        c->retireFenceFd<0 || c->retireFenceFd!=(int)get(12) ||
+        c->retireFenceFd==(int)get(11) || fcntl(pair[0],F_GETFD)!=-1 || errno!=EBADF ||
+        fcntl((int)get(11),F_GETFD)!=-1 || errno!=EBADF ||
+        fcntl(fd,F_GETFD)<0 || !hwc_fb_matches(1,2)) return 0;
+    uint64_t value=0;
+    if (read(c->retireFenceFd,&value,sizeof(value))!=(ssize_t)sizeof(value) ||
+        value!=13 || close(c->retireFenceFd) || close(pair[1])) return 0;
+    c->retireFenceFd=-1;
+    /* ENOTTY disables zero-copy; a hung-up acquire must not trigger CPU read. */
+    mode(4);
+    if (pipe(pair) || close(pair[1])) return 0;
+    l->acquireFenceFd=pair[0];
+    if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
+        l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
+        fcntl(pair[0],F_GETFD)!=-1 || errno!=EBADF ||
+        get(9)!=2 || get(10)!=1 || get(8)!=8 || !hwc_fb_matches(1,2)) return 0;
+    /* A subsequent ready RGBA target must use CPU copy, never retry WIN_CONFIG. */
+    if (pipe(pair) || write(pair[1],"x",1)!=1) return 0;
+    l->acquireFenceFd=pair[0];
+    if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
+        l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
+        fcntl(pair[0],F_GETFD)!=-1 || errno!=EBADF ||
+        get(9)!=2 || get(10)!=1 || get(8)!=9 || get(0) ||
+        !hwc_fb_matches(1,2) || close(pair[1]) || close(fd)) return 0;
+    free(c); free(buf);
+    mode(0);
+    return base->close(base)==0 && fd_count()==before;
+}
+
 static int hwc_fixture(const hw_module_t *module)
 {
     struct stat st;
@@ -227,6 +284,12 @@ static int hwc_fixture(const hw_module_t *module)
     if (get(0) || get(1)!=5 || get(2)!=5 || get(3)!=4 ||
         get(5)!=12 || get(6)!=4 || get(7)!=4 || atomic_load(&hwc_ticks)<12)
         return 181;
+    if (!hwc_zero_copy(module,get,mode)) {
+        fprintf(stderr,"HWC zero-copy failed: calls=%u success=%u pans=%u bad=%u\n",
+                get(9),get(10),get(8),get(0));
+        return 184;
+    }
+    puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
     puts("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8");
     puts("HAL_HWC_FIXTURE_PASS geometry=360x360 cycles=4 invalid_bpp=1 power_recovery=4 timer_vsync=4");

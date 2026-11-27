@@ -321,6 +321,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
                                   log.splitlines().count("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4") == 1 and
                                   log.splitlines().count("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8") == 1 and
+                                  log.splitlines().count("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1") == 1 and
                                   (fixture/"fb0").read_bytes() == expected_fb and
                                   (fixture/"pixels").read_bytes() == pixel_input and
                                   (dsim/"cmd_rw").read_bytes() == b"2")
@@ -391,6 +392,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "hwc_fixture_sha256": evidence.get("hwc_fixture_sha256") if hwc_fixture else None,
         "hwc_synthetic_cpu_present_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "gralloc_fixture_sha256": evidence.get("gralloc_fixture_sha256") if hwc_fixture else None,
+        "hwc_synthetic_decon_zero_copy_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_frame_present_verified": False, "hwc_hardware_verified": False,
         "sensor_events_tested": False,
         "hardware_io_methods_tested": False,
