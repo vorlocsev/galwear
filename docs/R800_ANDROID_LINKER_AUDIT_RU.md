@@ -62,3 +62,16 @@ DT_NEEDED и сведения о версиях символов. Транзит
 не моделирует EGL dlopen или реальные правила выбора драйвера; даже
 STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY не доказывает runtime.
 Синтетический CI не содержит реальных донорских образов.
+
+### Инвентарь групп EGL
+
+Поле `graphics_inventory.egl_driver_groups` (в отдельном профиле —
+`inventory.egl_driver_groups`) группирует библиотеки из `lib/egl` или
+`lib64/egl` по каталогу и суффиксу для ABI SurfaceFlinger. Различаются
+combined libGLES и split EGL/GLESv2, GLESv1 отмечается отдельно.
+Системные EGL/GLES wrappers вне каталога egl не считаются драйверами.
+Учитываются только наблюдаемые значения persist.graphics.egl,
+ro.hardware.egl, ro.board.platform из ограниченного списка prop-файлов.
+Конфликты, несколько групп и несовпадение явного суффикса требуют review.
+Порядок загрузки свойств, runtime override, ANGLE и updated drivers не
+моделируются. `selected_driver` всегда null, runtime не проверен.

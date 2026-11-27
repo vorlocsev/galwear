@@ -22,6 +22,85 @@ KERNEL_KEYS = ("CONFIG_DRM", "CONFIG_FB", "CONFIG_DRM_EXYNOS", "CONFIG_MALI_MIDG
                "CONFIG_DMA_SHARED_BUFFER", "CONFIG_ION", "CONFIG_DMABUF_HEAPS")
 
 
+EGL_PROPERTY_FILES = ("/system/build.prop", "/system/etc/build.prop",
+                      "/vendor/build.prop", "/vendor/etc/build.prop",
+                      "/odm/build.prop", "/odm/etc/build.prop",
+                      "/product/build.prop", "/product/etc/build.prop",
+                      "/system_ext/build.prop", "/system_ext/etc/build.prop",
+                      "/default.prop", "/prop.default")
+EGL_HINT_KEYS = ("persist.graphics.egl", "ro.hardware.egl", "ro.board.platform")
+EGL_SUFFIX = re.compile(r"[A-Za-z0-9_-]{1,80}")
+EGL_DRIVER = re.compile(r"(libEGL|libGLESv1_CM|libGLESv2|libGLES)(?:_([A-Za-z0-9_-]+))?\.so")
+
+
+def egl_driver_candidates(root, libraries, abi):
+    """Group drivers by ABI, directory and suffix; do not predict runtime priority."""
+    hints, errors, groups = {}, [], {}
+    for source in EGL_PROPERTY_FILES:
+        try:
+            raw = read_regular(guest_path(root, source), 1024*1024).decode("utf-8")
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            errors.append(source + ": " + str(exc))
+            continue
+        for number, line in enumerate(raw.splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = (v.strip() for v in line.split("=", 1))
+            if key not in EGL_HINT_KEYS:
+                continue
+            if not EGL_SUFFIX.fullmatch(value):
+                errors.append(source + ":" + str(number) + ": invalid EGL hint " + key)
+                continue
+            hints.setdefault(key, []).append({"value": value, "source": source, "line": number})
+    conflicts = sorted(key for key, records in hints.items()
+                       if len({v["value"] for v in records}) > 1)
+    for path, info in sorted(libraries.items()):
+        directory, name = path.rsplit("/", 1)
+        match = EGL_DRIVER.fullmatch(name)
+        # Plain /system/lib/libEGL.so and GLES wrappers are not driver evidence.
+        if not directory.endswith("/egl") or not match:
+            continue
+        role, suffix = match.groups()
+        path_abi = "arm64" if directory.endswith("/lib64/egl") else "arm"
+        if path_abi != abi:
+            continue
+        item = groups.setdefault((directory, suffix or ""), {
+            "directory": directory, "suffix": suffix or "", "abi": abi,
+            "libraries": {}, "invalid": []})
+        if info is None or info["abi"] != abi:
+            item["invalid"].append(path)
+        else:
+            item["libraries"][role] = path
+    for item in groups.values():
+        roles = set(item["libraries"])
+        item["combined_candidate"] = "libGLES" in roles
+        item["split_egl_gles2_candidate"] = {"libEGL", "libGLESv2"} <= roles
+        item["gles1_present"] = "libGLESv1_CM" in roles
+        item["matched_hint_keys"] = sorted(key for key, records in hints.items()
+            if any(v["value"] == item["suffix"] for v in records))
+        item["structurally_complete"] = not item["invalid"] and (
+            item["combined_candidate"] or item["split_egl_gles2_candidate"])
+    items = list(groups.values())
+    complete = [item for item in items if item["structurally_complete"]]
+    explicit = {v["value"] for key in ("persist.graphics.egl", "ro.hardware.egl")
+                for v in hints.get(key, [])}
+    matching = [item for item in complete if item["suffix"] in explicit]
+    # Do not guess precedence, fallback, ANGLE, updated drivers or property service state.
+    status = "REVIEW_REQUIRED"
+    if abi in ("arm", "arm64") and not errors and not conflicts and len(complete) == 1:
+        if not explicit or (len(explicit) == 1 and len(matching) == 1):
+            status = "STATIC_EGL_DRIVER_GROUP_ONLY"
+    return {"status": status, "abi": abi, "property_hints": hints,
+            "conflicting_properties": conflicts, "groups": items,
+            "complete_groups": len(complete), "explicit_hint_matches": len(matching),
+            "errors": errors, "selected_driver": None,
+            "runtime_selection_verified": False, "egl_initialized": False,
+            "safe_to_flash": False}
+
+
 def audit(root, init, vintf, inspect_elf, kernel_config=None):
     errors, services, libraries, nodes = [], [], {}, {}
     declared = {kind: [] for kind in HALS}
@@ -127,12 +206,14 @@ def audit(root, init, vintf, inspect_elf, kernel_config=None):
         if name.startswith(("gralloc.", "hwcomposer.")):
             items["legacy_hal"].append(path)
     sf_abi = sf[0]["elf"]["architecture"] if len(sf) == 1 and sf[0]["elf"] else None
+    driver_groups = egl_driver_candidates(root, libraries, sf_abi)
     missing = [kind for kind in HALS if not declared[kind]]
     if sf_abi and not all(candidates[sf_abi][kind] for kind in ("egl", "gles2")):
         errors.append("SurfaceFlinger ABI has incomplete EGL/GLES candidate inventory")
     return {"status": "STATIC_GRAPHICS_INVENTORY_ONLY" if not errors and not missing else "REVIEW_REQUIRED",
             "surfaceflinger_abi": sf_abi, "services": services, "declared_hals": declared,
             "missing_hal_declarations": missing, "libraries": libraries, "candidates": candidates,
+            "egl_driver_groups": driver_groups,
             "device_nodes": nodes, "kernel_config": None if kernel_config is None else
             {key: kernel_config.get(key) for key in KERNEL_KEYS},
             "errors": errors, "egl_initialized": False, "gpu_driver_compatible": False,

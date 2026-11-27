@@ -1926,6 +1926,56 @@ class LinkerTests(unittest.TestCase):
         self.assertIsNone(out["graph"])
         self.assertEqual(out["status"], "REVIEW_REQUIRED")
 
+    def test_egl_driver_group_matching_property(self):
+        self.graphics_fixture()
+        self.put("vendor/build.prop", b"ro.hardware.egl=mali\n")
+        out = self.inspect_graphics()["egl_driver_groups"]
+        self.assertEqual(out["status"], "STATIC_EGL_DRIVER_GROUP_ONLY")
+        self.assertEqual(out["explicit_hint_matches"], 1)
+        self.assertEqual(out["complete_groups"], 1)
+        self.assertEqual(out["groups"][0]["suffix"], "mali")
+        self.assertIsNone(out["selected_driver"])
+        self.assertFalse(out["runtime_selection_verified"])
+
+    def test_egl_driver_group_rejects_cross_suffix_pair(self):
+        self.graphics_fixture()
+        (self.root/"vendor/lib/egl/libGLESv2_mali.so").unlink()
+        self.put("vendor/lib/egl/libGLESv2_other.so", fixture("arm"))
+        out = self.inspect_graphics()["egl_driver_groups"]
+        self.assertEqual(out["complete_groups"], 0)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_egl_driver_group_rejects_wrong_abi_and_wrappers(self):
+        self.graphics_fixture()
+        self.put("vendor/lib/egl/libGLESv2_mali.so", fixture("arm64"))
+        self.put("system/lib/libEGL.so", fixture("arm"))
+        self.put("system/lib/libGLESv2.so", fixture("arm"))
+        out = self.inspect_graphics()["egl_driver_groups"]
+        self.assertEqual(out["complete_groups"], 0)
+        self.assertEqual(out["groups"][0]["invalid"], ["/vendor/lib/egl/libGLESv2_mali.so"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_egl_driver_group_combined_and_conflicting_properties(self):
+        self.graphics_fixture()
+        self.put("vendor/lib/egl/libGLES_other.so", fixture("arm"))
+        self.put("vendor/build.prop", b"ro.hardware.egl=mali\n")
+        self.put("odm/build.prop", b"ro.hardware.egl=other\n")
+        out = self.inspect_graphics()["egl_driver_groups"]
+        self.assertEqual(out["complete_groups"], 2)
+        self.assertEqual(out["conflicting_properties"], ["ro.hardware.egl"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_egl_driver_group_unmatched_or_invalid_property(self):
+        self.graphics_fixture()
+        self.put("vendor/build.prop", b"ro.hardware.egl=unknown\n")
+        out = self.inspect_graphics()["egl_driver_groups"]
+        self.assertEqual(out["explicit_hint_matches"], 0)
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.put("vendor/build.prop", b"ro.hardware.egl=../mali\n")
+        out = self.inspect_graphics()["egl_driver_groups"]
+        self.assertTrue(out["errors"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
     def test_graphics_wrong_library_abi(self):
         self.graphics_fixture()
         self.put("vendor/lib/egl/libEGL_mali.so", fixture("arm64"))
