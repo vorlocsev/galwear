@@ -205,7 +205,7 @@ class Stage10Tests(unittest.TestCase):
         self.assertNotIn("cp -a", script)
 
     def test_additional_debug_flags_rejected(self):
-        for marker in ("TZTRACE", "GPU_SCALE", "DIAG"):
+        for marker in ("TZTRACE", "GPU_SCALE", "DIAG", "PANEL_REALBLANK", "ABOX_POWEROFF", "HWC_RESTART"):
             with self.subTest(marker=marker):
                 altered = dict(self.payload_files)
                 altered["r800dev/android/" + marker] = b""
