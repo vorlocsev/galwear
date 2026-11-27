@@ -1,26 +1,54 @@
 #!/bin/sh
-# Build the Broadcom libbt-vendor.so for the SM-R800's BCM43012 (uart5, /dev/ttySAC5).
-# Source: AOSP hardware/broadcom/libbt + four system/bt headers, android11-release.
-# Needs: curl, bash, base64, Android NDK r26d (NDK=... path to the NDK root).
-set -e
-cd "$(dirname "$0")"
-NDK=${NDK:-/d/r800/ndk/android-ndk-r26d}
-W=work; mkdir -p $W/src $W/bdroid
+# NON-RELEASE ARM32 Broadcom vendor HAL for BCM43012, no radio access.
+# Usage: sh src/vendor/libbt/build.sh <NDK r27c> <new-output-dir>
+set -eu
+[ "$#" -eq 2 ] || { echo "usage: $0 <NDK r27c> <new-output-dir>" >&2; exit 2; }
+S=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+NDK=$(CDPATH= cd -- "$1" && pwd)
+OUT=$2
+[ ! -e "$OUT" ] && [ ! -L "$OUT" ] || { echo "output must not exist" >&2; exit 2; }
+grep -Eq '^Pkg.Revision[[:space:]]*=[[:space:]]*27\.2\.12479018$' "$NDK/source.properties"
+TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+CC=$TC/armv7a-linux-androideabi28-clang
+[ -x "$CC" ] && [ -x "$TC/llvm-readelf" ]
+mkdir -- "$OUT"
+OUT=$(CDPATH= cd -- "$OUT" && pwd)
 G=https://android.googlesource.com/platform
-[ -f $W/src/Android.mk ] || curl -sSL "$G/hardware/broadcom/libbt/+archive/refs/heads/android11-release.tar.gz" | tar -xz -C $W/src
-for f in hci/include/bt_vendor_lib.h hci/include/bt_hci_bdroid.h hci/include/userial.h \
-         stack/include/bt_types.h device/include/esco_parameters.h include/hardware/bluetooth.h; do
-    [ -f $W/bdroid/$f ] || { mkdir -p $W/bdroid/$(dirname $f); curl -sSL "$G/system/bt/+/refs/heads/android11-release/$f?format=TEXT" | base64 -d > $W/bdroid/$f; }
-done
-touch shim/bdroid_buildcfg.h
-bash $W/src/gen-buildcfg.sh vnd_r800.txt shim/vnd_buildcfg.h
-CC=$(ls $NDK/toolchains/llvm/prebuilt/*/bin/armv7a-linux-androideabi28-clang* | head -1)
-"$CC" -shared -fPIC -O2 -Wall -Wno-switch -Wno-unused-function -Wno-unused-parameter \
+TAG=android-11.0.0_r48
+BASE=a7191619f320c9c48c0cfc376996ca2836c7a799
+fetch_source() {
+    git init -q "$2"
+    git -C "$2" remote add origin "$G/$1"
+    git -C "$2" fetch --depth=1 origin "$3"
+    git -C "$2" checkout --detach -q 'FETCH_HEAD^{commit}'
+}
+fetch_source hardware/broadcom/libbt "$OUT/src" "$BASE"
+[ "$(git -C "$OUT/src" rev-parse HEAD)" = "$BASE" ]
+BT_BASE=30098cc2b2fc751f76018ba9e013a86cb883fbd3
+fetch_source system/bt "$OUT/bdroid" "$BT_BASE"
+[ "$(git -C "$OUT/bdroid" rev-parse HEAD)" = "$BT_BASE" ]
+# All generated headers and source checkouts are disposable; repo stays clean.
+cp -R "$S/shim" "$OUT/shim"
+touch "$OUT/shim/bdroid_buildcfg.h"
+bash "$OUT/src/gen-buildcfg.sh" "$S/vnd_r800.txt" "$OUT/shim/vnd_buildcfg.h"
+"$CC" -shared -fPIC -O2 -Wall -Wl,--no-undefined -Wl,-soname,libbt-vendor.so \
+    -Wno-switch -Wno-unused-function -Wno-unused-parameter \
     -Wno-unused-variable -Wno-unused-but-set-variable \
-    -Ishim -I$W/src/include -I$W/bdroid/hci/include -I$W/bdroid/include \
-    -I$W/bdroid/device/include -I$W/bdroid/stack/include -I$W/bdroid \
-    -o libbt-vendor.so $W/src/src/*.c -llog
-echo "built $(pwd)/libbt-vendor.so"
-# Deploy: copy libbt-vendor.so, bt_vendor.conf and the Tizen firmware
-# BCM43012B0_002.001.021.0153.0156.hcd (rootfs p18 /usr/lib/firmware) to
-# /oem/r800dev/fw/bt/; android-helper.sh bind-mounts the library over the vendor one.
+    -I"$OUT/shim" -I"$OUT/src/include" -I"$OUT/bdroid/hci/include" -I"$OUT/bdroid/include" \
+    -I"$OUT/bdroid/device/include" -I"$OUT/bdroid/stack/include" -I"$OUT/bdroid" \
+    -o "$OUT/libbt-vendor.so" "$OUT"/src/src/*.c -llog
+"$TC/llvm-readelf" -h -d --dyn-syms --wide "$OUT/libbt-vendor.so" > "$OUT/libbt-vendor.elf.txt"
+grep -Eq 'Class:[[:space:]]*ELF32' "$OUT/libbt-vendor.elf.txt"
+grep -Eq 'Machine:[[:space:]]*ARM' "$OUT/libbt-vendor.elf.txt"
+grep -Eq 'Type:[[:space:]]*DYN' "$OUT/libbt-vendor.elf.txt"
+grep -Eq 'OBJECT[[:space:]]+GLOBAL[[:space:]]+DEFAULT[[:space:]]+[0-9]+[[:space:]]+BLUETOOTH_VENDOR_LIB_INTERFACE([[:space:]]|$)' "$OUT/libbt-vendor.elf.txt"
+{
+    printf 'broadcom_commit=%s\n' "$BASE"
+    printf 'system_bt_tag=%s\n' "$TAG"
+    printf 'system_bt_commit=%s\n' "$(git -C "$OUT/bdroid" rev-parse HEAD)"
+    "$CC" --version
+    sha256sum "$OUT/libbt-vendor.so" "$S/vnd_r800.txt" "$S/bt_vendor.conf"
+    echo 'runtime_verified=false'
+    echo 'safe_to_flash=false'
+} > "$OUT/bt-build-evidence.txt"
+cat "$OUT/bt-build-evidence.txt"
