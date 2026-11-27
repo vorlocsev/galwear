@@ -854,7 +854,7 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
     art_launch = r800_art_launch.audit(root, init_inventory, art_precompiled)
     binder_inventory = r800_binder_inventory.audit(root, init_inventory, art_inventory, art_launch, kernel_config)
     vintf_inventory = r800_vintf_inventory.audit(root)
-    graphics_inventory = r800_graphics_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config)
+    graphics_inventory = r800_graphics_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
     display_inventory = r800_display_inventory.audit(root, kernel_config, dtb)
     input_inventory = r800_input_inventory.audit(root, kernel_config, dtb)
     audio_inventory = r800_audio_inventory.audit(root, init_inventory, vintf_inventory, inspect, kernel_config, dtb)
@@ -944,7 +944,7 @@ def audit_graphics_dependencies(root, kernel_config=None, dtb=None):
     """
     inventory = r800_graphics_inventory.audit(
         root, r800_init_inventory.audit(root), r800_vintf_inventory.audit(root),
-        inspect, kernel_config)
+        inspect, kernel_config, dtb)
     roots = sorted(set(path for path, info in inventory["libraries"].items() if info) |
                    {s["path"] for s in inventory["services"] if s["elf"]})
     invalid = sorted(path for path, info in inventory["libraries"].items() if info is None)

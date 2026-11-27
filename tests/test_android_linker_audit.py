@@ -1976,6 +1976,54 @@ class LinkerTests(unittest.TestCase):
         self.assertTrue(out["errors"])
         self.assertEqual(out["status"], "REVIEW_REQUIRED")
 
+    def test_mali_recipe_kernel_and_userspace_evidence(self):
+        mod = audit.r800_graphics_inventory
+        cfg = {key: "y" for key in ("CONFIG_MALI_T72X", "CONFIG_MALI_MIDGARD",
+               "CONFIG_MALI_R28P0", "CONFIG_DMA_SHARED_BUFFER", "CONFIG_SYNC_FILE",
+               "CONFIG_ION", "CONFIG_IOMMU_SUPPORT", "CONFIG_EXYNOS_IOMMU",
+               "CONFIG_ARM64", "CONFIG_COMPAT")}
+        libs = {"/vendor/lib/egl/libMali.so": {"abi": "arm"}}
+        out = mod.mali_evidence(libs, "arm", cfg)
+        self.assertEqual(out["kernel_release_candidates"], ["CONFIG_MALI_R28P0"])
+        self.assertEqual(out["blockers"], ["Target DTB not supplied"])
+        self.assertFalse(out["kbase_ioctl_abi_verified"])
+        self.assertFalse(out["safe_to_flash"])
+
+    def test_mali_recipe_rejects_wrong_abi_and_compat(self):
+        mod = audit.r800_graphics_inventory
+        out = mod.mali_evidence({"/vendor/lib64/libMali.so": {"abi": "arm64"}}, "arm",
+                                {"CONFIG_ARM64": "y", "CONFIG_COMPAT": "n",
+                                 "CONFIG_MALI_R21P0": "y", "CONFIG_MALI_R28P0": "y"})
+        self.assertEqual(out["userspace_candidates"], [])
+        self.assertIn("ARM32 userspace on ARM64 requires CONFIG_COMPAT", out["blockers"])
+        self.assertIn("Missing or ambiguous R800 kernel Mali release selection", out["blockers"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_mali_dt_resources_and_disabled_ancestor(self):
+        mod = audit.r800_graphics_inventory
+        nodes = {"/": {}, "/soc": {"status": b"disabled\0"},
+                 "/soc/gpu@1000": {"compatible": b"arm,mali-t720\0",
+                                   "reg": b"\0\0\x10\0", "clocks": b"\0\0\0\1"},
+                 "/gpu@2000": {"compatible": b"arm,mali-midgard\0"}}
+        rows = mod.gpu_dt_candidates(nodes)
+        self.assertFalse(rows[0]["enabled"])
+        self.assertTrue(rows[0]["explicit_t72x"])
+        self.assertEqual(rows[0]["resource_properties"], ["clocks", "reg"])
+        self.assertTrue(rows[1]["enabled"])
+        self.assertFalse(rows[1]["explicit_t72x"])
+
+    def test_mali_missing_exact_target_dtb(self):
+        self.graphics_fixture()
+        out = self.inspect_graphics()["mali_evidence"]
+        self.assertIn("Target kernel config not supplied", out["blockers"])
+        self.assertIn("Target DTB not supplied", out["blockers"])
+        self.assertFalse(out["userspace_release_verified"])
+
+    def test_mali_invalid_dtb(self):
+        out = audit.r800_graphics_inventory.mali_evidence({}, "arm", {}, b"invalid")
+        self.assertTrue(out["errors"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
     def test_graphics_wrong_library_abi(self):
         self.graphics_fixture()
         self.put("vendor/lib/egl/libEGL_mali.so", fixture("arm64"))

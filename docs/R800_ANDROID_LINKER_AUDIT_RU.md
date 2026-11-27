@@ -75,3 +75,14 @@ ro.hardware.egl, ro.board.platform из ограниченного списка 
 Конфликты, несколько групп и несовпадение явного суффикса требуют review.
 Порядок загрузки свойств, runtime override, ANGLE и updated drivers не
 моделируются. `selected_driver` всегда null, runtime не проверен.
+
+### Mali / KBASE
+
+`mali_evidence` сравнивает выбранный ABI SurfaceFlinger, имена libMali,
+точный переданный kernel config и GPU-узлы DTB с существующим рецептом
+R800 (CONFIG_MALI_T72X, MIDGARD, R28P0). Учитываются отключённые предки
+DT-узлов, параметры ресурсов, ION, IOMMU, SYNC_FILE, DMA_SHARED_BUFFER
+и ARM32 COMPAT для ARM64. Отсутствие точного config/DTB или однозначного
+GPU-узла требует review; это консервативный фильтр рецепта, а не общая
+проверка всех допустимых конфигураций Mali. Версия userspace, KBASE ioctl,
+compat ioctl, импорт dma-buf и аппаратный GPU остаются NOT_TESTED.

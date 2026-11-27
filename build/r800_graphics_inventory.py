@@ -7,6 +7,7 @@ import stat
 
 from r800_android_userspace_preflight import guest_path, read_regular
 from r800_art_launch import executable
+from r800_display_inventory import parse_dtb, strings
 
 MAX_ELF = 64 * 1024 * 1024
 MAX_SCAN = 8192
@@ -101,7 +102,89 @@ def egl_driver_candidates(root, libraries, abi):
             "safe_to_flash": False}
 
 
-def audit(root, init, vintf, inspect_elf, kernel_config=None):
+MALI_KEYS = ("CONFIG_ARM64", "CONFIG_COMPAT", "CONFIG_MALI_T72X",
+             "CONFIG_MALI_MIDGARD", "CONFIG_MALI_R21P0", "CONFIG_MALI_R28P0",
+             "CONFIG_MALI_R29P0", "CONFIG_MALI_NO_MALI", "CONFIG_MALI_BIFROST",
+             "CONFIG_MALI_PLATFORM_NAME", "CONFIG_DMA_SHARED_BUFFER",
+             "CONFIG_SYNC_FILE", "CONFIG_MALI_DMA_FENCE", "CONFIG_ION",
+             "CONFIG_ION_EXYNOS", "CONFIG_IOMMU_SUPPORT", "CONFIG_EXYNOS_IOMMU")
+
+
+def gpu_dt_candidates(nodes):
+    enabled, candidates = {}, []
+    for path, props in nodes.items():
+        parent = path.rsplit("/", 1)[0] or "/"
+        status = strings(props.get("status", b""))
+        enabled[path] = (not status or status in (["ok"], ["okay"])) and (
+            path == "/" or enabled.get(parent, False))
+        compatible = strings(props.get("compatible", b""))
+        label = path.rsplit("/", 1)[-1].split("@", 1)[0].lower()
+        if label not in ("gpu", "mali", "g3d") and not any(
+                "mali" in value.lower() or "g3d" in value.lower() for value in compatible):
+            continue
+        candidates.append({"path": path, "compatible": compatible, "enabled": enabled[path],
+                           "explicit_t72x": any(re.search(r"mali[-_,]?t72[0-9x]", v.lower())
+                                               for v in compatible),
+                           "resource_properties": sorted(key for key in
+                               ("reg", "interrupts", "interrupts-extended", "clocks",
+                                "clock-names", "power-domains", "iommus", "operating-points",
+                                "operating-points-v2", "mali-supply", "gpu-supply")
+                               if props.get(key))})
+    return candidates
+
+
+def mali_evidence(libraries, abi, kernel_config=None, dtb=None):
+    """Compare observed inputs to the existing R800 T72x/r28 kernel recipe.
+
+    Neither a Mali filename nor a DT compatible string establishes KBASE UAPI
+    compatibility. No ioctl, GPU initialization or binary execution.
+    """
+    config = {key: (kernel_config or {}).get(key) for key in MALI_KEYS}
+    errors, blockers, gpu_nodes = [], [], []
+    versions = [key for key in ("CONFIG_MALI_R21P0", "CONFIG_MALI_R28P0", "CONFIG_MALI_R29P0")
+                if config[key] in ("y", "m")]
+    if kernel_config is None:
+        blockers.append("Target kernel config not supplied")
+    else:
+        for key in ("CONFIG_MALI_T72X", "CONFIG_MALI_MIDGARD", "CONFIG_MALI_R28P0",
+                    "CONFIG_DMA_SHARED_BUFFER", "CONFIG_SYNC_FILE", "CONFIG_ION",
+                    "CONFIG_IOMMU_SUPPORT", "CONFIG_EXYNOS_IOMMU"):
+            if config[key] != "y":
+                blockers.append("R800 recipe requires built-in " + key)
+        if versions != ["CONFIG_MALI_R28P0"]:
+            blockers.append("Missing or ambiguous R800 kernel Mali release selection")
+        if config["CONFIG_MALI_NO_MALI"] in ("y", "m"):
+            blockers.append("Mali no-hardware mode enabled")
+        if abi == "arm" and config["CONFIG_ARM64"] == "y" and config["CONFIG_COMPAT"] != "y":
+            blockers.append("ARM32 userspace on ARM64 requires CONFIG_COMPAT")
+    if dtb is None:
+        blockers.append("Target DTB not supplied")
+    else:
+        try:
+            gpu_nodes = gpu_dt_candidates(parse_dtb(dtb))
+        except (ValueError, UnicodeError) as exc:
+            errors.append(str(exc))
+        active = [node for node in gpu_nodes if node["enabled"]]
+        if len(active) != 1:
+            blockers.append("Missing or ambiguous enabled GPU node")
+        elif not active[0]["explicit_t72x"]:
+            blockers.append("GPU compatible does not explicitly identify T72x")
+    userspace = sorted(path for path, info in libraries.items()
+                       if info and info["abi"] == abi and
+                       path.rsplit("/", 1)[1].lower().startswith("libmali"))
+    if not userspace:
+        blockers.append("No same-ABI libMali candidate; combined EGL driver requires review")
+    return {"status": "STATIC_MALI_RECIPE_EVIDENCE_ONLY" if not blockers and not errors
+                      else "REVIEW_REQUIRED",
+            "surfaceflinger_abi": abi, "kernel_config": config,
+            "kernel_release_candidates": versions, "gpu_nodes": gpu_nodes,
+            "userspace_candidates": userspace, "blockers": blockers, "errors": errors,
+            "userspace_release_verified": False, "kbase_ioctl_abi_verified": False,
+            "compat_ioctl_verified": False, "dma_buf_import_verified": False,
+            "gpu_hardware_verified": False, "safe_to_flash": False}
+
+
+def audit(root, init, vintf, inspect_elf, kernel_config=None, dtb=None):
     errors, services, libraries, nodes = [], [], {}, {}
     declared = {kind: [] for kind in HALS}
     for doc in vintf["files"].values():
@@ -214,6 +297,7 @@ def audit(root, init, vintf, inspect_elf, kernel_config=None):
             "surfaceflinger_abi": sf_abi, "services": services, "declared_hals": declared,
             "missing_hal_declarations": missing, "libraries": libraries, "candidates": candidates,
             "egl_driver_groups": driver_groups,
+            "mali_evidence": mali_evidence(libraries, sf_abi, kernel_config, dtb),
             "device_nodes": nodes, "kernel_config": None if kernel_config is None else
             {key: kernel_config.get(key) for key in KERNEL_KEYS},
             "errors": errors, "egl_initialized": False, "gpu_driver_compatible": False,
