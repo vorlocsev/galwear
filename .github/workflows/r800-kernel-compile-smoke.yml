@@ -201,7 +201,7 @@ jobs:
               "kernel_boot_tested": False,
               "safe_to_flash": False,
           }
-          (out / "embedded-link-evidence.json").write_text(json.dumps(report, indent=2) + "\n")
+          (root / "embedded-link-evidence.json").write_text(json.dumps(report, indent=2) + "\n")
           PY
 
       - name: Audit historical NZIT capacity without packaging
@@ -286,7 +286,7 @@ jobs:
             ${{ runner.temp }}/compiled-kernel/embedded-initramfs-gate.json
             ${{ runner.temp }}/compiled-kernel/storage-isolation-evidence.json
             ${{ runner.temp }}/compiled-kernel/embedded-cpio-audit.json
-            ${{ runner.temp }}/compiled-kernel/embedded-link-evidence.json
+            ${{ runner.temp }}/embedded-link-evidence.json
             ${{ runner.temp }}/r800-nzit-layout.json
             ${{ runner.temp }}/r800-layout-dtc.txt
             ${{ runner.temp }}/r800-embedded-dtb/embedded-dtb-evidence.json

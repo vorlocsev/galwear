@@ -109,8 +109,16 @@ jobs:
             --report "$RUNNER_TEMP/virt-abi-evidence.json"
       - name: Install pinned NDK and compile separate Bionic diagnostic
         run: |
-          sdkmanager --install "ndk;27.3.13750724"
-          sh build/r800_bionic_compile.sh "$GITHUB_WORKSPACE" "$ANDROID_SDK_ROOT/ndk/27.3.13750724" "$RUNNER_TEMP/virt-abi-init/uapi" "$RUNNER_TEMP/virt-bionic-init"
+          set -euo pipefail
+          archive="$RUNNER_TEMP/android-ndk-r27d-linux.zip"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 https://dl.google.com/android/repository/android-ndk-r27d-linux.zip -o "$archive"
+          test "$(stat -c %s "$archive")" = 663956036
+          printf '%s  %s\n' 22105e410cf29afcf163760cc95522b9fb981121 "$archive" | sha1sum --check -
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          rm -f "$archive"
+          grep -Eq '^Pkg.Revision[[:space:]]*=[[:space:]]*27\.3\.13750724[[:space:]]*$' "$RUNNER_TEMP/android-ndk-r27d/source.properties"
+          test -x "$RUNNER_TEMP/android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          sh build/r800_bionic_compile.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27d" "$RUNNER_TEMP/virt-abi-init/uapi" "$RUNNER_TEMP/virt-bionic-init"
       - name: Boot Bionic diagnostic on same virt kernel after glibc success
         run: |
           python3 build/r800_qemu_guest_abi.py \
@@ -127,7 +135,7 @@ jobs:
           mkdir "$RUNNER_TEMP/virt-dynamic"
           aarch64-linux-gnu-gcc -std=c11 -Wall -Wextra -Werror -O2 -static -Wl,--build-id=none src/initramfs/dynamic-probe-pid1.c -o "$RUNNER_TEMP/virt-dynamic/init"
           python3 build/r800_initramfs_spec.py --init "$RUNNER_TEMP/virt-dynamic/init" --list "$RUNNER_TEMP/virt-dynamic/initramfs.list" --report "$RUNNER_TEMP/virt-dynamic/initramfs-evidence.json"
-          toolchain="$ANDROID_SDK_ROOT/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          toolchain="$RUNNER_TEMP/android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/bin"
           "$toolchain/aarch64-linux-android30-clang" -std=c11 -Wall -Wextra -Werror -O2 -fPIE -pie src/initramfs/bionic-dynamic-probe.c -ldl -o "$RUNNER_TEMP/virt-dynamic/probe"
           LC_ALL=C python3 build/r800_android_dynamic_audit.py --probe "$RUNNER_TEMP/virt-dynamic/probe" --readelf "$toolchain/llvm-readelf" --report "$RUNNER_TEMP/virt-dynamic/evidence.json"
       - name: Record source and patch identity
