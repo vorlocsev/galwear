@@ -21,7 +21,54 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def compile_cil(inputs, tool):
+def audit_context_labels(policy, checker, entries):
+    """Verify literal context tokens only, not Android file regex or type attributes."""
+    from r800_selinux_inventory import CONTEXT
+    checker = Path(checker).resolve(strict=True)
+    tool_sha = sha(read_regular(checker, MAX_POLICY))
+    rows, labels = [], set()
+    if not 1 <= len(entries) <= 16:
+        raise ValueError("Expected 1..16 context files")
+    for path, expected in entries:
+        raw = read_regular(Path(path), MAX_INPUT)
+        if sha(raw) != expected:
+            raise ValueError("Context SHA-256 mismatch")
+        count = 0
+        for line in raw.decode("utf-8").splitlines():
+            fields = line.split()
+            if not fields or fields[0].startswith("#"):
+                continue
+            tokens = [value for value in fields[1:] if CONTEXT.fullmatch(value)]
+            if len(tokens) != 1:
+                raise ValueError("Expected one literal SELinux context per record")
+            labels.add(tokens[0])
+            count += 1
+            if len(labels) > 512 or count > 65536:
+                raise ValueError("Context inventory budget exceeded")
+        rows.append({"sha256": expected, "records": count})
+    if not labels:
+        raise ValueError("No context labels")
+    ordered = sorted(labels)
+    policy_sha = sha(read_regular(policy, MAX_POLICY))
+    run = subprocess.run([str(checker), str(policy), *ordered], capture_output=True,
+                         text=True, timeout=30, check=False)
+    lines = run.stdout.splitlines()
+    if len(lines) != len(ordered) or any(line not in
+            (f"{i} VALID", f"{i} INVALID") for i, line in enumerate(lines)):
+        raise ValueError("Incomplete context checker response")
+    invalid = [label for label, line in zip(ordered, lines) if line.endswith(" INVALID")]
+    if run.returncode != (1 if invalid else 0):
+        raise ValueError("Inconsistent context checker result")
+    if sha(read_regular(checker, MAX_POLICY)) != tool_sha or sha(read_regular(policy, MAX_POLICY)) != policy_sha:
+        raise ValueError("Context checker or policy changed")
+    return {"status": "CONTEXT_LABELS_VALID_ONLY" if not invalid else "REVIEW_REQUIRED",
+            "inputs": rows, "unique_labels": len(ordered), "invalid_labels": invalid,
+            "checker_sha256": tool_sha, "policy_sha256": policy_sha,
+            "android_checkfc_verified": False, "domain_transitions_verified": False,
+            "policy_loaded": False, "safe_to_flash": False}
+
+
+def compile_cil(inputs, tool, checker=None, context_entries=()):
     if not 1 <= len(inputs) <= 32:
         raise ValueError("Expected 1..32 explicit CIL files")
     tool = Path(tool).resolve(strict=True)
@@ -59,6 +106,10 @@ def compile_cil(inputs, tool):
             blob = read_regular(policy, MAX_POLICY)
             report.update(header(blob), policy_sha256=sha(blob), policy_bytes=len(blob),
                           status="CIL_COMPILED_STATIC_ONLY")
+            if checker is not None:
+                report["context_audit"] = audit_context_labels(policy, checker, context_entries)
+                if report["context_audit"]["status"] != "CONTEXT_LABELS_VALID_ONLY":
+                    report["status"] = "REVIEW_REQUIRED"
         if sha(read_regular(tool, MAX_POLICY)) != tool_sha:
             raise ValueError("Compiler changed during audit")
     return report
@@ -87,7 +138,7 @@ FIXTURE = """(class file (read write))
 """
 
 
-def fixture(tool):
+def fixture(tool, checker=None):
     with tempfile.TemporaryDirectory(prefix="r800-cil-fixture-") as tmp:
         root = Path(tmp)
         base = root/"base.cil"
@@ -100,9 +151,23 @@ def fixture(tool):
         passed = (good["status"] == "CIL_COMPILED_STATIC_ONLY" and
                   bad["compiler_exit_code"] != 0 and
                   "neverallow" in bad["diagnostic"].lower())
-        return {"status": "SYNTHETIC_CIL_NEVERALLOW_PASS" if passed else "REVIEW_REQUIRED",
-                "allowed": good, "forbidden": bad, "production_policy": False,
-                "policy_loaded": False, "safe_to_flash": False}
+        report = {"status": "SYNTHETIC_CIL_NEVERALLOW_PASS" if passed else "REVIEW_REQUIRED",
+                  "allowed": good, "forbidden": bad, "production_policy": False,
+                  "policy_loaded": False, "safe_to_flash": False}
+        if checker is not None:
+            valid = root/"valid.contexts"
+            invalid = root/"invalid.contexts"
+            valid.write_text("/vendor/bin/fixture system_u:object_r:fixture_t:s0\n")
+            invalid.write_text("/vendor/bin/fixture system_u:object_r:unknown_t:s0\n")
+            positive = compile_cil([first], tool, checker, [(valid, sha(valid.read_bytes()))])
+            negative = compile_cil([first], tool, checker, [(invalid, sha(invalid.read_bytes()))])
+            report["context_positive"], report["context_negative"] = positive, negative
+            if (not passed or positive["status"] != "CIL_COMPILED_STATIC_ONLY" or
+                    negative["status"] != "REVIEW_REQUIRED" or
+                    negative.get("context_audit", {}).get("invalid_labels") !=
+                    ["system_u:object_r:unknown_t:s0"]):
+                report["status"] = "REVIEW_REQUIRED"
+        return report
 
 
 def main():
@@ -110,12 +175,17 @@ def main():
     p.add_argument("--tool", type=Path, default=shutil.which("secilc"))
     p.add_argument("--input", nargs=2, action="append", metavar=("FILE", "SHA256"))
     p.add_argument("--fixture", action="store_true")
+    p.add_argument("--context-checker", type=Path)
+    p.add_argument("--contexts", nargs=2, action="append", metavar=("FILE", "SHA256"))
     p.add_argument("--report", type=Path, required=True)
     a = p.parse_args()
     if not a.tool or bool(a.input) == a.fixture:
         p.error("Specify compiler and exactly one of --fixture or --input")
+    if (a.fixture and a.contexts) or (not a.fixture and bool(a.context_checker) != bool(a.contexts)):
+        p.error("Explicit contexts require the context checker; fixture supplies its own")
     try:
-        report = fixture(a.tool) if a.fixture else compile_cil(a.input, a.tool)
+        report = fixture(a.tool, a.context_checker) if a.fixture else compile_cil(
+            a.input, a.tool, a.context_checker, a.contexts or ())
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         report = {"status": "REVIEW_REQUIRED", "reason": str(exc), "safe_to_flash": False}
     with a.report.open("x", encoding="utf-8") as f:

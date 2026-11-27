@@ -194,3 +194,13 @@ python3 build/r800_donor_cil_compile.py --input /path/to/plat.cil "$PLAT_SHA256"
 neverallow не отключается. CI проверяет синтетическую допустимую политику
 и намеренное нарушение neverallow. Компиляция не подтверждает полноту
 Android policy, подлинность доноров или совместимость с ядром часов.
+
+
+Дополнительная проверка буквальных security contexts через libsepol:
+собрать host-only helper командой
+cc -std=c11 -Wall -Wextra -Werror build/r800_context_check.c -lsepol -o /path/to/context-check
+и передать --context-checker /path/to/context-check --contexts FILE SHA256
+при компиляции CIL. Проверяются user/role/type/MLS по тому же бинарному
+policy; отрицательная fixture содержит неизвестный тип. Это не AOSP
+checkfc: правила regex, Android type attributes, seapp и реальные
+переходы доменов не проверены.
