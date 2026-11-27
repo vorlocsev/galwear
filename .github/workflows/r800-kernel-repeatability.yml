@@ -8,6 +8,8 @@ on:
       - ".github/workflows/r800-kernel-repeatability.yml"
       - "build/r800_reproducibility_audit.py"
       - "build/r800_kernel_diff_evidence.py"
+      - "build/r800_kheaders_repro.py"
+      - "tests/test_kheaders_repro.py"
       - "tests/test_kernel_diff_evidence.py"
       - "build/r800_apk_inventory.py"
       - "tests/test_apk_inventory.py"
@@ -49,6 +51,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_apk_inventory.py' -v
           python3 -m unittest discover -s tests -p 'test_reproducibility_audit.py' -v
           python3 -m unittest discover -s tests -p 'test_kernel_diff_evidence.py' -v
+          python3 -m unittest discover -s tests -p 'test_kheaders_repro.py' -v
           python3 -m unittest discover -s tests -p 'test_readonly_init.py' -v
           python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
           python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
@@ -93,6 +96,7 @@ jobs:
               git config --global --add safe.directory /source
               sh /repo/build/r800_initramfs_compile_smoke.sh \
                 /repo /scratch/r800-embedded-initramfs
+              R800_REPRO_KHEADERS=1 \
               R800_SMOKE_INITRAMFS_LIST=/scratch/r800-embedded-initramfs/initramfs.list \
                 sh /repo/build/r800_kernel_compile_smoke.sh \
                 /source /repo /scratch/r800-embedded-kernel
