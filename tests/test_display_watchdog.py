@@ -69,7 +69,11 @@ class DisplayWatchdogTests(unittest.TestCase):
             self.assertNotIn(forbidden, commands)
         self.assertIn('$B mkdir "$HWCATTEMPT"', block)
         self.assertIn('kill -TERM "$cp"', block)
-        self.assertIn("HWC_RESTART", (ROOT / "build/mkpayload-release.sh").read_text())
+        import sys
+        sys.path.insert(0, str(ROOT / "build"))
+        from r800_payload_candidate import STATE, NEVER_SHIP_ANDROID_FILES
+        self.assertIn("HWC_RESTART", STATE)
+        self.assertIn("HWC_RESTART", NEVER_SHIP_ANDROID_FILES)
 
     def test_stale_future_and_young_process(self):
         for args in ((150, 130, 130, 0, 100, 1),
@@ -88,7 +92,10 @@ class DisplayWatchdogTests(unittest.TestCase):
     def test_shell_syntax_and_packaging(self):
         for path in (HELPER, ROOT / "payload/android-helper.sh", ROOT / "build/mkpayload-release.sh"):
             subprocess.run(["sh", "-n", str(path)], check=True, timeout=5)
-        self.assertIn("r800-display-watchdog.sh", (ROOT / "build/mkpayload-release.sh").read_text())
+        import sys
+        sys.path.insert(0, str(ROOT / "build"))
+        from r800_payload_candidate import SCRIPTS
+        self.assertIn("r800-display-watchdog.sh", SCRIPTS)
 
 
 if __name__ == "__main__":
