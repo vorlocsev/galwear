@@ -415,6 +415,15 @@ jobs:
           verify_components(root, sha)
           print("REAL_COMPONENT_NEGATIVE_TESTS_PASS")
           PY
+      - name: Pack real compiled overlay into rootless EXT4 test image
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          for tool in mke2fs e2fsck debugfs; do command -v "$tool"; done
+          python3 build/r800_compiled_overlay_ext4.py \
+            --components "$RUNNER_TEMP/r800-components" --source-sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/r800-overlay-ext4"
+          rm -- "$RUNNER_TEMP/r800-overlay-ext4/overlay-test.ext4"
       - name: Upload component manifest only (no binaries)
         if: always() && github.ref_name == 'development/r800-integration-20261127'
         uses: actions/upload-artifact@v4
@@ -424,6 +433,7 @@ jobs:
             ${{ runner.temp }}/r800-components/component-evidence.json
             ${{ runner.temp }}/r800-components/hal-stage-evidence.json
             ${{ runner.temp }}/r800-donor-hold-evidence.json
+            ${{ runner.temp }}/r800-overlay-ext4/overlay-ext4-evidence.json
           if-no-files-found: warn
           retention-days: 7
       - name: Fetch Debian ARM EABI glibc 2.24 reference (not a Tizen donor)

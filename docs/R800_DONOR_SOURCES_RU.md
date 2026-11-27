@@ -265,3 +265,11 @@ kernel_evidence. CI --fixture-device использует синтетическ
 и policy, отрицательный тест удаляет только ioctl клиента. Это не
 доказательство наличия node, DAC/ueventd, ioctl xperm или обмена IPC.
 Фактическую конфигурацию ядра и тип устройства необходимо предоставить.
+
+
+Rootless EXT4 smoke: build/r800_compiled_overlay_ext4.py принимает
+проверенное дерево компонентов exact SHA и создаёт только overlay-test.ext4
+(64 MiB) с 5 HAL и 6 конфигурациями в целевых путях vendor. mke2fs -d,
+e2fsck -fn и debugfs dump проверяют упаковку без mount/root. CI удаляет
+образ и сохраняет только JSON. Не содержит donor HIDL, policy, radio,
+и не является готовым vendor.img. SELinux xattrs не проверяются.
