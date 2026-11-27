@@ -296,14 +296,23 @@ static void fence_scan(void)
 		     k[fd].signaled);
 }
 
-static void wait_fence(int fd)
+static int wait_fence(int fd)
 {
-	if (fd < 0)
-		return;
+	if (fd == -1)
+		return 0;
+	if (fd < -1)
+		return -EINVAL;
 	struct pollfd p = { .fd = fd, .events = POLLIN };
-	if (poll(&p, 1, 1000) == 0)
-		LOGW("acquire fence %d timed out", fd);
+	int r = poll(&p, 1, 1000);
+	int saved = errno;
 	close(fd);
+	if (r < 0)
+		return -saved;
+	if (r == 0)
+		return -ETIMEDOUT;
+	if (!(p.revents & POLLIN) || (p.revents & (POLLERR | POLLHUP | POLLNVAL)))
+		return -EIO;
+	return 0;
 }
 
 /* ---- framebuffer ---- */
@@ -780,11 +789,15 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 
 	for (d = 0; d < n; d++) {
 		hwc_display_contents_1_t *c = displays[d];
-		buffer_handle_t fallback = NULL;
 		int retire = -1;
 
 		if (!c)
 			continue;
+		/* This HAL does not render virtual displays; consume their input fence. */
+		if (d == HWC_DISPLAY_VIRTUAL && c->outbufAcquireFenceFd >= 0) {
+			close(c->outbufAcquireFenceFd);
+			c->outbufAcquireFenceFd = -1;
+		}
 		if (d == 0 && h->ovl_n > 0) {
 			/* prepare() marked these layers HWC_OVERLAY: nothing was composed
 			 * into the FB target. On failure the previous frame stays up. */
@@ -814,37 +827,26 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 		}
 		for (i = 0; i < c->numHwLayers; i++) {
 			hwc_layer_1_t *l = LAYER(c, i);
-			if (d == 0 && l->handle && l->compositionType != HWC_FRAMEBUFFER_TARGET &&
-			    !(i < 64 && (h->no_buffer >> i) & 1) && !(l->flags & HWC_SKIP_LAYER) &&
-			    handle_ok(l->handle))
-				fallback = l->handle;
 			l->releaseFenceFd = -1;
 			if (d == 0 && l->compositionType == HWC_FRAMEBUFFER_TARGET) {
 				if (present_ok && h->zerocopy && wc_present(h, l, &retire) == 0) {
 					presented = 1;
 					continue;
 				}
-				wait_fence(l->acquireFenceFd);
+				/* A failed acquire fence is never permission to read the buffer. */
+				int ready = wait_fence(l->acquireFenceFd);
 				l->acquireFenceFd = -1;
-				if (present_ok) {
-					presented = fb_present(h, l->handle, 1) == 0;
+				if (ready) {
+					LOGW("skip frame: acquire fence failed (%d)", ready);
+				} else if (present_ok && fb_present(h, l->handle, 1) == 0) {
+					presented = 1;
 				}
 			} else if (l->acquireFenceFd >= 0) {
 				close(l->acquireFenceFd);
 				l->acquireFenceFd = -1;
 			}
 		}
-		/* No explicit FB target: present the last layer that has a buffer. */
-		if (d == 0 && !presented && present_ok && fallback) {
-			hwc_layer_1_t *fl = NULL;
-			for (i = 0; i < c->numHwLayers; i++)
-				if (LAYER(c, i)->handle == fallback)
-					fl = LAYER(c, i);
-			if (h->zerocopy && fl && wc_present(h, fl, &retire) == 0)
-				presented = 1;
-			else
-				presented = fb_present(h, fallback, 0) == 0;
-		}
+		/* No client target: do not access a layer whose fence was consumed. */
 		/* no usable layer: keep the last frame (was an orange debug fill) */
 		c->retireFenceFd = retire;
 	}
