@@ -256,6 +256,66 @@ static int hwc_overlay(const hw_module_t *module,unsigned int (*get)(unsigned in
     }
     if (dev->prepare(dev,1,displays) || c->hwLayers[0].compositionType!=HWC_FRAMEBUFFER ||
         c->hwLayers[1].compositionType!=HWC_FRAMEBUFFER || get(13)!=7) return 0;
+    /* Restart HWC after the failure latch; format verification must be
+     * earned again, and overlay selection must recover. */
+    if (base->close(base)) return 0;
+    base=NULL;
+    if (module->methods->open(module,HWC_HARDWARE_COMPOSER,&base) || !base) return 0;
+    dev=(hwc_composer_device_1_t *)base;
+    if (dev->prepare(dev,1,displays) || c->hwLayers[0].compositionType!=HWC_FRAMEBUFFER ||
+        c->hwLayers[1].compositionType!=HWC_FRAMEBUFFER) return 0;
+    c->numHwLayers=1;
+    l=&c->hwLayers[0]; memset(l,0,sizeof(*l));
+    l->compositionType=HWC_FRAMEBUFFER_TARGET; l->handle=buf[0];
+    if (pipe(prime) || write(prime[1],"x",1)!=1) return 0;
+    l->acquireFenceFd=prime[0]; l->releaseFenceFd=c->retireFenceFd=-1;
+    if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
+        l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd<0 ||
+        get(9)!=4 || get(10)!=3 || close(c->retireFenceFd) || close(prime[1])) return 0;
+    int steady=fd_count();
+    if (steady<0) return 0;
+    for (int round=0;round<2;++round) {
+        mode(7+round);
+        c->numHwLayers=3; c->retireFenceFd=-1;
+        int pairs[3][2];
+        for (int i=0;i<3;++i) {
+            l=&c->hwLayers[i]; memset(l,0,sizeof(*l));
+            l->compositionType=i==2?HWC_FRAMEBUFFER_TARGET:HWC_FRAMEBUFFER;
+            l->handle=i==2?NULL:buf[i];
+            l->sourceCropf=(hwc_frect_t){0,0,360,360};
+            l->displayFrame=(hwc_rect_t){0,0,360,360};
+            l->planeAlpha=i==2?255:255-i*40;
+            l->blending=i==2?HWC_BLENDING_NONE:blends[i];
+            if (pipe(pairs[i]) || write(pairs[i][1],"x",1)!=1) return 0;
+            l->acquireFenceFd=pairs[i][0]; l->releaseFenceFd=-1;
+        }
+        if (dev->prepare(dev,1,displays) || c->hwLayers[0].compositionType!=HWC_OVERLAY ||
+            c->hwLayers[1].compositionType!=HWC_OVERLAY || dev->set(dev,1,displays)) return 0;
+        for (int i=0;i<3;++i) {
+            if (c->hwLayers[i].acquireFenceFd!=-1 || close(pairs[i][1])) return 0;
+        }
+        if (c->hwLayers[2].releaseFenceFd!=-1) return 0;
+        if (!round) {
+            int dup=c->hwLayers[0].releaseFenceFd, rel=c->hwLayers[1].releaseFenceFd;
+            int retire=c->retireFenceFd;
+            uint64_t v=0;
+            /* The dup may reuse a just-closed acquire FD. Prove identity
+             * through shared eventfd state, not by comparing old numbers. */
+            if (dup<0 || rel<0 || retire<0 || dup==retire || dup==rel || rel==retire ||
+                fcntl(dup,F_GETFD)!=FD_CLOEXEC ||
+                read(dup,&v,sizeof(v))!=(ssize_t)sizeof(v) || v!=31 ||
+                read(retire,&v,sizeof(v))!=-1 || errno!=EAGAIN ||
+                read(rel,&v,sizeof(v))!=(ssize_t)sizeof(v) || v!=22 ||
+                close(dup) || close(rel) || close(retire)) return 0;
+        } else if (c->hwLayers[0].releaseFenceFd!=-1 ||
+                   c->hwLayers[1].releaseFenceFd!=-1 || c->retireFenceFd!=-1) return 0;
+        if (fd_count()!=steady || get(13)!=(unsigned int)(8+round) ||
+            get(14)!=(unsigned int)(3+round) || get(8)!=9 || get(0) ||
+            !hwc_fb_matches(1,2)) return 0;
+    }
+    mode(5);
+    if (dev->prepare(dev,1,displays) || c->hwLayers[0].compositionType!=HWC_FRAMEBUFFER ||
+        c->hwLayers[1].compositionType!=HWC_FRAMEBUFFER || get(13)!=9) return 0;
     free(c);
     for (int i=0;i<3;++i) {
         if (close(buf[i]->data[0])) return 0;
@@ -393,6 +453,7 @@ static int hwc_fixture(const hw_module_t *module)
                 get(13),get(14),get(9),get(8),get(0));
         return 185;
     }
+    puts("HAL_HWC_OVERLAY_RECOVERY_PASS reopen=1 format_gate=1 release_dup=1 no_fences_disable=1");
     puts("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1");
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
