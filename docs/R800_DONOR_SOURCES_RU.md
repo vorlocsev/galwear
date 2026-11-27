@@ -182,3 +182,15 @@ HIDL интерфейсов, проверяется заголовок MLS polic
 Сравнение идентификаторов не пересчитывает хеши CIL/mapping.
 Контексты wildcard, regex-переходы, system_ext/product/odm, компиляция
 CIL, neverallow, checkfc и enforcing runtime остаются вне этой проверки.
+
+
+Компиляция явно выбранных CIL-файлов с SHA-256, без загрузки политики:
+```sh
+python3 build/r800_donor_cil_compile.py --input /path/to/plat.cil "$PLAT_SHA256" \
+  --input /path/to/vendor.cil "$VENDOR_SHA256" --report /path/to/new-cil-report.json
+```
+Передаются все нужные CIL и mapping в заданном порядке; автоматического
+подбора отсутствующих файлов нет. secilc запускается с MLS и policyvers 31,
+neverallow не отключается. CI проверяет синтетическую допустимую политику
+и намеренное нарушение neverallow. Компиляция не подтверждает полноту
+Android policy, подлинность доноров или совместимость с ядром часов.
