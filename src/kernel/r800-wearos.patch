@@ -27200,7 +27200,296 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  		decon_reg_set_window_control(decon->id, i, &regs->win_regs[i],
  						regs->win_regs[i].winmap_state);
  
-@@ -3397,8 +3488,10 @@
+@@ -2720,122 +2811,156 @@
+ 	return ret;
+ }
+ 
+-static int decon_set_win_config(struct decon_device *decon,
+-		struct decon_win_config_data *win_data)
+-{
+-	int num_of_window = 0;
+-	struct decon_reg_data *regs;
+-	struct sync_file *sync_file;
+-	int i, j, ret = 0;
+-
+-	decon_dbg("%s +\n", __func__);
+-
+-	mutex_lock(&decon->lock);
+-
+-	if (IS_DECON_OFF_STATE(decon) ||
+-#if defined(CONFIG_EXYNOS_READ_ESD_SOLUTION)
+-		decon_is_bypass(decon) ||
+-#endif
+-		decon->state == DECON_STATE_TUI ||
+-		IS_ENABLED(CONFIG_EXYNOS_VIRTUAL_DISPLAY)) {
+-#if defined(CONFIG_EXYNOS_READ_ESD_SOLUTION)
+-		decon_dbg("decon-%d skip win_config(state:%s, bypass:%s)\n",
+-				decon->id, decon_state_names[decon->state],
+-				decon_is_bypass(decon) ? "on" : "off");
+-#else
+-		decon_dbg("decon-%d skip win_config(state:%s)\n",
+-				decon->id, decon_state_names[decon->state]);
+-#endif
+-		win_data->retire_fence = decon_create_fence(decon, &sync_file);
+-		if (win_data->retire_fence < 0)
+-			goto err;
+-		fd_install(win_data->retire_fence, sync_file->file);
+-		decon_signal_fence(decon, sync_file->fence);
+-		goto err;
+-	}
+-
+-	regs = kzalloc(sizeof(struct decon_reg_data), GFP_KERNEL);
+-	if (!regs) {
+-		decon_err("could not allocate decon_reg_data\n");
+-		ret = -ENOMEM;
+-		goto err;
+-	}
+-
+-	num_of_window = decon_get_active_win_count(decon, win_data);
+-	if (num_of_window) {
+-		win_data->retire_fence = decon_create_fence(decon, &sync_file);
+-		if (win_data->retire_fence < 0)
+-			goto err_prepare;
+-	} else {
+-		win_data->retire_fence = -1;
+-	}
+-
+-	dpu_prepare_win_update_config(decon, win_data, regs);
+-
+-	ret = decon_prepare_win_config(decon, win_data, regs);
+-	if (ret)
+-		goto err_prepare;
+-
+-	/*
+-	 * If dpu_prepare_win_update_config returns error, prev_up_region is
+-	 * updated but that partial size is not applied to HW in previous code.
+-	 * So, updating prev_up_region is moved here.
+-	 *
+-	 * back_up_region is used for rollback in situations where
+-	 * dpu_set_win_update_config(real HW change) cannot be performed.
+-	 */
+-	memcpy(&decon->win_up.back_up_region, &decon->win_up.prev_up_region,
+-			sizeof(struct decon_rect));
+-	memcpy(&decon->win_up.prev_up_region, &regs->up_region,
+-			sizeof(struct decon_rect));
+-
+-	if (num_of_window) {
+-		fd_install(win_data->retire_fence, sync_file->file);
+-		decon_create_release_fences(decon, win_data, sync_file);
+-		regs->retire_fence = dma_fence_get(sync_file->fence);
+-	}
+-
+-	decon_hiber_block(decon);
+-
+-	mutex_lock(&decon->up.lock);
+-	list_add_tail(&regs->list, &decon->up.list);
+-	atomic_inc(&decon->up.remaining_frame);
+-	mutex_unlock(&decon->up.lock);
+-
+-	/*
+-	 * target m value is updated by user requested m value.
+-	 * target m value will be applied to DPHY PLL in update handler work
+-	 */
+-	dpu_update_freq_hop(decon);
+-
+-	kthread_queue_work(&decon->up.worker, &decon->up.work);
+-
+-	mutex_unlock(&decon->lock);
+-	decon_systrace(decon, 'C', "decon_win_config", 0);
+-
+-	decon_dbg("%s -\n", __func__);
+-
+-	return ret;
+-
+-err_prepare:
+-	if (win_data->retire_fence >= 0) {
+-		/* video mode should keep previous buffer object */
+-		if (decon->lcd_info->mode == DECON_MIPI_COMMAND_MODE)
+-			decon_signal_fence(decon, sync_file->fence);
+-		fput(sync_file->file);
+-		put_unused_fd(win_data->retire_fence);
+-	}
+-	win_data->retire_fence = -1;
+-
+-	for (i = 0; i < decon->dt.max_win; i++)
+-		for (j = 0; j < regs->plane_cnt[i]; ++j)
+-			decon_free_unused_buf(decon, regs, i, j);
+-
+-	kfree(regs);
+-err:
+-	mutex_unlock(&decon->lock);
+-	return ret;
+-}
++static int decon_set_win_config(struct decon_device *decon,
++		struct decon_win_config_data *win_data,
++		struct decon_win_config_data __user *user_data)
++{
++	int num_of_window = 0;
++	struct decon_reg_data *regs;
++	struct sync_file *sync_file = NULL;
++	int i, j, ret = 0;
++
++	decon_dbg("%s +\n", __func__);
++
++	mutex_lock(&decon->lock);
++
++	/* Output-only fields must never be treated as caller-owned FDs. */
++	win_data->retire_fence = -1;
++	for (i = 0; i <= MAX_DECON_WIN; i++)
++		win_data->config[i].rel_fence = -1;
++
++	if (IS_DECON_OFF_STATE(decon) ||
++#if defined(CONFIG_EXYNOS_READ_ESD_SOLUTION)
++		decon_is_bypass(decon) ||
++#endif
++		decon->state == DECON_STATE_TUI ||
++		IS_ENABLED(CONFIG_EXYNOS_VIRTUAL_DISPLAY)) {
++#if defined(CONFIG_EXYNOS_READ_ESD_SOLUTION)
++		decon_dbg("decon-%d skip win_config(state:%s, bypass:%s)\n",
++				decon->id, decon_state_names[decon->state],
++				decon_is_bypass(decon) ? "on" : "off");
++#else
++		decon_dbg("decon-%d skip win_config(state:%s)\n",
++				decon->id, decon_state_names[decon->state]);
++#endif
++		win_data->retire_fence = decon_create_fence(decon, &sync_file);
++		if (win_data->retire_fence < 0) {
++			ret = win_data->retire_fence;
++			goto err;
++		}
++		if (copy_to_user(user_data, win_data, sizeof(*win_data))) {
++			put_unused_fd(win_data->retire_fence);
++			fput(sync_file->file);
++			ret = -EFAULT;
++			goto err;
++		}
++		decon_signal_fence(decon, sync_file->fence);
++		fd_install(win_data->retire_fence, sync_file->file);
++		goto err;
++	}
++
++	regs = kzalloc(sizeof(struct decon_reg_data), GFP_KERNEL);
++	if (!regs) {
++		decon_err("could not allocate decon_reg_data\n");
++		ret = -ENOMEM;
++		goto err;
++	}
++
++	num_of_window = decon_get_active_win_count(decon, win_data);
++	if (num_of_window) {
++		win_data->retire_fence = decon_create_fence(decon, &sync_file);
++		if (win_data->retire_fence < 0) {
++			ret = win_data->retire_fence;
++			goto err_prepare;
++		}
++	} else {
++		win_data->retire_fence = -1;
++	}
++
++	dpu_prepare_win_update_config(decon, win_data, regs);
++
++	ret = decon_prepare_win_config(decon, win_data, regs);
++	if (ret)
++		goto err_prepare;
++
++	if (num_of_window) {
++		ret = decon_reserve_release_fences(decon, win_data);
++		if (ret)
++			goto err_prepare;
++	}
++
++	/* Like sync_file ioctls, publish descriptor numbers before fd_install.
++	 * A failed (possibly partial) copy cannot leak installed descriptors
++	 * or enqueue a frame whose caller has no valid release fences.
++	 */
++	if (copy_to_user(user_data, win_data, sizeof(*win_data))) {
++		if (num_of_window)
++			decon_cancel_release_fences(decon, win_data);
++		ret = -EFAULT;
++		goto err_prepare;
++	}
++
++	/*
++	 * If dpu_prepare_win_update_config returns error, prev_up_region is
++	 * updated but that partial size is not applied to HW in previous code.
++	 * So, updating prev_up_region is moved here.
++	 *
++	 * back_up_region is used for rollback in situations where
++	 * dpu_set_win_update_config(real HW change) cannot be performed.
++	 */
++	memcpy(&decon->win_up.back_up_region, &decon->win_up.prev_up_region,
++			sizeof(struct decon_rect));
++	memcpy(&decon->win_up.prev_up_region, &regs->up_region,
++			sizeof(struct decon_rect));
++
++	if (num_of_window) {
++		/* Retain the worker reference before transferring the file refs. */
++		regs->retire_fence = dma_fence_get(sync_file->fence);
++		decon_install_release_fences(decon, win_data, sync_file);
++		fd_install(win_data->retire_fence, sync_file->file);
++	}
++
++	decon_hiber_block(decon);
++
++	mutex_lock(&decon->up.lock);
++	list_add_tail(&regs->list, &decon->up.list);
++	atomic_inc(&decon->up.remaining_frame);
++	mutex_unlock(&decon->up.lock);
++
++	/*
++	 * target m value is updated by user requested m value.
++	 * target m value will be applied to DPHY PLL in update handler work
++	 */
++	dpu_update_freq_hop(decon);
++
++	kthread_queue_work(&decon->up.worker, &decon->up.work);
++
++	mutex_unlock(&decon->lock);
++	decon_systrace(decon, 'C', "decon_win_config", 0);
++
++	decon_dbg("%s -\n", __func__);
++
++	return ret;
++
++err_prepare:
++	if (win_data->retire_fence >= 0) {
++		/* video mode should keep previous buffer object */
++		if (decon->lcd_info->mode == DECON_MIPI_COMMAND_MODE)
++			decon_signal_fence(decon, sync_file->fence);
++		fput(sync_file->file);
++		put_unused_fd(win_data->retire_fence);
++	}
++	win_data->retire_fence = -1;
++
++	for (i = 0; i < decon->dt.max_win; i++)
++		for (j = 0; j < regs->plane_cnt[i]; ++j)
++			decon_free_unused_buf(decon, regs, i, j);
++
++	kfree(regs);
++err:
++	mutex_unlock(&decon->lock);
++	return ret;
++}
+ 
+ static int decon_get_hdr_capa(struct decon_device *decon,
+ 		struct decon_hdr_capabilities *hdr_capa)
+@@ -3049,14 +3174,7 @@
+ 		 */
+ 		decon_translate_idma2ch(decon, &win_data);
+ #endif
+-		ret = decon_set_win_config(decon, &win_data);
+-		if (ret)
+-			break;
+-
+-		if (copy_to_user((void __user *)arg, &win_data, _IOC_SIZE(cmd))) {
+-			ret = -EFAULT;
+-			break;
+-		}
++		ret = decon_set_win_config(decon, &win_data, argp);
+ 		break;
+ 
+ 	case S3CFB_GET_HDR_CAPABILITIES:
+@@ -3397,8 +3515,10 @@
  	if (decon->dt.out_type == DECON_OUT_DSI) {
  		decon_hiber_block_exit(decon);
  		/* Unused DECON state is DECON_STATE_INIT */
@@ -27212,7 +27501,7 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  		decon_hiber_unblock(decon);
  	}
  
-@@ -3853,6 +3946,22 @@
+@@ -3853,6 +3973,22 @@
  		win->videomode.vsync_len = lcd_info->vsa;
  		win->videomode.xres = lcd_info->xres;
  		win->videomode.yres = lcd_info->yres;
@@ -27235,6 +27524,149 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  		fb_videomode_to_var(&fbinfo->var, &win->videomode);
  	}
  
+diff --git a/drivers/video/fbdev/exynos/dpu30/decon.h b/drivers/video/fbdev/exynos/dpu30/decon.h
+--- a/drivers/video/fbdev/exynos/dpu30/decon.h
++++ b/drivers/video/fbdev/exynos/dpu30/decon.h
+@@ -1492,9 +1492,13 @@
+ void decon_to_psr_info(struct decon_device *decon, struct decon_mode_info *psr);
+ void decon_to_init_param(struct decon_device *decon, struct decon_param *p);
+ void decon_create_timeline(struct decon_device *decon, char *name);
+-void decon_create_release_fences(struct decon_device *decon,
+-		struct decon_win_config_data *win_data,
+-		struct sync_file *sync_file);
++int decon_reserve_release_fences(struct decon_device *decon,
++		struct decon_win_config_data *win_data);
++void decon_cancel_release_fences(struct decon_device *decon,
++		struct decon_win_config_data *win_data);
++void decon_install_release_fences(struct decon_device *decon,
++		struct decon_win_config_data *win_data,
++		struct sync_file *sync_file);
+ int decon_create_fence(struct decon_device *decon, struct sync_file **sync_file);
+ int decon_wait_fence(struct decon_device *decon, struct dma_fence *fence, int fd);
+ void decon_signal_fence(struct decon_device *decon, struct dma_fence *fence);
+diff --git a/drivers/video/fbdev/exynos/dpu30/fence.c b/drivers/video/fbdev/exynos/dpu30/fence.c
+--- a/drivers/video/fbdev/exynos/dpu30/fence.c
++++ b/drivers/video/fbdev/exynos/dpu30/fence.c
+@@ -68,48 +68,60 @@
+ 	return fd;
+ }
+ 
+-void decon_create_release_fences(struct decon_device *decon,
+-		struct decon_win_config_data *win_data,
+-		struct sync_file *sync_file)
+-{
+-	int i = 0;
+-	struct dpu_fence_info release;
+-	struct dma_fence *fence = sync_file->fence;
+-
+-	for (i = 0; i < decon->dt.max_win; i++) {
+-		int state = win_data->config[i].state;
+-		int rel_fence = -1;
+-
+-		if (state == DECON_WIN_STATE_BUFFER) {
+-			rel_fence = decon_get_valid_fd();
+-			if (rel_fence < 0) {
+-				decon_err("%s: failed to get unused fd\n",
+-						__func__);
+-				goto err;
+-			}
+-
+-			fd_install(rel_fence, get_file(sync_file->file));
+-
+-			dpu_save_fence_info(rel_fence, fence, &release);
+-			DPU_F_EVT_LOG(DPU_F_EVT_CREATE_RELEASE_FENCE_FDS,
+-					&decon->sd, &release);
+-			DPU_DEBUG_FENCE("[%s] %s: seqno(%d), fd(%d), flags(0x%x)\n",
+-					fence_evt[DPU_F_EVT_CREATE_RELEASE_FENCE_FDS],
+-					release.name, release.seqno, release.fd,
+-					release.flags);
+-		}
+-		win_data->config[i].rel_fence = rel_fence;
+-	}
+-	return;
+-err:
+-	while (i-- > 0) {
+-		if (win_data->config[i].state == DECON_WIN_STATE_BUFFER) {
+-			put_unused_fd(win_data->config[i].rel_fence);
+-			win_data->config[i].rel_fence = -1;
+-		}
+-	}
+-	return;
+-}
++void decon_cancel_release_fences(struct decon_device *decon,
++		struct decon_win_config_data *win_data)
++{
++	int i;
++
++	for (i = 0; i < decon->dt.max_win; i++) {
++		if (win_data->config[i].rel_fence >= 0)
++			put_unused_fd(win_data->config[i].rel_fence);
++		win_data->config[i].rel_fence = -1;
++	}
++}
++
++int decon_reserve_release_fences(struct decon_device *decon,
++		struct decon_win_config_data *win_data)
++{
++	int i;
++
++	for (i = 0; i < decon->dt.max_win; i++)
++		win_data->config[i].rel_fence = -1;
++	for (i = 0; i < decon->dt.max_win; i++) {
++		int fd;
++
++		if (win_data->config[i].state != DECON_WIN_STATE_BUFFER)
++			continue;
++		fd = decon_get_valid_fd();
++		if (fd < 0) {
++			decon_cancel_release_fences(decon, win_data);
++			return -EMFILE;
++		}
++		win_data->config[i].rel_fence = fd;
++	}
++	return 0;
++}
++
++/* Caller retains the retire file reference until every release is installed. */
++void decon_install_release_fences(struct decon_device *decon,
++		struct decon_win_config_data *win_data,
++		struct sync_file *sync_file)
++{
++	int i;
++	struct dpu_fence_info release;
++	struct dma_fence *fence = sync_file->fence;
++
++	for (i = 0; i < decon->dt.max_win; i++) {
++		int fd = win_data->config[i].rel_fence;
++
++		if (fd < 0)
++			continue;
++		fd_install(fd, get_file(sync_file->file));
++		dpu_save_fence_info(fd, fence, &release);
++		DPU_F_EVT_LOG(DPU_F_EVT_CREATE_RELEASE_FENCE_FDS,
++				&decon->sd, &release);
++	}
++}
+ 
+ static const char *decon_fence_get_driver_name(struct dma_fence *fence)
+ {
+@@ -162,10 +174,12 @@
+ 	fd = decon_get_valid_fd();
+ 	if (fd < 0) {
+ 		decon_err("%s: failed to get unused fd\n", __func__);
+-		fput((*sync_file)->file);
+-	}
+-
+-	dpu_save_fence_info(fd, fence, &retire);
++		fput((*sync_file)->file);
++		*sync_file = NULL;
++		return fd;
++	}
++
++	dpu_save_fence_info(fd, fence, &retire);
+ 	DPU_F_EVT_LOG(DPU_F_EVT_CREATE_RETIRE_FENCE, &decon->sd, &retire);
+ 	DPU_DEBUG_FENCE("[%s] %s: ctx(%llu) seqno(%d), fd(%d), flags(0x%lx)\n",
+ 			fence_evt[DPU_F_EVT_CREATE_RETIRE_FENCE], retire.name,
 diff --git a/drivers/video/fbdev/exynos/dpu30/dpp_drv.c b/drivers/video/fbdev/exynos/dpu30/dpp_drv.c
 index 58519b004..1f093fd63 100644
 --- a/drivers/video/fbdev/exynos/dpu30/dpp_drv.c
