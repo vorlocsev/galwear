@@ -473,3 +473,13 @@ Audio также локальный mic mute roundtrip; HWC/Sensors должны
 PCM streams или brightness; не моделируется железо и не проверяется
 полная утечка ресурсов за пределами окна FD. Новая lifecycle фаза
 ожидает CI, NON-RELEASE.
+
+
+CI 46030589352 / job 140613064800 exact e829405: 5/5 lifecycle PASS,
+16 measured repeats per HAL, HWC/SSP absent -ENOENT, audio mute roundtrip.
+Новый --lights-fixture запускает реальный Lights HAL отдельно в ARM32
+Bionic QEMU с частным writable bind синтетического каталога brightness,
+без host sysfs. Проверяются 6 RGB cases, cache skip, -ENOENT и retry того же
+значения; реальная панель не проверена. Исправлена обработка errno и
+short write (EIO), EINTR retry, close error. Остальной guest read-only;
+сохраняются только JSON evidence. Новый сценарий ожидает CI.

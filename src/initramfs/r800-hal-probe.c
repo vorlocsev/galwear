@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/vfs.h>
 #include <hardware/audio.h>
 #include <hardware/hwcomposer.h>
 #include <hardware/hardware.h>
@@ -93,9 +95,85 @@ static int lifecycle(const hw_module_t *module, const char *id)
     return 0;
 }
 
+/* Stable legacy lights ABI, mirrored by lights_r800.c. */
+struct probe_light_state {
+    unsigned int color;
+    int flashMode, flashOnMS, flashOffMS, brightnessMode;
+};
+struct probe_light_device {
+    hw_device_t common;
+    int (*set_light)(struct probe_light_device *, const struct probe_light_state *);
+};
+#define FIXTURE "/sys/class/backlight/exynos_panel"
+#define BRIGHTNESS FIXTURE "/brightness"
+#define BACKUP FIXTURE "/brightness.saved"
+
+static int fixture_read(const char *path, const char *expected)
+{
+    char buf[32];
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof(buf));
+    int rc = close(fd);
+    return !rc && n == (ssize_t)strlen(expected) && !memcmp(buf, expected, (size_t)n);
+}
+
+static int fixture_reset(const char *value)
+{
+    int fd = open(BRIGHTNESS, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    ssize_t n = write(fd, value, strlen(value));
+    int rc = close(fd);
+    return !rc && n == (ssize_t)strlen(value);
+}
+
+static int lights_fixture(const hw_module_t *module)
+{
+    struct statfs fs;
+    struct stat st;
+    if (statfs(FIXTURE, &fs) || (unsigned long)fs.f_type == 0x62656572UL ||
+        !fixture_read(FIXTURE "/.galwear-fixture", "GALWEAR_LIGHTS_FIXTURE_V1\n") ||
+        lstat(BRIGHTNESS, &st) || !S_ISREG(st.st_mode) || !missing(BACKUP))
+        return 20;
+    hw_device_t *base = NULL;
+    if (module->methods->open(module, "backlight", &base) ||
+        !base || base->tag != HARDWARE_DEVICE_TAG || base->module != module || !base->close)
+        return 21;
+    struct probe_light_device *dev = (struct probe_light_device *)base;
+    if (!dev->set_light) return 22;
+    const struct { unsigned int color; const char *value; } cases[] = {
+        {0xffffffffu, "255\n"}, {0x00ff0000u, "76\n"},
+        {0x0000ff00u, "149\n"}, {0x000000ffu, "28\n"},
+        {0x00808080u, "128\n"}, {0xff000000u, "0\n"}
+    };
+    struct probe_light_state state = {0};
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) {
+        state.color = cases[i].color;
+        if (!fixture_reset("") || dev->set_light(dev, &state) ||
+            !fixture_read(BRIGHTNESS, cases[i].value))
+            return 23;
+    }
+    state.color = 0x00000000u;
+    if (!fixture_reset("sentinel\n") || dev->set_light(dev, &state) ||
+        !fixture_read(BRIGHTNESS, "sentinel\n"))
+        return 24;
+    state.color = 0x00ffffffu;
+    if (rename(BRIGHTNESS, BACKUP)) return 25;
+    int rc = dev->set_light(dev, &state);
+    if (rename(BACKUP, BRIGHTNESS) || rc != -ENOENT ||
+        !fixture_reset("") || dev->set_light(dev, &state) ||
+        !fixture_read(BRIGHTNESS, "255\n"))
+        return 26;
+    if (base->close(base)) return 27;
+    puts("HAL_LIGHTS_FIXTURE_PASS rgb_cases=6 cache_skip=1 missing_retry=1");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 3 && (argc != 4 || strcmp(argv[3], "--lifecycle"))) return 2;
+    if (argc != 3 && (argc != 4 ||
+        (strcmp(argv[3], "--lifecycle") && strcmp(argv[3], "--lights-fixture")))) return 2;
+    if (argc == 4 && !strcmp(argv[3], "--lights-fixture") && strcmp(argv[2], "lights")) return 2;
     void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fprintf(stderr, "dlopen failed: %s\n", dlerror());
@@ -115,7 +193,9 @@ int main(int argc, char **argv)
     }
     printf("HAL_HMI_PASS %s module_api=%u hal_api=%u\n", argv[2],
            (unsigned)module->module_api_version, (unsigned)module->hal_api_version);
-    int rc = argc == 4 ? lifecycle(module, argv[2]) : 0;
+    int rc = 0;
+    if (argc == 4)
+        rc = !strcmp(argv[3], "--lights-fixture") ? lights_fixture(module) : lifecycle(module, argv[2]);
     int close_rc = dlclose(handle);
     return rc ? rc : close_rc ? 5 : 0;
 }

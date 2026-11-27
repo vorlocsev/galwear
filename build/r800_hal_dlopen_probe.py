@@ -82,7 +82,9 @@ def compile_probe(ndk, hals, output, source_sha):
     return result
 
 
-def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=False):
+def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=False, lights_fixture=False):
+    if lifecycle and lights_fixture:
+        raise ValueError("Choose one probe mode")
     if os.geteuid() == 0:
         raise ValueError("Non-root execution required")
     qemu = shutil.which("qemu-arm-static")
@@ -135,8 +137,17 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         def snapshot():
             return {p.relative_to(root).as_posix(): ("symlink:"+os.readlink(p) if p.is_symlink() else sha(p.read_bytes()))
                     for p in sorted(root.rglob("*")) if p.is_file() or p.is_symlink()}
+        fixture = None
+        if lights_fixture:
+            fixture = Path(tmp)/"lights-fixture"
+            fixture.mkdir()
+            (fixture/".galwear-fixture").write_text("GALWEAR_LIGHTS_FIXTURE_V1\n")
+            (fixture/"brightness").write_text("")
+            (root/"sys/class/backlight/exynos_panel").mkdir(parents=True)
         before = snapshot()
-        for name, identity in HALS.items():
+        selected = {name: identity for name, identity in HALS.items()
+                    if not lights_fixture or identity == "lights"}
+        for name, identity in selected.items():
             cmd = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
                    "--clearenv", "--ro-bind", str(root), "/", "--ro-bind", qemu, "/qemu",
                    "--dev", "/dev", "--proc", "/proc", "--chdir", "/",
@@ -145,6 +156,10 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                    "/vendor/lib/hw/"+name, identity]
             if lifecycle:
                 cmd.append("--lifecycle")
+            if lights_fixture:
+                cmd[cmd.index("--chdir"):cmd.index("--chdir")] = [
+                    "--bind", str(fixture), "/sys/class/backlight/exynos_panel"]
+                cmd.append("--lights-fixture")
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 log = proc.stdout + proc.stderr
@@ -154,24 +169,34 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 life_marker = ("HAL_LIFECYCLE_PASS " + identity +
                                " repeats=16 open_rc=" + str(expected) + " fd_window=256")
                 life_ok = log.splitlines().count(life_marker) == 1
-                passed = proc.returncode == 0 and len(matches) == 1 and (not lifecycle or life_ok)
-                results[name] = {"status": ("LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
+                fixture_marker = "HAL_LIGHTS_FIXTURE_PASS rgb_cases=6 cache_skip=1 missing_retry=1"
+                fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
+                              (fixture/"brightness").read_bytes() == b"255\n" and
+                              not (fixture/"brightness.saved").exists()) if lights_fixture else False
+                passed = (proc.returncode == 0 and len(matches) == 1 and
+                          (not lifecycle or life_ok) and (not lights_fixture or fixture_ok))
+                results[name] = {"status": ("LIGHTS_FIXTURE_PASS" if lights_fixture else
+                                             "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
                                  if passed else "REVIEW_REQUIRED", "exit_code": proc.returncode,
                                  "marker": matches[0] if len(matches) == 1 else None,
                                  "lifecycle_marker": life_marker if lifecycle and life_ok else None,
+                                 "fixture_marker": fixture_marker if fixture_ok else None,
                                  "log": log[-8192:]}
             except subprocess.TimeoutExpired:
                 results[name] = {"status": "REVIEW_REQUIRED", "reason": "Timeout"}
         if snapshot() != before:
             raise ValueError("Guest input changed")
-    expected_status = "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS"
-    result = {"status": ("ARM32_HAL_LIFECYCLE_QEMU_USER_ONLY" if lifecycle
+    expected_status = ("LIGHTS_FIXTURE_PASS" if lights_fixture else
+                       "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
+    result = {"status": ("ARM32_LIGHTS_SYNTHETIC_SYSFS_ONLY" if lights_fixture else
+                         "ARM32_HAL_LIFECYCLE_QEMU_USER_ONLY" if lifecycle
                          else "ARM32_HAL_HMI_QEMU_USER_ONLY") if all(
         v["status"] == expected_status for v in results.values()) else "REVIEW_REQUIRED",
         "source_sha": evidence["source_sha"], "runtime_sha256": pins,
         "hal_sha256": evidence["hal_sha256"], "results": results,
-        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle,
-        "lifecycle_requested": lifecycle, "hardware_io_methods_tested": False,
+        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture,
+        "lifecycle_requested": lifecycle, "lights_fixture_requested": lights_fixture,
+        "hardware_io_methods_tested": False,
         "hardware_tested": False, "safe_to_flash": False}
     (output/"hal-runtime-evidence.json").write_text(json.dumps(result, indent=2, sort_keys=True)+"\n")
     return result
@@ -187,10 +212,13 @@ def main():
     q = sub.add_parser("run")
     for name in ("probe-dir", "hals", "runtime", "runtime-manifest", "output"):
         q.add_argument("--"+name, type=Path, required=True)
-    q.add_argument("--lifecycle", action="store_true")
+    modes = q.add_mutually_exclusive_group()
+    modes.add_argument("--lifecycle", action="store_true")
+    modes.add_argument("--lights-fixture", action="store_true")
     a = p.parse_args()
     result = (compile_probe(a.ndk, a.hals, a.output, a.source_sha) if a.action == "compile"
-              else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output, a.lifecycle))
+              else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output,
+                             a.lifecycle, a.lights_fixture))
     print(json.dumps(result, sort_keys=True))
     return 2 if result["status"] == "REVIEW_REQUIRED" else 0
 

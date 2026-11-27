@@ -46,12 +46,18 @@ static int write_int(const char *path, int value)
 	char buf[16];
 	int fd = open(path, O_WRONLY | O_CLOEXEC);
 	if (fd < 0) {
-		LOGE("open %s: %s", path, strerror(errno));
-		return -errno;
+		int saved = errno;
+		LOGE("open %s: %s", path, strerror(saved));
+		return -saved;
 	}
 	int n = snprintf(buf, sizeof(buf), "%d\n", value);
-	int ret = write(fd, buf, n) == n ? 0 : -errno;
-	close(fd);
+	ssize_t written;
+	do {
+		written = write(fd, buf, n);
+	} while (written < 0 && errno == EINTR);
+	int ret = written < 0 ? -errno : written != n ? -EIO : 0;
+	if (close(fd) && !ret)
+		ret = -errno;
 	return ret;
 }
 
