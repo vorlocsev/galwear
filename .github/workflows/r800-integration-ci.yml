@@ -307,6 +307,14 @@ jobs:
             --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
             --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
             --output "$RUNNER_TEMP/r800-audio-pcm-fixture" --audio-pcm-fixture
+      - name: Test HWC lifecycle with synthetic framebuffer and timer VSync
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-phh-reference/runtime"
+          python3 build/r800_hal_dlopen_probe.py run \
+            --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
+            --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
+            --output "$RUNNER_TEMP/r800-hwc-fixture" --hwc-fixture
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -323,6 +331,7 @@ jobs:
             ${{ runner.temp }}/r800-gps-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-audio-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-audio-pcm-fixture/hal-runtime-evidence.json
+            ${{ runner.temp }}/r800-hwc-fixture/hal-runtime-evidence.json
           if-no-files-found: warn
           retention-days: 7
   overlay-independent:

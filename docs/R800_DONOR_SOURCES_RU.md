@@ -571,3 +571,15 @@ media resumes after both normal and failed call. Expected 10 starts/stops,
 21 total opens/closes across PCM and HFP tests. Production HAL unchanged;
 real Bluetooth stack, SCO signal, ALSA ioctl, codec and DSP unverified.
 New CI pending.
+
+
+CI 46038605591 / job 140640268492 exact 58a09f2: HFP synthetic PASS,
+10 starts/stops, 21 opens/closes, rollback and media resume x2.
+Новый --hwc-fixture использует private regular framebuffer 360x720x32
+и test-only libhwc-fixture.so (ioctl только по inode/dev/size, synthetic
+properties layer_stride=96, realblank=1). Production HWC unchanged.
+4 opens/closes, bad 16bpp rejection, geometry and display config,
+OFF/NORMAL/DOZE/DOZE_SUSPEND (without opt-in suspend), injected power
+failure and recovery, timer VSync callbacks and unregister, FD count.
+Framebuffer remains unchanged. No gralloc/present/DECON zero-copy,
+real TE or actual panel verification. New CI pending.

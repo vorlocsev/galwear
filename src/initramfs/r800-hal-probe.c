@@ -490,19 +490,21 @@ static int sensors_evdev(const hw_module_t *module)
 #include "r800-gps-fixture.h"
 #include "r800-audio-fixture.h"
 #include "r800-audio-pcm-fixture.h"
+#include "r800-hwc-fixture.h"
 
 int main(int argc, char **argv)
 {
     if (argc != 3 && (argc != 4 ||
         (strcmp(argv[3], "--lifecycle") && strcmp(argv[3], "--lights-fixture") &&
          strcmp(argv[3], "--sensors-fixture") && strcmp(argv[3], "--sensors-context") &&
-         strcmp(argv[3], "--sensors-evdev") && strcmp(argv[3], "--gps-fixture") && strcmp(argv[3], "--audio-fixture") && strcmp(argv[3], "--audio-pcm-fixture")))) return 2;
+         strcmp(argv[3], "--sensors-evdev") && strcmp(argv[3], "--gps-fixture") && strcmp(argv[3], "--audio-fixture") && strcmp(argv[3], "--audio-pcm-fixture") && strcmp(argv[3], "--hwc-fixture")))) return 2;
     if (argc == 4 && !strcmp(argv[3], "--lights-fixture") && strcmp(argv[2], "lights")) return 2;
     if (argc == 4 && (!strcmp(argv[3], "--sensors-fixture") ||
         !strcmp(argv[3], "--sensors-context") || !strcmp(argv[3], "--sensors-evdev")) &&
         strcmp(argv[2], "sensors")) return 2;
     if (argc == 4 && !strcmp(argv[3], "--gps-fixture") && strcmp(argv[2], "gps")) return 2;
     if (argc == 4 && (!strcmp(argv[3], "--audio-fixture") || !strcmp(argv[3], "--audio-pcm-fixture")) && strcmp(argv[2], "audio")) return 2;
+    if (argc == 4 && !strcmp(argv[3], "--hwc-fixture") && strcmp(argv[2], "hwcomposer")) return 2;
     void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fprintf(stderr, "dlopen failed: %s\n", dlerror());
@@ -530,6 +532,15 @@ int main(int argc, char **argv)
             fflush(stdout);
             fflush(stderr);
             _exit(rc);
+        }
+        return dlclose(handle) ? 5 : 0;
+    }
+    if (argc == 4 && !strcmp(argv[3], "--hwc-fixture")) {
+        rc = hwc_fixture(module);
+        if (rc) {
+            fflush(stdout);
+            fflush(stderr);
+            _exit(rc); /* A failed test may leave live workers. */
         }
         return dlclose(handle) ? 5 : 0;
     }
