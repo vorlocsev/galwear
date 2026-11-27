@@ -114,3 +114,15 @@ remains mandatory; failure to create it is a failed test, not permission
 to execute outside isolation. These scripts build separate test guests,
 not the saved static candidate. Their results are not Tizen or GNSS
 hardware acceptance. Only metadata and logs are uploaded.
+
+
+CI run [45997816860](https://github.com/vorlocsev/galwear/actions/runs/45997816860)
+on Ubuntu 24.04 linked the probe successfully but bubblewrap failed before
+guest execution with `loopback: Failed RTM_NEWADDR: Operation not permitted`.
+The reference QEMU phase is now a separate Ubuntu 22.04 job, with a
+minimal-root full-namespace preflight before guest construction. The
+static reference link and other component builds remain on Ubuntu 24.04.
+Both jobs obtain the same SHA-256-pinned Debian archive independently.
+No host security sysctl changes, privileged guest execution, shared
+network fallback, or bypass of bubblewrap are used. A failed preflight
+blocks the QEMU job; it does not establish a guest runtime result.

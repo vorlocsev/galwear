@@ -491,17 +491,129 @@ jobs:
             }
           python3 build/r800_gps_link_gate.py --binary "$ref/gpsbridge" --libdir "$ref/libs" > "$ref/reference-postlink.json"
           echo "DEBIAN_ARMEL_REFERENCE_LINK_PASS; tizen_donor_verified=false; runtime_verified=false; safe_to_flash=false"
-      - name: Install isolated ARM32 QEMU reference test tools
+      - name: Upload reference link metadata only (no guest binaries)
+        if: always() && github.ref_name == 'development/r800-integration-20261127'
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-debian-glibc-reference-evidence
+          path: |
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-origin.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-prelink.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-symbol-review.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-postlink.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-link.log
+          if-no-files-found: warn
+          retention-days: 7
+  qemu-reference:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact checkout and install isolated QEMU tools
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(id -u)" -ne 0
+          test -s /etc/apt/sources.list
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends qemu-user-static bubblewrap
+          qemu-arm-static --version
+          bwrap --version
+      - name: Verify full isolation before building or executing guest
+        run: |
+          set -eu
+          scratch=$(mktemp -d)
+          trap 'rm -rf "$scratch"' EXIT
+          mkdir "$scratch/dev" "$scratch/proc"
+          touch "$scratch/qemu"
+          qemu=$(realpath "$(command -v qemu-arm-static)")
+          timeout -k 5s 20s bwrap --unshare-all --die-with-parent --new-session \
+            --clearenv --ro-bind "$scratch" / --ro-bind "$qemu" /qemu \
+            --dev /dev --proc /proc --chdir / /qemu --version
+          echo "FULL_SANDBOX_PREFLIGHT_PASS"
+      - name: Install exact NDK release without sdkmanager
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o "$archive"
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e "$archive" | sha1sum --check -
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          rm -f "$archive"
+          test -x "$RUNNER_TEMP/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang"
+      - name: Fetch Debian ARM EABI glibc 2.24 reference (not a Tizen donor)
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
           set -eu
-          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- update
-          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- install -y --no-install-recommends qemu-user-static bubblewrap
-          test "$(id -u)" -ne 0
-          command -v qemu-arm-static
-          command -v bwrap
-          qemu-arm-static --version
-          bwrap --version
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          mkdir "$ref"
+          export REF_DIR="$ref"
+          python3 - <<'PY'
+          import hashlib, json, lzma, os, pathlib, subprocess, tarfile
+          root = pathlib.Path(os.environ["REF_DIR"])
+          base = "https://archive.debian.org/debian/"
+          def fetch(path, dest):
+              subprocess.run(["curl", "--fail", "--location", "--retry", "3",
+                              "--max-time", "180", base + path, "-o", str(dest)], check=True)
+          index = root / "Packages.xz"
+          fetch("dists/stretch/main/binary-armel/Packages.xz", index)
+          rows = []
+          with lzma.open(index, "rt", encoding="utf-8") as stream:
+              for stanza in stream.read().split("\n\n"):
+                  fields = dict(line.split(": ", 1) for line in stanza.splitlines()
+                                if ": " in line and not line.startswith(" "))
+                  if (fields.get("Package"), fields.get("Version"), fields.get("Architecture")) == (
+                          "libc6", "2.24-11+deb9u4", "armel"):
+                      rows.append(fields)
+          assert len(rows) == 1, len(rows)
+          row = rows[0]
+          name = "pool/main/g/glibc/libc6_2.24-11+deb9u4_armel.deb"
+          assert row["Filename"] == name
+          archive = root / "reference.deb"
+          fetch(name, archive)
+          data = archive.read_bytes()
+          assert len(data) == int(row["Size"]) and len(data) < 16 * 1024**2
+          sha = hashlib.sha256(data).hexdigest()
+          assert sha == row["SHA256"]
+          # Pin the observed reference archive as well as the repository metadata.
+          assert sha == "601950cfcf0e9f705d9a2bff65351dd6e86759cb6573d5ca6ba6cbe98ffaf5d8"
+          names = {"libc-2.24.so": "libc.so.6", "libdl-2.24.so": "libdl.so.2",
+                   "libpthread-2.24.so": "libpthread.so.0", "ld-2.24.so": "ld-linux.so.3"}
+          libs = root / "libs"
+          libs.mkdir()
+          found = {}
+          with subprocess.Popen(["dpkg-deb", "--fsys-tarfile", str(archive)], stdout=subprocess.PIPE) as proc:
+              with tarfile.open(fileobj=proc.stdout, mode="r|*") as tar:
+                  for member in tar:
+                      path = pathlib.PurePosixPath(member.name)
+                      if path.parent.as_posix() != "lib/arm-linux-gnueabi" or path.name not in names:
+                          continue
+                      dest = names[path.name]
+                      assert dest not in found and member.isfile() and 0 < member.size <= 64 * 1024**2
+                      raw = tar.extractfile(member).read()
+                      assert len(raw) == member.size
+                      (libs / dest).write_bytes(raw)
+                      found[dest] = hashlib.sha256(raw).hexdigest()
+              assert proc.wait() == 0
+          assert set(found) == set(names.values()), found
+          report = {"scope": "DEBIAN_ARMEL_REFERENCE_NOT_TIZEN",
+                    "source_sha": os.environ["GITHUB_SHA"], "archive_sha256": sha,
+                    "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
+                    "index_signature_verified": False, "files": found,
+                    "tizen_donor_verified": False, "runtime_verified": False, "safe_to_flash": False}
+          (root / "reference-origin.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+          PY
+      - name: Validate reference donor before isolated tests
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          python3 build/r800_gps_link_gate.py --donor-only --libdir "$ref/libs" > "$ref/reference-prelink.json" || {
+            cat "$ref/reference-prelink.json"; exit 2;
+          }
       - name: Isolated Debian ARM glibc reference probe
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
@@ -525,17 +637,14 @@ jobs:
           ref="$RUNNER_TEMP/r800-debian-glibc-reference"
           sh build/r800_gps_mock_xtra_qemu.sh "$RUNNER_TEMP/android-ndk-r27c" "$ref/libs" 2>&1 | tee "$ref/reference-qemu-xtra.log"
           grep -Fx 'QEMU_SYNTHETIC_XTRA_MATRIX=PASS' "$ref/reference-qemu-xtra.log"
-      - name: Upload reference link metadata only (no guest binaries)
-        if: always() && github.ref_name == 'development/r800-integration-20261127'
+      - name: Upload isolated reference evidence only
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: r800-debian-glibc-reference-evidence
+          name: r800-debian-glibc-qemu-reference-evidence
           path: |
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-origin.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-prelink.json
-            ${{ runner.temp }}/r800-debian-glibc-reference/reference-symbol-review.json
-            ${{ runner.temp }}/r800-debian-glibc-reference/reference-postlink.json
-            ${{ runner.temp }}/r800-debian-glibc-reference/reference-link.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-glibc.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-mock.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-xtra.log
