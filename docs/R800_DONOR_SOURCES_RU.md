@@ -379,3 +379,19 @@ non-root bwrap --unshare-all с read-only гостевым деревом и qem
 methods->open, но сама функция open не вызывается. CI компилирует probe
 и сохраняет только JSON; запуск с реальным runtime пока не проверен.
 Не является проверкой оригинальных Android namespaces, драйверов или железа.
+
+
+ARM32 runtime extraction из одного hash-pinned system.img (raw/sparse EXT4):
+```sh
+python3 build/r800_arm32_runtime_extract.py --system-image /path/to/system.img \
+  --sha256 "$SYSTEM_SHA256" --output /path/to/new-arm32-runtime
+```
+Из Runtime APEX берутся bin/linker и lib/bionic/{libc,libdl,libm}.so,
+из того же system — liblog.so. Сохраняются manifest SHA-256 и отчёт
+происхождения; не используются NDK stubs. Выход подходит для
+r800_hal_dlopen_probe.py run --runtime ... --runtime-manifest .../runtime-manifest.json.
+Изолированный guest теперь размещает Bionic в /apex/com.android.runtime
+и создаёт относительный /system/bin/linker alias. Тест извлечения использует
+реальные синтетические EXT4/APEX, отдельный негативный тест отклоняет
+не-ELF. Сам Android 11 runtime пока не получен и не запущен. Подлинность
+и версия донорского runtime требуют отдельной проверки.

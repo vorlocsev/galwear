@@ -85,7 +85,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output):
     results = {}
     with tempfile.TemporaryDirectory(prefix="r800-hal-runtime-") as tmp:
         root = Path(tmp)/"guest"
-        for name in ("system/bin", "system/lib", "vendor/lib/hw", "dev", "proc", "linkerconfig"):
+        for name in ("system/bin", "system/lib", "vendor/lib/hw", "dev", "proc", "linkerconfig",
+                     "apex/com.android.runtime/bin", "apex/com.android.runtime/lib/bionic"):
             (root/name).mkdir(parents=True, exist_ok=True)
         (root/"qemu").touch()
         def add(src, rel, digest, lib=False, executable=False):
@@ -96,25 +97,31 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output):
             target.write_bytes(raw)
             target.chmod(0o555 if executable else 0o444)
         for name in RUNTIME:
-            rel = ("system/bin/" if name == "linker" else "system/lib/")+name
+            if name == "linker":
+                rel = "apex/com.android.runtime/bin/linker"
+            elif name == "liblog.so":
+                rel = "system/lib/liblog.so"
+            else:
+                rel = "apex/com.android.runtime/lib/bionic/" + name
             add(runtime/name, rel, pins[name], name != "linker", name == "linker")
+        (root/"system/bin/linker").symlink_to("../../apex/com.android.runtime/bin/linker")
         add(probe_dir/"hal-probe", "system/bin/hal-probe", evidence["probe_sha256"], executable=True)
         for name in HALS:
             add(hals/name, "vendor/lib/hw/"+name, evidence["hal_sha256"][name], True)
         (root/"linkerconfig/ld.config.txt").write_text(
             "dir.fixture = /system/bin\n[fixture]\n"
             "namespace.default.isolated = false\n"
-            "namespace.default.search.paths = /system/lib\n")
+            "namespace.default.search.paths = /apex/com.android.runtime/lib/bionic:/system/lib\n")
         def snapshot():
-            return {p.relative_to(root).as_posix(): sha(p.read_bytes())
-                    for p in sorted(root.rglob("*")) if p.is_file()}
+            return {p.relative_to(root).as_posix(): ("symlink:"+os.readlink(p) if p.is_symlink() else sha(p.read_bytes()))
+                    for p in sorted(root.rglob("*")) if p.is_file() or p.is_symlink()}
         before = snapshot()
         for name, identity in HALS.items():
             cmd = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
                    "--clearenv", "--ro-bind", str(root), "/", "--ro-bind", qemu, "/qemu",
                    "--dev", "/dev", "--proc", "/proc", "--chdir", "/",
                    "/qemu", "-cpu", "cortex-a15", "-L", "/",
-                   "-E", "LD_LIBRARY_PATH=/system/lib", "/system/bin/hal-probe",
+                   "-E", "LD_LIBRARY_PATH=/apex/com.android.runtime/lib/bionic:/system/lib", "/system/bin/hal-probe",
                    "/vendor/lib/hw/"+name, identity]
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)

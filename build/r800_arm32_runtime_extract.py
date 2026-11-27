@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Extract minimal ARM32 Bionic runtime from a hash-pinned Android system image.
+
+No host mounts, no guest execution, no NDK link stubs, no signature claim.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+from r800_android_runtime_extract import unpack_system, extract_payload, MAX_APEX
+from r800_extract_ext4 import snapshot_image, locate, command
+from r800_vendor_inputs import image_info
+from r800_android_userspace_preflight import read_regular
+from r800_hal_dlopen_probe import check, RUNTIME, LIMIT
+
+# Android 10/11 runtime APEX layout. liblog is outside Runtime APEX.
+APEX_PATHS = ("/apex/com.android.runtime.apex", "/system/apex/com.android.runtime.apex")
+LIBLOG_PATHS = ("/lib/liblog.so", "/system/lib/liblog.so")
+FILES = {"linker": "/bin/linker", "libc.so": "/lib/bionic/libc.so",
+         "libdl.so": "/lib/bionic/libdl.so", "libm.so": "/lib/bionic/libm.so"}
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def get_member(tool, image, paths, scratch, limit):
+    found = []
+    for path in paths:
+        row = locate(tool, image, path, limit)
+        if row is not None:
+            found.append((path, row))
+    if len(found) != 1:
+        raise ValueError("Expected one regular member: " + ", ".join(paths))
+    path, (inode, size) = found[0]
+    dest = scratch/"member"
+    try:
+        command(tool, image, "dump <%d> member" % inode, cwd=scratch)
+        raw = read_regular(dest, limit)
+        if len(raw) != size:
+            raise ValueError("Member size mismatch: " + path)
+        return path, raw
+    finally:
+        dest.unlink(missing_ok=True)
+
+
+def extract(system, expected, output):
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("Expected pinned system SHA-256")
+    system, output = system.absolute(), output.absolute()
+    if output.exists() or output.is_symlink():
+        raise ValueError("Fresh runtime output required")
+    tool = shutil.which("debugfs")
+    if not tool:
+        raise ValueError("debugfs required")
+    with tempfile.TemporaryDirectory(prefix="r800-arm32-runtime-", dir=output.parent) as tmp:
+        scratch = Path(tmp)
+        snapshot = scratch/"source.img"
+        identity = snapshot_image(system, snapshot, expected)
+        raw_system = unpack_system(snapshot, scratch)
+        before = image_info(raw_system)
+        source, apex_bytes = get_member(tool, raw_system, APEX_PATHS, scratch, MAX_APEX)
+        apex = scratch/"runtime.apex"
+        apex.write_bytes(apex_bytes)
+        payload = scratch/"runtime-payload.img"
+        extract_payload(apex, payload)
+        payload.chmod(0o400)
+        payload_before = image_info(payload)
+        stage = scratch/"stage"
+        stage.mkdir()
+        rows = {}
+        for name in RUNTIME:
+            if name == "liblog.so":
+                guest, raw = get_member(tool, raw_system, LIBLOG_PATHS, scratch, LIMIT)
+                origin = "system"
+            else:
+                guest, raw = get_member(tool, payload, (FILES[name],), scratch, LIMIT)
+                origin = "com.android.runtime"
+            dest = stage/name
+            dest.write_bytes(raw)
+            checked, info = check(dest, library=name != "linker")
+            if checked != raw or not set(info["needed"]) <= set(RUNTIME[1:]):
+                raise ValueError("Runtime dependency outside allowlist: " + name)
+            if name == "linker" and (info["elf_type"] != "ET_DYN" or info["needed"]):
+                raise ValueError("Unexpected ARM32 linker structure")
+            dest.chmod(0o555 if name == "linker" else 0o444)
+            rows[name] = {"sha256": sha(raw), "bytes": len(raw), "origin": origin,
+                          "guest_path": guest, "needed": info["needed"], "soname": info["soname"]}
+        if image_info(raw_system) != before or image_info(payload) != payload_before:
+            raise ValueError("Read-only extraction input changed")
+        current = system.lstat()
+        if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
+                current.st_mtime_ns, current.st_ctime_ns) != identity:
+            raise ValueError("System donor changed")
+        pins = {name: row["sha256"] for name, row in rows.items()}
+        report = {"status": "ARM32_BIONIC_RUNTIME_EXTRACTED_STATIC_ONLY",
+                  "system_sha256": expected, "raw_system_sha256": before["sha256"],
+                  "apex_path": source, "apex_sha256": sha(apex_bytes),
+                  "apex_payload_sha256": payload_before["sha256"], "files": rows,
+                  "runtime_authenticity_verified": False, "android_version_verified": False,
+                  "apex_signature_verified": False, "runtime_stub_exclusion_proven": False,
+                  "runtime_verified": False, "safe_to_flash": False}
+        (stage/"runtime-manifest.json").write_text(json.dumps(pins, indent=2, sort_keys=True)+"\n")
+        (stage/"runtime-extraction.json").write_text(json.dumps(report, indent=2, sort_keys=True)+"\n")
+        os.rename(stage, output)
+    return report
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--system-image", type=Path, required=True)
+    p.add_argument("--sha256", required=True)
+    p.add_argument("--output", type=Path, required=True)
+    a = p.parse_args()
+    print(json.dumps(extract(a.system_image, a.sha256, a.output), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
