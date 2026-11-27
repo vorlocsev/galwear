@@ -42,6 +42,21 @@ jobs:
           clang --version
           ld.lld --version
           readelf --version
+      - name: Compile experimental handover init without executing or embedding it
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/r800-handover-init"
+          sh src/initramfs/build.sh "$out"
+          readelf -h -l -d --wide "$out/init" > "$out/elf.txt"
+          grep -Eq 'Class:[[:space:]]*ELF64' "$out/elf.txt"
+          grep -Eq 'Machine:[[:space:]]*AArch64' "$out/elf.txt"
+          grep -Eq 'Type:[[:space:]]*EXEC' "$out/elf.txt"
+          if grep -Eq 'INTERP|\(NEEDED\)' "$out/elf.txt"; then
+            echo "Unexpected dynamic dependency"; exit 2
+          fi
+          sha256sum "$out/init"
+          echo "HANDOVER_INIT_COMPILE_ONLY; not executed; safe_to_flash=false"
       - name: Run all offline regression suites
         run: |
           python3 build/r800_integrated_regression.py --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/r800-integrated-regression.json"
