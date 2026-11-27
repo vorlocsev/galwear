@@ -123,5 +123,35 @@ class KernelDiffComparisonTests(unittest.TestCase):
             self.compare()
 
 
+    def test_object_comparison_identifies_changed_file(self):
+        import copy
+        records = {name: {"bytes": 1, "sha256": "11" * 32}
+                   for name in (*diag.GENERATED, "init/version.o")}
+        self.a["objects"] = records
+        self.b["objects"] = copy.deepcopy(records)
+        self.b["objects"]["init/version.o"]["sha256"] = "22" * 32
+        result = self.compare()
+        self.assertTrue(result["object_inventory_compared"])
+        self.assertEqual(list(result["different_objects"]), ["init/version.o"])
+        self.assertEqual(result["status"], "IMAGE_HASH_MATCH")
+
+    def test_missing_object_inventory_rejected(self):
+        self.a["objects"] = {name: {"bytes": 1, "sha256": "11" * 32}
+                             for name in (*diag.GENERATED, "init/version.o")}
+        with self.assertRaisesRegex(ValueError, "object inventory"):
+            self.compare()
+
+    def test_object_inventory_hashes_only_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in (*diag.GENERATED, "init/version.o", "ignore.txt"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fixture")
+            result = diag.object_inventory(root)
+            self.assertEqual(set(result), set(diag.GENERATED) | {"init/version.o"})
+            self.assertEqual(result["init/version.o"]["sha256"], hashlib.sha256(b"fixture").hexdigest())
+
+
 if __name__ == "__main__":
     unittest.main()
