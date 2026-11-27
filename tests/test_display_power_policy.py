@@ -92,9 +92,12 @@ class DisplayPowerTests(unittest.TestCase):
         self.assertEqual(self.simulate(True, False, True, missing_param=True), ("1", None, "auto"))
 
     def test_packaging_strips_experiments(self):
-        line = next(x for x in PACK.read_text().splitlines() if x.startswith("for marker in "))
+        import sys
+        sys.path.insert(0, str(ROOT / "build"))
+        from r800_payload_candidate import STATE, NEVER_SHIP_ANDROID_FILES
         for marker in ("PANEL_REALBLANK", "ABOX_POWEROFF", "GPU_SCALE", "SLEEP", "CPUIDLE_DEEP"):
-            self.assertIn(marker, line.split())
+            self.assertIn(marker, STATE)
+            self.assertIn(marker, NEVER_SHIP_ANDROID_FILES)
 
     def test_shell_syntax(self):
         for path in (HELPER, PACK):
