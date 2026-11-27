@@ -483,3 +483,14 @@ Bionic QEMU с частным writable bind синтетического кат�
 значения; реальная панель не проверена. Исправлена обработка errno и
 short write (EIO), EINTR retry, close error. Остальной guest read-only;
 сохраняются только JSON evidence. Новый сценарий ожидает CI.
+
+
+CI 46031469433 / job 140616071775 exact c8b5f94:
+ARM32_LIGHTS_SYNTHETIC_SYSFS_ONLY, 6 RGB + cache skip + missing retry PASS.
+Новый --sensors-fixture вызывает реальный sensors HAL с private writable
+SSP sysfs fixture: сохранение внешнего bit18 (262144), accel clamp 10 ms,
+изменение delay, accel/gyro enable/disable, duplicate open EBUSY,
+invalid handle EINVAL, malformed mask rollback, close ENOENT + retry,
+16 повторных open/close с проверкой FD 0..255. Файлы фиксированной ширины
+имитируют только операции read/write; input events, SSP MCU, Tizen
+sensord concurrency и аппаратные датчики не проверяются. Новый CI pending.
