@@ -3,10 +3,14 @@ name: SM-R800 kernel Image and APK input audit (NON-RELEASE)
 on:
   push:
     branches:
-      - "development/r800-build-input-audit-20261125"
+      - "development/r800-integration-20261127"
     paths:
       - ".github/workflows/r800-kernel-repeatability.yml"
       - "build/r800_reproducibility_audit.py"
+      - "build/r800_kernel_diff_evidence.py"
+      - "build/r800_kheaders_repro.py"
+      - "tests/test_kheaders_repro.py"
+      - "tests/test_kernel_diff_evidence.py"
       - "build/r800_apk_inventory.py"
       - "tests/test_apk_inventory.py"
       - "build/r800_kernel_compile_smoke.sh"
@@ -15,6 +19,7 @@ on:
       - "build/r800_initramfs_spec.py"
       - "build/r800_embedded_initramfs_config.py"
       - "build/r800_cpio_audit.py"
+      - "tests/test_cpio_audit.py"
       - "tests/test_reproducibility_audit.py"
       - "src/initramfs/init-readonly.c"
       - "src/kernel/r800.config"
@@ -46,6 +51,8 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p 'test_apk_inventory.py' -v
           python3 -m unittest discover -s tests -p 'test_reproducibility_audit.py' -v
+          python3 -m unittest discover -s tests -p 'test_kernel_diff_evidence.py' -v
+          python3 -m unittest discover -s tests -p 'test_kheaders_repro.py' -v
           python3 -m unittest discover -s tests -p 'test_readonly_init.py' -v
           python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
           python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
@@ -90,9 +97,11 @@ jobs:
               git config --global --add safe.directory /source
               sh /repo/build/r800_initramfs_compile_smoke.sh \
                 /repo /scratch/r800-embedded-initramfs
+              R800_REPRO_KHEADERS=1 \
               R800_SMOKE_INITRAMFS_LIST=/scratch/r800-embedded-initramfs/initramfs.list \
                 sh /repo/build/r800_kernel_compile_smoke.sh \
                 /source /repo /scratch/r800-embedded-kernel
+              python3 -c "import json; from pathlib import Path; r=json.loads(Path(\"/scratch/r800-embedded-kernel/embedded-cpio-audit.json\").read_text()); assert r[\"entry_mtimes\"] and all(v == 0 for v in r[\"entry_mtimes\"].values()), r[\"entry_mtimes\"]"
               python3 /repo/build/r800_reproducibility_audit.py \
                 --output /scratch/r800-image-repeatability.json emit \
                 --image /scratch/r800-embedded-kernel/arch/arm64/boot/Image \
@@ -105,6 +114,7 @@ jobs:
                 --galwear-commit "$GITHUB_SHA" \
                 --container-image-id "$R800_CONTAINER_IMAGE_ID" \
                 --runner-replica "$R800_REPLICA"
+              python3 /repo/build/r800_kernel_diff_evidence.py --root /scratch/r800-embedded-kernel --include-objects --output /scratch/r800-kernel-diff-evidence.json
               apk info -v > /scratch/apk-after.txt
               python3 /repo/build/r800_apk_inventory.py \
                 --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
@@ -119,8 +129,22 @@ jobs:
           name: r800-image-evidence-${{ matrix.replica }}
           path: |
             ${{ runner.temp }}/r800-image-repeatability.json
+            ${{ runner.temp }}/r800-kernel-diff-evidence.json
             ${{ runner.temp }}/r800-apk-inventory.json
+            ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve timestamp diagnostics if a build gate fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-failed-build-diagnostics-${{ matrix.replica }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/r800-embedded-initramfs/initramfs-evidence.json
+            ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
+            ${{ runner.temp }}/r800-apk-inventory.json
+          if-no-files-found: warn
           retention-days: 7
 
   compare-images:
@@ -144,12 +168,30 @@ jobs:
             --second "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-apk-inventory.json" \
             --image-a "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-a/r800-image-repeatability.json" \
             --image-b "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json"
+      - name: Localize kernel differences before strict comparison
+        run: |
+          python3 build/r800_kernel_diff_evidence.py \
+            --compare-dir "$RUNNER_TEMP/r800-two-builds" \
+            --output "$RUNNER_TEMP/r800-kernel-diff-comparison.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads((Path(os.environ["RUNNER_TEMP"]) / "r800-kernel-diff-comparison.json").read_text())
+          assert report["object_inventory_compared"] is True
+          objects = report.pop("different_objects")
+          report["different_object_count"] = len(objects)
+          report["different_object_paths_first_100"] = sorted(objects)[:100]
+          print(json.dumps(report, indent=2, sort_keys=True))
+          PY
       - name: Compare Image, CPIO, init, compiler, configuration and container hashes
         run: |
+          rc=0
           python3 build/r800_reproducibility_audit.py \
             --output "$RUNNER_TEMP/r800-two-image-comparison.json" compare \
             --first "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-a/r800-image-repeatability.json" \
-            --second "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json"
+            --second "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json" || rc=$?
+          cat "$RUNNER_TEMP/r800-two-image-comparison.json"
+          test "$rc" -eq 0
           python3 - <<'PY'
           import json, os
           from pathlib import Path
@@ -174,5 +216,6 @@ jobs:
           path: |
             ${{ runner.temp }}/r800-two-image-comparison.json
             ${{ runner.temp }}/r800-apk-comparison.json
+            ${{ runner.temp }}/r800-kernel-diff-comparison.json
           if-no-files-found: warn
           retention-days: 7
