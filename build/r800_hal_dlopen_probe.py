@@ -113,8 +113,8 @@ def compile_probe(ndk, hals, output, source_sha):
 
 
 def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=False,
-              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False, gps_fixture=False, audio_fixture=False, audio_pcm_fixture=False, hwc_fixture=False):
-    if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context, sensors_evdev, gps_fixture, audio_fixture, audio_pcm_fixture, hwc_fixture)) > 1:
+              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False, gps_fixture=False, audio_fixture=False, audio_pcm_fixture=False, hwc_fixture=False, namespace_fixture=False):
+    if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context, sensors_evdev, gps_fixture, audio_fixture, audio_pcm_fixture, hwc_fixture, namespace_fixture)) > 1:
         raise ValueError("Choose one probe mode")
     if os.geteuid() == 0:
         raise ValueError("Non-root execution required")
@@ -165,6 +165,21 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             "dir.fixture = /system/bin\n[fixture]\n"
             "namespace.default.isolated = false\n"
             "namespace.default.search.paths = /apex/com.android.runtime/lib/bionic:/system/lib\n")
+        if namespace_fixture:
+            # Deliberately no LD_LIBRARY_PATH, no permissive default namespace.
+            # Only this synthetic configuration is tested, not donor policy.
+            (root/"linkerconfig/ld.config.txt").write_text(
+                "dir.fixture = /system/bin\n[fixture]\n"
+                "additional.namespaces = vendor\n"
+                "namespace.default.isolated = true\n"
+                "namespace.default.search.paths = /apex/com.android.runtime/lib/bionic:/system/lib\n"
+                "namespace.default.links = vendor\n"
+                "namespace.default.link.vendor.shared_libs = lights.r800.so\n"
+                "namespace.vendor.isolated = true\n"
+                "namespace.vendor.search.paths = /vendor/lib/hw\n"
+                "namespace.vendor.links = default\n"
+                "namespace.vendor.link.default.shared_libs = libc.so:libdl.so:libm.so:liblog.so:libc++.so:ld-android.so\n")
+        namespace_config_sha = sha((root/"linkerconfig/ld.config.txt").read_bytes())
         def snapshot():
             return {p.relative_to(root).as_posix(): ("symlink:"+os.readlink(p) if p.is_symlink() else sha(p.read_bytes()))
                     for p in sorted(root.rglob("*")) if p.is_file() or p.is_symlink()}
@@ -233,7 +248,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     if (not lights_fixture or identity == "lights") and
                        (not (sensors_fixture or sensors_context or sensors_evdev) or identity == "sensors") and (not gps_fixture or identity == "gps") and
                        (not (audio_fixture or audio_pcm_fixture) or identity == "audio") and
-                       (not hwc_fixture or identity == "hwcomposer")}
+                       (not hwc_fixture or identity == "hwcomposer") and
+                       (not namespace_fixture or identity == "lights")}
         for name, identity in selected.items():
             cmd = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
                    "--clearenv", "--ro-bind", str(root), "/", "--ro-bind", qemu, "/qemu",
@@ -241,6 +257,11 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                    "/qemu", "-cpu", "cortex-a15", "-L", "/",
                    "-E", "LD_LIBRARY_PATH=/apex/com.android.runtime/lib/bionic:/system/lib", "/system/bin/hal-probe",
                    "/vendor/lib/hw/"+name, identity]
+            if namespace_fixture:
+                i = cmd.index("LD_LIBRARY_PATH=/apex/com.android.runtime/lib/bionic:/system/lib")
+                del cmd[i-1:i+1]
+                cmd[cmd.index("/vendor/lib/hw/"+name)] = name
+                cmd.append("--namespace-fixture")
             if lifecycle:
                 cmd.append("--lifecycle")
             if lights_fixture:
@@ -327,10 +348,14 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                                   (fixture/"fb0").read_bytes() == expected_fb and
                                   (fixture/"pixels").read_bytes() == pixel_input and
                                   (dsim/"cmd_rw").read_bytes() == b"2")
+                if namespace_fixture:
+                    fixture_marker = "HAL_NAMESPACE_FIXTURE_PASS linked_lights=1 denied_name=2 denied_absolute=2"
+                    fixture_ok = log.splitlines().count(fixture_marker) == 1
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
-                          (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture) or fixture_ok))
-                results[name] = {"status": ("HWC_FIXTURE_PASS" if hwc_fixture else
+                          (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture or namespace_fixture) or fixture_ok))
+                results[name] = {"status": ("NAMESPACE_FIXTURE_PASS" if namespace_fixture else
+                                             "HWC_FIXTURE_PASS" if hwc_fixture else
                                              "AUDIO_PCM_FIXTURE_PASS" if audio_pcm_fixture else
                                              "AUDIO_FIXTURE_PASS" if audio_fixture else
                                              "GPS_FIXTURE_PASS" if gps_fixture else
@@ -348,7 +373,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 results[name] = {"status": "REVIEW_REQUIRED", "reason": "Timeout"}
         if snapshot() != before:
             raise ValueError("Guest input changed")
-    expected_status = ("HWC_FIXTURE_PASS" if hwc_fixture else
+    expected_status = ("NAMESPACE_FIXTURE_PASS" if namespace_fixture else
+                       "HWC_FIXTURE_PASS" if hwc_fixture else
                        "AUDIO_PCM_FIXTURE_PASS" if audio_pcm_fixture else
                        "AUDIO_FIXTURE_PASS" if audio_fixture else
                        "GPS_FIXTURE_PASS" if gps_fixture else
@@ -357,7 +383,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                        "SENSORS_FIXTURE_PASS" if sensors_fixture else
                        "LIGHTS_FIXTURE_PASS" if lights_fixture else
                        "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
-    result = {"status": ("ARM32_HWC_SYNTHETIC_FB_LIFECYCLE_ONLY" if hwc_fixture else
+    result = {"status": ("ARM32_SYNTHETIC_NAMESPACE_LINK_ONLY" if namespace_fixture else
+                         "ARM32_HWC_SYNTHETIC_FB_LIFECYCLE_ONLY" if hwc_fixture else
                          "ARM32_AUDIO_SYNTHETIC_PCM_ONLY" if audio_pcm_fixture else
                          "ARM32_AUDIO_NO_PCM_FALLBACK_ONLY" if audio_fixture else
                          "ARM32_GPS_SYNTHETIC_BRIDGE_ONLY" if gps_fixture else
@@ -370,6 +397,9 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         v["status"] == expected_status for v in results.values()) else "REVIEW_REQUIRED",
         "source_sha": evidence["source_sha"], "runtime_sha256": pins,
         "hal_sha256": evidence["hal_sha256"], "results": results,
+        "namespace_fixture_requested": namespace_fixture,
+        "synthetic_namespace_link_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
+        "synthetic_namespace_config_sha256": namespace_config_sha if namespace_fixture else None,
         "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture,
         "lifecycle_requested": lifecycle, "lights_fixture_requested": lights_fixture,
         "sensors_fixture_requested": sensors_fixture, "sensors_context_requested": sensors_context,
@@ -425,10 +455,11 @@ def main():
     modes.add_argument("--audio-fixture", action="store_true")
     modes.add_argument("--audio-pcm-fixture", action="store_true")
     modes.add_argument("--hwc-fixture", action="store_true")
+    modes.add_argument("--namespace-fixture", action="store_true")
     a = p.parse_args()
     result = (compile_probe(a.ndk, a.hals, a.output, a.source_sha) if a.action == "compile"
               else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output,
-                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev, a.gps_fixture, a.audio_fixture, a.audio_pcm_fixture, a.hwc_fixture))
+                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev, a.gps_fixture, a.audio_fixture, a.audio_pcm_fixture, a.hwc_fixture, a.namespace_fixture))
     print(json.dumps(result, sort_keys=True))
     return 2 if result["status"] == "REVIEW_REQUIRED" else 0
 

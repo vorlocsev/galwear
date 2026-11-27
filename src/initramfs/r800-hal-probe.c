@@ -492,12 +492,32 @@ static int sensors_evdev(const hw_module_t *module)
 #include "r800-audio-pcm-fixture.h"
 #include "r800-hwc-fixture.h"
 
+/* Both denied paths are present, pinned HALs in the isolated guest.
+ * Positive by-name loading through a linker link rules out a vacuous failure. */
+static int namespace_denied(void)
+{
+    const char *paths[]={"gps.r800.so","/vendor/lib/hw/gps.r800.so"};
+    struct stat st;
+    if (lstat(paths[1],&st) || !S_ISREG(st.st_mode) || st.st_size<=0) return 0;
+    for (int i=0;i<2;++i) {
+        dlerror();
+        void *h=dlopen(paths[i],RTLD_NOW|RTLD_LOCAL);
+        const char *err=dlerror();
+        if (h) { dlclose(h); fprintf(stderr,"namespace unexpectedly allowed %s\n",paths[i]); return 0; }
+        if (!err || (!strstr(err,"not found") && !strstr(err,"not accessible"))) {
+            fprintf(stderr,"unexpected linker denial for %s: %s\n",paths[i],err?err:"none"); return 0;
+        }
+        fprintf(stderr,"namespace denied %s: %s\n",paths[i],err);
+    }
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3 && (argc != 4 ||
         (strcmp(argv[3], "--lifecycle") && strcmp(argv[3], "--lights-fixture") &&
          strcmp(argv[3], "--sensors-fixture") && strcmp(argv[3], "--sensors-context") &&
-         strcmp(argv[3], "--sensors-evdev") && strcmp(argv[3], "--gps-fixture") && strcmp(argv[3], "--audio-fixture") && strcmp(argv[3], "--audio-pcm-fixture") && strcmp(argv[3], "--hwc-fixture")))) return 2;
+         strcmp(argv[3], "--sensors-evdev") && strcmp(argv[3], "--gps-fixture") && strcmp(argv[3], "--audio-fixture") && strcmp(argv[3], "--audio-pcm-fixture") && strcmp(argv[3], "--hwc-fixture") && strcmp(argv[3], "--namespace-fixture")))) return 2;
     if (argc == 4 && !strcmp(argv[3], "--lights-fixture") && strcmp(argv[2], "lights")) return 2;
     if (argc == 4 && (!strcmp(argv[3], "--sensors-fixture") ||
         !strcmp(argv[3], "--sensors-context") || !strcmp(argv[3], "--sensors-evdev")) &&
@@ -505,6 +525,9 @@ int main(int argc, char **argv)
     if (argc == 4 && !strcmp(argv[3], "--gps-fixture") && strcmp(argv[2], "gps")) return 2;
     if (argc == 4 && (!strcmp(argv[3], "--audio-fixture") || !strcmp(argv[3], "--audio-pcm-fixture")) && strcmp(argv[2], "audio")) return 2;
     if (argc == 4 && !strcmp(argv[3], "--hwc-fixture") && strcmp(argv[2], "hwcomposer")) return 2;
+    int namespace_mode=argc==4 && !strcmp(argv[3],"--namespace-fixture");
+    if (namespace_mode && (strcmp(argv[1],"lights.r800.so") || strcmp(argv[2],"lights") ||
+                           !namespace_denied())) return 186;
     void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fprintf(stderr, "dlopen failed: %s\n", dlerror());
@@ -524,6 +547,12 @@ int main(int argc, char **argv)
     }
     printf("HAL_HMI_PASS %s module_api=%u hal_api=%u\n", argv[2],
            (unsigned)module->module_api_version, (unsigned)module->hal_api_version);
+    if (namespace_mode) {
+        if (!namespace_denied()) { dlclose(handle); return 187; }
+        if (dlclose(handle)) return 5;
+        puts("HAL_NAMESPACE_FIXTURE_PASS linked_lights=1 denied_name=2 denied_absolute=2");
+        return 0;
+    }
     int rc = 0;
     if (argc == 4 && !strcmp(argv[3], "--gps-fixture")) {
         rc = gps_fixture(module);
