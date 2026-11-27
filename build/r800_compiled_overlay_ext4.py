@@ -33,6 +33,59 @@ def destination(name):
     return name
 
 
+def fixture_label(name, is_directory):
+    # Historical vendor recipe labels, not a donor-policy-derived mapping.
+    kind = "vendor_file" if is_directory or name.startswith("lib/hw/") else "vendor_configs_file"
+    return "u:object_r:" + kind + ":s0"
+
+
+def metadata_plan(tree, rows):
+    entries = {"": (0o040755, b"", 0, 0)}
+    for name in rows:
+        data = read_regular(tree/name, MAX_FILE)
+        if sha(data) != rows[name]["sha256"]:
+            raise ValueError("Overlay tree changed")
+        entries[name] = (0o100644, data, 0, 0)
+        for parent in Path(name).parents:
+            if str(parent) != ".":
+                entries.setdefault(parent.as_posix(), (0o040755, b"", 0, 0))
+    return entries
+
+
+def apply_metadata(image, entries, scratch, debugfs):
+    # debugfs is used only on the newly created private test image.
+    for name, item in sorted(entries.items()):
+        if name and (not re.fullmatch(r"[A-Za-z0-9_./@+-]+", name) or
+                     any(part in (".", "..") for part in name.split("/"))):
+            raise ValueError("Unexpected overlay path")
+        guest = "/" + name
+        mode = item[0]
+        label = fixture_label(name, mode & 0o170000 == 0o040000)
+        (scratch/"label-input").write_bytes(label.encode("ascii") + b"\0")
+        for request in (
+            f"set_inode_field {guest} mode {mode:07o}",
+            f"set_inode_field {guest} uid 0",
+            f"set_inode_field {guest} gid 0",
+            f"ea_set -f label-input {guest} security.selinux",
+        ):
+            subprocess.run([debugfs, "-w", "-R", request, str(image)], cwd=scratch,
+                           check=True, capture_output=True, timeout=30)
+
+
+def verify_metadata(image, entries, scratch, debugfs):
+    from r800_android_system_ext4 import inspect_inode
+    # Existing debugfs inspector uses absolute scratch paths in its commands.
+    if not re.fullmatch(r"[A-Za-z0-9_./+-]+", str(scratch)):
+        raise ValueError("Unsupported scratch path for debugfs")
+    result = {}
+    for name, item in sorted(entries.items()):
+        label = fixture_label(name, item[0] & 0o170000 == 0o040000)
+        result["/" + name] = inspect_inode(
+            image, "vendor" + ("/" + name if name else ""),
+            item, label, scratch, debugfs, partition="vendor")
+    return result
+
+
 def build(components, source_sha, output):
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("Expected full source SHA")
@@ -73,6 +126,8 @@ def build(components, source_sha, output):
                         "-m", "0", "-I", "256", "-O", "^metadata_csum,^64bit",
                         "-L", "r800-overlay", "-d", str(tree), str(image)],
                        check=True, capture_output=True, timeout=60)
+        entries = metadata_plan(tree, rows)
+        apply_metadata(image, entries, root, tools["debugfs"])
         subprocess.run([tools["e2fsck"], "-fn", str(image)], check=True,
                        capture_output=True, timeout=60)
         before = image_info(image)
@@ -90,6 +145,7 @@ def build(components, source_sha, output):
                     raise ValueError("EXT4 member hash mismatch: " + dest)
             finally:
                 target.unlink(missing_ok=True)
+        inode_metadata = verify_metadata(image, entries, root, tools["debugfs"])
         if image_info(image) != before:
             raise ValueError("Image changed during read-only validation")
         verify_components(components, source_sha)
@@ -100,6 +156,8 @@ def build(components, source_sha, output):
                   "members": rows, "e2fsck_read_only_pass": True,
                   "selected_member_bytes_match": True, "donor_images_used": False,
                   "complete_vendor_image_built": False, "selinux_labels_verified": False,
+                  "fixture_metadata_verified": True, "fixture_label_origin": "HISTORICAL_VENDOR_RECIPE",
+                  "inode_metadata": inode_metadata, "donor_policy_label_compatibility_verified": False,
                   "mount_tested": False, "runtime_verified": False, "safe_to_flash": False}
         (result/"overlay-ext4-evidence.json").write_text(json.dumps(report, indent=2, sort_keys=True)+"\n")
         os.rename(result, output)

@@ -273,3 +273,13 @@ Rootless EXT4 smoke: build/r800_compiled_overlay_ext4.py принимает
 e2fsck -fn и debugfs dump проверяют упаковку без mount/root. CI удаляет
 образ и сохраняет только JSON. Не содержит donor HIDL, policy, radio,
 и не является готовым vendor.img. SELinux xattrs не проверяются.
+
+
+EXT4 overlay test дополнен rootless установкой uid/gid=0, 0644 для
+файлов и 0755 для каталогов (кроме служебного lost+found).
+security.selinux записывается с NUL: vendor_file для HAL и каталогов,
+vendor_configs_file для конфигураций, согласно историческому рецепту.
+Повторный read-only аудит проверяет inode type, права, владельца,
+точные xattrs, отсутствие security.capability и содержимое. Эти метки
+синтетические, не результат matchpathcon оригинальной политики.
+Отрицательный тест проверяет подмену mode, gid и удаление xattr.
