@@ -23,6 +23,11 @@ clang-19 --target=aarch64-linux-gnu \
     -Wl,-e,_start -Wl,--build-id=none \
     -o "$OUT/init" "$REPO/src/initramfs/init-readonly.c"
 
+# The pinned kernel gen_init_cpio uses fstat().st_mtime for regular files;
+# KBUILD_BUILD_TIMESTAMP only controls other entry types.
+# Normalize only the freshly generated disposable init ELF.
+python3 -c 'import os, sys; os.utime(sys.argv[1], ns=(0, 0), follow_symlinks=False)' "$OUT/init"
+
 python3 "$REPO/build/r800_initramfs_spec.py" \
     --init "$OUT/init" \
     --list "$OUT/initramfs.list" \
