@@ -696,7 +696,7 @@ fi
     # off. Without developer mode Wear OS manages Wi-Fi and the phone link.
     if [ -f /oem/r800dev/android/DEV ]; then
     W=/dev/r800wpa; ( umask 077; $B mkdir -p "$W" ) && $B chmod 700 "$W" || exit 1
-    L=/oem/r800dev/root      # musl wpa_supplicant lives here
+    WPA=/oem/r800dev/bin/wpa_supplicant  # static ARM32 candidate
     inet() { $B ip -4 addr show wlan0 2>/dev/null | $B grep -q inet; }
     # Android owns Wi-Fi: it gets a real network (apps have internet) and nothing
     # fights over wlan0. Join the Tizen network with the passphrase in wifi.pass.
@@ -715,8 +715,7 @@ fi
     # Fall back only when the helper has a readable config and binary.
     # Never start a second network owner if Android could not be disabled.
     if ! inet && [ -s /oem/r800dev/wpa.conf ] &&
-       [ -x "$L/sbin/wpa_supplicant" ] &&
-       [ -x "$L/lib/ld-musl-aarch64.so.1" ]; then
+       [ -x "$WPA" ]; then
         # fallback: our own supplicant + DHCP (Android Wi-Fi off so it cannot fight)
         if /system/bin/cmd wifi set-wifi-enabled disabled &&
            /system/bin/setprop ctl.stop wpa_supplicant; then
@@ -819,7 +818,7 @@ H
                 break
             fi
             if [ -z "$wpa_pid" ] || ! kill -0 "$wpa_pid" 2>/dev/null; then
-                "$L/lib/ld-musl-aarch64.so.1" --library-path "$L/lib:$L/usr/lib" "$L/sbin/wpa_supplicant" -i wlan0 -D nl80211 -c "$W/wpa.conf" > /dev/null 2>&1 &
+                "$WPA" -i wlan0 -D nl80211 -c "$W/wpa.conf" > /dev/null 2>&1 &
                 wpa_pid=$!
             fi
             if [ -z "$dhcp_pid" ] || ! kill -0 "$dhcp_pid" 2>/dev/null; then
