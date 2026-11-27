@@ -423,7 +423,31 @@ jobs:
           python3 build/r800_compiled_overlay_ext4.py \
             --components "$RUNNER_TEMP/r800-components" --source-sha "$GITHUB_SHA" \
             --output "$RUNNER_TEMP/r800-overlay-ext4"
-          rm -- "$RUNNER_TEMP/r800-overlay-ext4/overlay-test.ext4"
+          python3 build/r800_compiled_overlay_ext4.py \
+            --components "$RUNNER_TEMP/r800-components" --source-sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/r800-overlay-ext4-second"
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          first = root / "r800-overlay-ext4"
+          second = root / "r800-overlay-ext4-second"
+          a, b = [json.loads((p / "overlay-ext4-evidence.json").read_text()) for p in (first, second)]
+          assert a["source_sha"] == b["source_sha"] == os.environ["GITHUB_SHA"]
+          assert a["component_manifest_sha256"] == b["component_manifest_sha256"]
+          assert a["members"] == b["members"] and a["inode_metadata"] == b["inode_metadata"]
+          same = subprocess.run(["cmp", "-s", str(first/"overlay-test.ext4"),
+                                 str(second/"overlay-test.ext4")]).returncode == 0
+          report = {"status": "OVERLAY_EXT4_SAME_HOST_MATCH" if same and a["image"] == b["image"] else "REVIEW_REQUIRED",
+                    "source_sha": a["source_sha"], "component_manifest_sha256": a["component_manifest_sha256"],
+                    "first_image": a["image"], "second_image": b["image"],
+                    "filesystem_uuid": a["filesystem_uuid"], "fixed_epoch": a["fixed_epoch"],
+                    "mke2fs_version": a["mke2fs_version"], "byte_match": same,
+                    "cross_host_verified": False, "complete_vendor_image_built": False, "safe_to_flash": False}
+          (root/"r800-overlay-repeatability.json").write_text(json.dumps(report, indent=2)+"\n")
+          print(report["status"], a["image"]["sha256"], b["image"]["sha256"])
+          assert report["status"] == "OVERLAY_EXT4_SAME_HOST_MATCH"
+          PY
+          rm -- "$RUNNER_TEMP/r800-overlay-ext4/overlay-test.ext4" "$RUNNER_TEMP/r800-overlay-ext4-second/overlay-test.ext4"
       - name: Upload component manifest only (no binaries)
         if: always() && github.ref_name == 'development/r800-integration-20261127'
         uses: actions/upload-artifact@v4
@@ -434,6 +458,8 @@ jobs:
             ${{ runner.temp }}/r800-components/hal-stage-evidence.json
             ${{ runner.temp }}/r800-donor-hold-evidence.json
             ${{ runner.temp }}/r800-overlay-ext4/overlay-ext4-evidence.json
+            ${{ runner.temp }}/r800-overlay-ext4-second/overlay-ext4-evidence.json
+            ${{ runner.temp }}/r800-overlay-repeatability.json
           if-no-files-found: warn
           retention-days: 7
       - name: Fetch Debian ARM EABI glibc 2.24 reference (not a Tizen donor)

@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 
 from r800_android_userspace_preflight import read_regular
 from r800_donor_preflight import verify_components
@@ -17,6 +18,7 @@ from r800_vendor_inputs import image_info, OVERLAY
 
 IMAGE_BYTES = 64 * 1024**2
 MAX_FILE = 64 * 1024**2
+FIXED_EPOCH = 1700000000
 
 
 def sha(raw):
@@ -52,6 +54,22 @@ def metadata_plan(tree, rows):
     return entries
 
 
+def deterministic_env():
+    return {**os.environ, "LC_ALL": "C", "TZ": "UTC",
+            "E2FSPROGS_FAKE_TIME": str(FIXED_EPOCH)}
+
+
+def normalize_times(image, entries, scratch, debugfs):
+    for name in sorted(set(entries) | {"lost+found"}):
+        guest = "/" + name
+        for field in ("atime", "ctime", "mtime", "crtime"):
+            for suffix, value in (("", "@" + str(FIXED_EPOCH)), ("_extra", "0")):
+                subprocess.run([debugfs, "-w", "-R",
+                                f"set_inode_field {guest} {field}{suffix} {value}", str(image)],
+                               cwd=scratch, env=deterministic_env(), check=True,
+                               capture_output=True, timeout=30)
+
+
 def apply_metadata(image, entries, scratch, debugfs):
     # debugfs is used only on the newly created private test image.
     for name, item in sorted(entries.items()):
@@ -69,7 +87,7 @@ def apply_metadata(image, entries, scratch, debugfs):
             f"ea_set -f label-input {guest} security.selinux",
         ):
             subprocess.run([debugfs, "-w", "-R", request, str(image)], cwd=scratch,
-                           check=True, capture_output=True, timeout=30)
+                           env=deterministic_env(), check=True, capture_output=True, timeout=30)
 
 
 def verify_metadata(image, entries, scratch, debugfs):
@@ -106,7 +124,7 @@ def build(components, source_sha, output):
         tree.mkdir()
         result = root/"result"
         result.mkdir()
-        for name in OVERLAY:
+        for name in sorted(OVERLAY):
             src = "vendor-overlay/" + name
             expected = manifest[src]
             raw = read_regular(components/src, MAX_FILE)
@@ -122,12 +140,19 @@ def build(components, source_sha, output):
         image = result/"overlay-test.ext4"
         with image.open("xb") as stream:
             stream.truncate(IMAGE_BYTES)
+        fs_uuid = str(uuid.UUID(sha(manifest_raw)[:32]))
+        hash_seed = str(uuid.UUID(sha(manifest_raw + b":dirhash")[:32]))
+        for path in sorted(tree.rglob("*")):
+            os.utime(path, (FIXED_EPOCH, FIXED_EPOCH))
+        os.utime(tree, (FIXED_EPOCH, FIXED_EPOCH))
         subprocess.run([tools["mke2fs"], "-q", "-F", "-t", "ext4", "-b", "4096",
                         "-m", "0", "-I", "256", "-O", "^metadata_csum,^64bit",
+                        "-U", fs_uuid, "-E", "lazy_itable_init=0,lazy_journal_init=0,hash_seed="+hash_seed,
                         "-L", "r800-overlay", "-d", str(tree), str(image)],
-                       check=True, capture_output=True, timeout=60)
+                       env=deterministic_env(), check=True, capture_output=True, timeout=60)
         entries = metadata_plan(tree, rows)
         apply_metadata(image, entries, root, tools["debugfs"])
+        normalize_times(image, entries, root, tools["debugfs"])
         subprocess.run([tools["e2fsck"], "-fn", str(image)], check=True,
                        capture_output=True, timeout=60)
         before = image_info(image)
@@ -153,6 +178,9 @@ def build(components, source_sha, output):
             raise ValueError("Component manifest changed")
         report = {"status": "COMPILED_OVERLAY_EXT4_TEST_ONLY", "source_sha": source_sha,
                   "component_manifest_sha256": sha(manifest_raw), "image": before,
+                  "fixed_epoch": FIXED_EPOCH, "filesystem_uuid": fs_uuid, "directory_hash_seed": hash_seed,
+                  "mke2fs_version": subprocess.run([tools["mke2fs"], "-V"], capture_output=True,
+                                                    text=True, check=True, timeout=10).stderr.strip(),
                   "members": rows, "e2fsck_read_only_pass": True,
                   "selected_member_bytes_match": True, "donor_images_used": False,
                   "complete_vendor_image_built": False, "selinux_labels_verified": False,
