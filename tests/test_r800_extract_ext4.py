@@ -234,6 +234,57 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertEqual(extractor.hidl_dependency_inventory(elf, [service, lib])["edges"][0]["status"],
                          "CANDIDATE_REJECTED")
 
+    def test_vendor_dependency_walk_reads_transitive_snapshot_members(self):
+        service = "bin/hw/android.hardware.gnss@1.0-service"
+        self.put(service, b"service")
+        self.put("lib/libone.so", b"one")
+        self.put("lib/libtwo.so", b"two")
+        self.put("lib/hw/liboutside.so", b"not searched")
+        sha = self.make_image()
+
+        def inspect(raw):
+            deps = {b"service": ["libone.so"], b"one": ["libtwo.so"],
+                    b"two": ["libone.so", "liboutside.so"]}
+            sonames = {b"one": "libone.so", b"two": "libtwo.so"}
+            return {"abi": "arm", "has_dynamic": True, "elf_type": "ET_DYN",
+                    "needed": deps[raw], "soname": sonames.get(raw),
+                    "custom_search_path": False}
+
+        with mock.patch("r800_android_linker_audit.inspect", side_effect=inspect):
+            report = extract(self.image, self.output, "vendor-identity", sha)
+        walk = report["vendor_identity"]["vendor_dependency_walk"]
+        self.assertEqual(walk["status"], "REVIEW_REQUIRED")
+        self.assertEqual(walk["external_names"], ["liboutside.so"])
+        self.assertEqual(walk["objects"]["vendor/lib/libtwo.so"]["depth"], 2)
+        self.assertEqual(walk["objects"]["vendor/lib/libtwo.so"]["sha256"],
+                         hashlib.sha256(b"two").hexdigest())
+        self.assertEqual(len(walk["objects"]), 4)
+        self.assertFalse(walk["budget_exhausted"])
+        self.assertFalse(walk["dependency_closure_verified"])
+        self.assertFalse((self.output/"vendor/lib/libone.so").exists())
+        self.assertEqual(hashlib.sha256(self.image.read_bytes()).hexdigest(), sha)
+
+    def test_vendor_dependency_walk_rejects_bad_names_and_bounds(self):
+        service = "bin/hw/android.hardware.gnss@1.0-service"
+        self.put(service, b"service")
+        self.put("lib/libone.so", b"one")
+        sha = self.make_image()
+        def info(dep):
+            return {"abi": "arm", "has_dynamic": True, "elf_type": "ET_DYN",
+                    "needed": [dep], "soname": None, "custom_search_path": False}
+        with mock.patch("r800_android_linker_audit.inspect", return_value=info("../private")):
+            report = extract(self.image, self.output, "vendor-identity", sha)
+        walk = report["vendor_identity"]["vendor_dependency_walk"]
+        self.assertEqual(walk["edges"], [])
+        self.assertIn("Invalid DT_NEEDED basename", walk["problems"][0])
+        with mock.patch("r800_android_linker_audit.inspect", return_value=info("libone.so")), \
+                mock.patch.object(extractor, "MAX_WALK_OBJECTS", 1):
+            report = extract(self.image, self.root/"bounded", "vendor-identity", sha)
+        walk = report["vendor_identity"]["vendor_dependency_walk"]
+        self.assertTrue(walk["budget_exhausted"])
+        self.assertEqual(walk["edges"][0]["status"], "NOT_INSPECTED")
+        self.assertFalse(walk["safe_to_flash"])
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")

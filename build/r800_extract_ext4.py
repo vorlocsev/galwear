@@ -270,6 +270,98 @@ def locate(tool, image, guest):
     return int(match[1]), length
 
 
+MAX_WALK_OBJECTS = 128
+MAX_WALK_BYTES = 128 * 1024**2
+MAX_WALK_DEPTH = 16
+MAX_WALK_EDGES = 4096
+
+
+def vendor_dependency_walk(tool, snapshot, scratch, tree, files):
+    """Bounded ARM32 vendor/lib candidate graph, not Android resolution.
+
+    Read only from the same verified snapshot, retain only metadata for
+    additional dependencies. Missing providers may be in system/VNDK.
+    """
+    from collections import deque
+    from r800_android_linker_audit import inspect
+    roots = sorted(name for name, row in files.items()
+                   if row["status"] == "EXTRACTED" and
+                   (name.startswith("vendor/bin/") or name.endswith(".so")))
+    pending = deque((name, 0) for name in roots)
+    objects, edges, problems = {}, [], []
+    total = 0
+    exhausted = False
+    while pending:
+        name, depth = pending.popleft()
+        if name in objects:
+            continue
+        if len(objects) >= MAX_WALK_OBJECTS or depth > MAX_WALK_DEPTH:
+            problems.append("Object or depth budget exceeded")
+            exhausted = True
+            break
+        objects[name] = {"status": "REVIEW_REQUIRED"}
+        try:
+            if name in files and files[name]["status"] == "EXTRACTED":
+                raw = (tree / name).read_bytes()
+                if hashlib.sha256(raw).hexdigest() != files[name]["sha256"]:
+                    raise ValueError("Selected member digest mismatch")
+                if total + len(raw) > MAX_WALK_BYTES:
+                    exhausted = True
+                    raise ValueError("Byte budget exceeded")
+            else:
+                found = locate(tool, snapshot, "/" + name.removeprefix("vendor/"))
+                if found is None:
+                    objects[name] = {"status": "OUTSIDE_VENDOR_LIB"}
+                    continue
+                inode, length = found
+                if total + length > MAX_WALK_BYTES:
+                    exhausted = True
+                    raise ValueError("Byte budget exceeded")
+                target = scratch / "dependency-member"
+                try:
+                    command(tool, snapshot, "dump <%d> dependency-member" % inode, cwd=scratch)
+                    st = target.lstat()
+                    if not stat.S_ISREG(st.st_mode) or st.st_size != length:
+                        raise ValueError("Dependency size mismatch")
+                    raw = target.read_bytes()
+                finally:
+                    target.unlink(missing_ok=True)
+            total += len(raw)
+            info = inspect(raw)
+            if info["abi"] != "arm" or not info["has_dynamic"]:
+                raise ValueError("Expected dynamic ARM32 ELF")
+            if name.endswith(".so") and (info["elf_type"] != "ET_DYN" or
+                    info["soname"] not in (None, name.rsplit("/", 1)[-1])):
+                raise ValueError("Invalid shared object type or SONAME")
+            if info["custom_search_path"]:
+                raise ValueError("RPATH/RUNPATH requires review")
+            objects[name] = {"status": "CANDIDATE_ONLY", "sha256": hashlib.sha256(raw).hexdigest(),
+                             "bytes": len(raw), "needed": info["needed"], "depth": depth}
+            for dep in sorted(info["needed"]):
+                if len(edges) >= MAX_WALK_EDGES:
+                    exhausted = True
+                    raise ValueError("Edge budget exceeded")
+                if not re.fullmatch(r"[A-Za-z0-9_@.+~-]{1,255}", dep) or dep in (".", ".."):
+                    raise ValueError("Invalid DT_NEEDED basename")
+                candidate = "vendor/lib/" + dep
+                edges.append({"from": name, "needed": dep, "candidate": candidate})
+                pending.append((candidate, depth + 1))
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            objects[name] = {"status": "REVIEW_REQUIRED", "reason": str(exc)}
+            problems.append(name + ": " + str(exc))
+            if exhausted:
+                break
+    for edge in edges:
+        edge["status"] = objects.get(edge["candidate"], {}).get("status", "NOT_INSPECTED")
+    external = sorted({e["needed"] for e in edges if e["status"] == "OUTSIDE_VENDOR_LIB"})
+    return {"status": "VENDOR_LIB_CANDIDATES_ONLY" if roots and not problems and not external and
+            all(o["status"] == "CANDIDATE_ONLY" for o in objects.values()) else "REVIEW_REQUIRED",
+            "roots": roots, "objects": objects, "edges": edges, "external_names": external,
+            "problems": problems, "budget_exhausted": exhausted, "bytes_inspected": total,
+            "dependency_closure_verified": False, "namespace_resolution_verified": False,
+            "runtime_verified": False, "safe_to_flash": False}
+
+
 def snapshot_image(image, snapshot, expected_sha):
     """Copy bounded bytes once; debugfs never reopens the mutable donor path."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
@@ -349,6 +441,9 @@ def extract(image, output, profile, expected_sha):
             destpath.chmod(0o644)
             files[dest] = {"status":"EXTRACTED", "source":guest,
                            "bytes":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
+        dependency_walk = None
+        if profile == "vendor-identity":
+            dependency_walk = vendor_dependency_walk(tool, snapshot, scratch, tree, files)
         current = image.lstat()
         if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
                 current.st_mtime_ns, current.st_ctime_ns) != source_identity:
@@ -362,6 +457,7 @@ def extract(image, output, profile, expected_sha):
                   "safe_to_flash":False}
         if profile == "vendor-identity":
             report["vendor_identity"] = vendor_identity(tree, files)
+            report["vendor_identity"]["vendor_dependency_walk"] = dependency_walk
         (tree/"ext4-evidence.json").write_text(json.dumps(report,indent=2,sort_keys=True))
         os.rename(tree,output)
     return report
