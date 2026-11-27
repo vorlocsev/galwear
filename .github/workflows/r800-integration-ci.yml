@@ -425,6 +425,8 @@ jobs:
           assert len(data) == int(row["Size"]) and len(data) < 16 * 1024**2
           sha = hashlib.sha256(data).hexdigest()
           assert sha == row["SHA256"]
+          # Pin the observed reference archive as well as the repository metadata.
+          assert sha == "601950cfcf0e9f705d9a2bff65351dd6e86759cb6573d5ca6ba6cbe98ffaf5d8"
           names = {"libc-2.24.so": "libc.so.6", "libdl-2.24.so": "libdl.so.2",
                    "libpthread-2.24.so": "libpthread.so.0", "ld-2.24.so": "ld-linux.so.3"}
           libs = root / "libs"
@@ -456,7 +458,28 @@ jobs:
         run: |
           set -eu
           ref="$RUNNER_TEMP/r800-debian-glibc-reference"
-          python3 build/r800_gps_link_gate.py --donor-only --libdir "$ref/libs" > "$ref/reference-prelink.json"
+          PYTHONPATH=build python3 - <<'PY' > "$ref/reference-symbol-review.json"
+          import json, os, pathlib
+          from r800_android_linker_audit import inspect
+          from r800_gps_link_gate import DONORS
+          from r800_android_userspace_preflight import read_regular
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "r800-debian-glibc-reference/libs"
+          report = {}
+          for name in DONORS:
+              try:
+                  info = inspect(read_regular(root / name, 64 * 1024**2))
+                  report[name] = {key: info[key] for key in
+                      ("abi", "soname", "elf_type", "needed", "dynamic_symbol_count",
+                       "symbol_table_status", "unsupported_symbols")}
+              except (OSError, ValueError) as exc:
+                  report[name] = {"error": str(exc)}
+          print(json.dumps({"scope": "DEBIAN_REFERENCE_DIAGNOSTIC_ONLY",
+                            "libraries": report, "safe_to_flash": False}, indent=2, sort_keys=True))
+          PY
+          cat "$ref/reference-symbol-review.json"
+          python3 build/r800_gps_link_gate.py --donor-only --libdir "$ref/libs" > "$ref/reference-prelink.json" || {
+            cat "$ref/reference-prelink.json"; exit 2;
+          }
           R800_XTRA_ABI=0 R800_TIZEN_ARCHIVE='' R800_HOST_SNAPSHOT=0 \
             sh src/tools/gps/build.sh "$RUNNER_TEMP/android-ndk-r27c" "$ref/libs" "$ref/gpsbridge" > "$ref/reference-link.log" 2>&1 || {
               cat "$ref/reference-link.log"; exit 2;
@@ -471,6 +494,7 @@ jobs:
           path: |
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-origin.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-prelink.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-symbol-review.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-postlink.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-link.log
           if-no-files-found: warn

@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest import mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
-from r800_gps_link_gate import check_version, import_problems, audit_donors, DONORS
+from r800_gps_link_gate import check_version, import_problems, audit_donors, DONORS, load_donors
 
 class GpsLinkGateTests(unittest.TestCase):
     def setUp(self):
@@ -31,6 +31,12 @@ class GpsLinkGateTests(unittest.TestCase):
             report = audit_donors(Path("/fixture"))
             self.assertEqual(report["status"], "REVIEW_REQUIRED")
             self.assertIn("libc.so.6: Unexpected DT_NEEDED: foreign.so", report["problems"])
+
+    def test_donor_parse_error_names_library(self):
+        with mock.patch("r800_gps_link_gate.read_regular", return_value=b"fixture"), \
+                mock.patch("r800_gps_link_gate.elf", side_effect=ValueError("Incomplete symbol inventory")):
+            with self.assertRaisesRegex(ValueError, "libc.so.6: Incomplete symbol inventory"):
+                load_donors(Path("/fixture"))
 
     def test_versions(self):
         for version in ("GLIBC_2.4","GLIBC_2.24","GLIBC_2.24.0"):

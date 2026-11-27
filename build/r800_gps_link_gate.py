@@ -96,7 +96,10 @@ def load_donors(libdir):
     providers, hashes = {}, {}
     for name in DONORS:
         data = read_regular(libdir / name, LIMIT)
-        p = elf(data)
+        try:
+            p = elf(data)
+        except ValueError as exc:
+            raise ValueError(name + ": " + str(exc)) from exc
         if p["soname"] != name:
             raise ValueError("Unexpected donor SONAME: " + name)
         if p["custom_search_path"]:
