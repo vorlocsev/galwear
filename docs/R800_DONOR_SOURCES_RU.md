@@ -526,3 +526,15 @@ malformed/NUL/overlong rejection. STATUS barrier and atomics. HAL unchanged.
 cleanup() не завершает reader, поэтому тест завершает процесс без dlclose.
 Реальные Tizen GPSBridge, GNSS, cleanup safety и Wear OS не подтверждены.
 Новый CI pending.
+
+
+CI 46034793245 / job 140627359271 exact e7c079e: GPS synthetic bridge PASS.
+GPS reader lifecycle: atomic running, nonblocking AF_UNIX connect,
+poll + interruptible retry wait, shutdown to wake reader, pthread_join
+before clearing copied callbacks. Duplicate init EBUSY, inactive start
+ENODEV, cleanup idempotent, device close refuses join failure. Framework
+create_thread_cb must return a joinable pthread_t; actual Wear OS wrapper
+and concurrent/reentrant framework lifecycle calls remain unverified.
+QEMU fixture now checks active STOP on cleanup, peer EOF, two reinits,
+cleanup with missing bridge and dlclose only after successful test.
+New CI pending; no actual GNSS.

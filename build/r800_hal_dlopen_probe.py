@@ -244,7 +244,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 if gps_fixture:
                     fixture_marker = "HAL_GPS_FIXTURE_PASS fixes=2 nmea=3 sv=1 reconnect=1 commands=5"
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
-                                  not (fixture/"gps.sock").exists())
+                                  not (fixture/"gps.sock").exists() and
+                                  log.splitlines().count("HAL_GPS_CLEANUP_PASS joined=3 active_stop=1 reinit=2 absent_bridge=1") == 1)
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
                           (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture) or fixture_ok))
@@ -288,7 +289,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "evdev_fixture_sha256": evidence.get("evdev_fixture_sha256") if sensors_evdev else None,
         "gps_fixture_requested": gps_fixture,
         "synthetic_gps_callbacks_passed": gps_fixture and all(v["status"] == expected_status for v in results.values()),
-        "gps_reader_cleanup_verified": False, "gnss_hardware_verified": False,
+        "gps_reader_cleanup_verified": gps_fixture and all(v["status"] == expected_status for v in results.values()),
+        "gnss_hardware_verified": False,
         "sensor_events_tested": False,
         "hardware_io_methods_tested": False,
         "hardware_tested": False, "safe_to_flash": False}

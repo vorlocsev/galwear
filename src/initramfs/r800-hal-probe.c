@@ -522,10 +522,13 @@ int main(int argc, char **argv)
     int rc = 0;
     if (argc == 4 && !strcmp(argv[3], "--gps-fixture")) {
         rc = gps_fixture(module);
-        /* Current HAL does not join reader; never unload it while running. */
-        fflush(stdout);
-        fflush(stderr);
-        _exit(rc);
+        /* On failure, the reader may still be alive. Never unload it. */
+        if (rc) {
+            fflush(stdout);
+            fflush(stderr);
+            _exit(rc);
+        }
+        return dlclose(handle) ? 5 : 0;
     }
     if (argc == 4)
         rc = !strcmp(argv[3], "--lights-fixture") ? lights_fixture(module) :

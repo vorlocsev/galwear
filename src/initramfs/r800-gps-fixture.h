@@ -99,7 +99,6 @@ static pthread_t gps_create_thread(const char *name,void (*entry)(void *),void *
     if (pthread_create(&thread,NULL,gps_thread_main,NULL)) {
         atomic_store(&gps_bad,1); return 0;
     }
-    pthread_detach(thread);
     return thread;
 }
 static test_callbacks gps_callbacks = {
@@ -166,7 +165,7 @@ static int gps_fixture(const hw_module_t *module)
     if (!dev->get_interface) return 93;
     const test_gps_interface *api=dev->get_interface(dev);
     if (!api || api->size!=sizeof(*api) || !api->init || !api->start || !api->stop ||
-        !api->inject_time || !api->inject_location) return 94;
+        !api->inject_time || !api->inject_location || !api->cleanup) return 94;
     if (api->init(&gps_callbacks) || api->start() || atomic_load(&gps_caps)!=1 ||
         atomic_load(&gps_begin)!=1) return 95;
     int peer=gps_accept(server);
@@ -194,7 +193,31 @@ static int gps_fixture(const hw_module_t *module)
         atomic_load(&gps_sv)!=1) return 100;
     if (api->stop() || !gps_expect(peer,"STOP\n") ||
         atomic_load(&gps_end)!=1 || atomic_load(&gps_bad)) return 101;
-    if (base->close(base) || close(peer) || close(server) || unlink(GPS_SOCKET)) return 102;
+    api->cleanup();
+    char eof;
+    struct pollfd ended={.fd=peer,.events=POLLIN};
+    if (poll(&ended,1,2000)!=1 || read(peer,&eof,1)!=0 ||
+        api->start()!=-ENODEV || close(peer)) return 102;
+    /* Reinit and cleanup while active. Duplicate init must be rejected. */
+    if (api->init(&gps_callbacks) || api->init(&gps_callbacks)!=-EBUSY ||
+        api->start() || atomic_load(&gps_caps)!=2 || atomic_load(&gps_begin)!=2)
+        return 103;
+    peer=gps_accept(server);
+    if (peer<0 || !gps_expect(peer,"START\n")) return 104;
+    api->cleanup();
+    if (!gps_expect(peer,"STOP\n") || atomic_load(&gps_end)!=2) return 105;
+    ended.fd=peer; ended.revents=0;
+    if (poll(&ended,1,2000)!=1 || read(peer,&eof,1)!=0 || close(peer)) return 106;
+    /* Cleanup with bridge absent must interrupt retry, not leak a thread. */
+    if (close(server) || unlink(GPS_SOCKET)) return 107;
+    if (api->init(&gps_callbacks)) return 108;
+    usleep(100000);
+    api->cleanup();
+    api->cleanup();
+    if (api->start()!=-ENODEV || atomic_load(&gps_caps)!=3 ||
+        atomic_load(&gps_fixes)!=2 || atomic_load(&gps_bad) || base->close(base))
+        return 109;
     puts("HAL_GPS_FIXTURE_PASS fixes=2 nmea=3 sv=1 reconnect=1 commands=5");
+    puts("HAL_GPS_CLEANUP_PASS joined=3 active_stop=1 reinit=2 absent_bridge=1");
     return 0;
 }
