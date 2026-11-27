@@ -5,6 +5,7 @@ on:
     branches:
       - "development/r800-kernel-source-ci-20261124"
       - "development/r800-display-error-propagation-20261125"
+      - "development/r800-integration-20261127"
     paths:
       - ".github/workflows/r800-kernel-compile-smoke.yml"
       - ".github/workflows/r800-initramfs-smoke.yml"
@@ -15,6 +16,11 @@ on:
       - "build/r800_aosp_source_probe.sh"
       - "tests/test_kernel_compile_recipe.py"
       - "build/r800_nzit_layout_audit.py"
+      - "build/r800_boot_candidate.py"
+      - "tests/test_r800_boot_candidate.py"
+      - "build/r800_display_inventory.py"
+      - "build/r800_android_userspace_preflight.py"
+      - "build/r800_kheaders_repro.py"
       - "tests/test_nzit_layout_audit.py"
       - "src/dt/r800.dts"
       - "build/r800_embedded_dtb.py"
@@ -50,7 +56,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     env:
-      EMBED_INIT: ${{ (github.event_name == 'workflow_dispatch' && inputs.embed_readonly_initramfs || github.event_name == 'push' && github.ref_name == 'development/r800-display-error-propagation-20261125') && 'true' || 'false' }}
+      EMBED_INIT: ${{ (github.event_name == 'workflow_dispatch' && inputs.embed_readonly_initramfs || github.event_name == 'push' && (github.ref_name == 'development/r800-display-error-propagation-20261125' || github.ref_name == 'development/r800-integration-20261127')) && 'true' || 'false' }}
       STORAGE_ISOLATION: ${{ github.event_name == 'workflow_dispatch' && inputs.storage_isolation && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
@@ -69,6 +75,9 @@ jobs:
           fi
           python3 -m unittest discover -s tests -p 'test_kernel_compile_recipe.py' -v
           python3 -m unittest discover -s tests -p 'test_nzit_layout_audit.py' -v
+          if [ -f build/r800_boot_candidate.py ]; then
+            python3 -m unittest discover -s tests -p 'test_r800_boot_candidate.py' -v
+          fi
           python3 -m unittest discover -s tests -p 'test_minimal_boot_contract.py' -v
           python3 -m unittest discover -s tests -p 'test_initramfs_recipe.py' -v
           python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
@@ -95,6 +104,7 @@ jobs:
         run: |
           docker run --rm --pull=always \
             -e EMBED_INIT="$EMBED_INIT" \
+            -e R800_REPRO_KHEADERS="${{ github.ref_name == 'development/r800-integration-20261127' && '1' || '0' }}" \
             -e R800_STORAGE_ISOLATION="$STORAGE_ISOLATION" \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             -v "$RUNNER_TEMP/combined-exynos-src:/source" \
@@ -207,8 +217,11 @@ jobs:
       - name: Audit historical NZIT capacity without packaging
         id: nzit
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends device-tree-compiler
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends device-tree-compiler
           python3 -m unittest discover -s tests -p 'test_embedded_dtb.py' -v
           if [ "$EMBED_INIT" = true ]; then
             python3 build/r800_embedded_dtb.py --minimal-bootargs --source src/dt/r800.dts --out-dir "$RUNNER_TEMP/r800-embedded-dtb" 2>"$RUNNER_TEMP/r800-layout-dtc.txt"
@@ -223,6 +236,28 @@ jobs:
             --dtb "$dtb" \
             --report "$RUNNER_TEMP/r800-nzit-layout.json"
 
+      - name: Verify actual compiled components and Android kernel prerequisites
+        id: android-components
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          python3 - "$RUNNER_TEMP" "$EMBED_INIT" <<'PY'
+          import json, pathlib, sys
+          sys.path.insert(0, "build")
+          from r800_boot_candidate import component_evidence, PARTITION, DT_SIZE
+          from r800_android_userspace_preflight import config_check, read_regular
+          root = pathlib.Path(sys.argv[1])
+          out = root / "compiled-kernel"
+          dtb = root / ("r800-embedded-dtb/embedded-only.dtb" if sys.argv[2] == "true" else "r800-layout.dtb")
+          report = component_evidence(read_regular(dtb, DT_SIZE),
+              read_regular(out / "arch/arm64/boot/Image", PARTITION))
+          report["effective_kernel_config"] = config_check(out / ".config")
+          report["galwear_commit"] = __import__("os").environ["GITHUB_SHA"]
+          (root / "r800-compiled-components.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps(report, sort_keys=True))
+          if report["effective_kernel_config"]["missing_or_wrong"]:
+              raise SystemExit("Effective kernel config lacks Android prerequisites")
+          PY
+
       - name: Record evidence only, never upload compiled Image
         if: always()
         env:
@@ -234,13 +269,14 @@ jobs:
           ARM64_OUTCOME: ${{ steps.arm64.outcome }}
           EMBEDDED_OUTCOME: ${{ steps.embedded.outcome }}
           NZIT_OUTCOME: ${{ steps.nzit.outcome }}
+          ANDROID_COMPONENTS_OUTCOME: ${{ steps.android-components.outcome }}
         run: |
           {
             printf 'recipe=%s\nsource=%s\nexpand=%s\ncompile=%s\naudio=%s\narm64=%s\n' \
               "$RECIPE_OUTCOME" "$SOURCE_OUTCOME" "$EXPAND_OUTCOME" \
               "$COMPILE_OUTCOME" "$AUDIO_OUTCOME" "$ARM64_OUTCOME"
             if [ "$RECIPE_OUTCOME/$SOURCE_OUTCOME/$EXPAND_OUTCOME/$COMPILE_OUTCOME/$AUDIO_OUTCOME/$ARM64_OUTCOME" = success/success/success/success/success/success ]; then
-              if [ "$NZIT_OUTCOME" = success ] && { [ "$EMBED_INIT" = false ] || [ "$EMBEDDED_OUTCOME" = success ]; }; then
+              if [ "$NZIT_OUTCOME" = success ] && { [ "$EMBED_INIT" = false ] || [ "$EMBEDDED_OUTCOME" = success ]; } && { [ "$GITHUB_REF_NAME" != development/r800-integration-20261127 ] || [ "$ANDROID_COMPONENTS_OUTCOME" = success ]; }; then
                 echo "integrated_kernel_smoke=pass"
               else
                 echo "integrated_kernel_smoke=not_passed"
@@ -264,6 +300,7 @@ jobs:
             echo "storage_isolation_requested=$STORAGE_ISOLATION"
             echo "embedded_link_outcome=$EMBEDDED_OUTCOME"
             echo "nzit_layout_outcome=$NZIT_OUTCOME"
+            echo "android_components_outcome=$ANDROID_COMPONENTS_OUTCOME"
             echo "device_contacted=false"
             echo "image_published=false"
             if [ -s "$RUNNER_TEMP/compiled-kernel/arch/arm64/boot/Image" ]; then
@@ -288,6 +325,7 @@ jobs:
             ${{ runner.temp }}/compiled-kernel/embedded-cpio-audit.json
             ${{ runner.temp }}/embedded-link-evidence.json
             ${{ runner.temp }}/r800-nzit-layout.json
+            ${{ runner.temp }}/r800-compiled-components.json
             ${{ runner.temp }}/r800-layout-dtc.txt
             ${{ runner.temp }}/r800-embedded-dtb/embedded-dtb-evidence.json
             ${{ runner.temp }}/r800-minimal-boot-contract.json
