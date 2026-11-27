@@ -109,6 +109,10 @@ jobs:
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
           python3 build/r800_donor_hidl_permissions.py --fixture --report "$RUNNER_TEMP/r800-hidl-permissions.json"
+      - name: Check selected synthetic hwbinder device permissions
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          python3 build/r800_donor_hidl_permissions.py --fixture-device --report "$RUNNER_TEMP/r800-hwbinder-device.json"
       - name: Upload CIL compile evidence
         if: always() && github.ref_name == 'development/r800-integration-20261127'
         uses: actions/upload-artifact@v4
@@ -118,6 +122,7 @@ jobs:
             ${{ runner.temp }}/r800-cil-evidence.json
             ${{ runner.temp }}/r800-transition-evidence.json
             ${{ runner.temp }}/r800-hidl-permissions.json
+            ${{ runner.temp }}/r800-hwbinder-device.json
           if-no-files-found: warn
           retention-days: 7
       - name: Run all offline regression suites

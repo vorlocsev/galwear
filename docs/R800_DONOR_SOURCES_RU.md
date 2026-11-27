@@ -255,3 +255,13 @@ callback, fd use, устройство /dev/hwbinder, MLS constraints и рег�
 runtime не проверены. Синтетическая CI fixture удаляет find и должна
 получить REVIEW_REQUIRED ровно по этому правилу. Рабочие политики
 не изменяются.
+
+
+Дополнительные параметры HIDL audit: --device-type HwbinderDeviceType
+добавляет 15 проверок chr_file open/read/write/ioctl/map для server,
+client и manager. --kernel-config FILE --kernel-config-sha256 SHA256
+проверяет IPC, COMPAT, список binder/hwbinder/vndbinder через существующий
+kernel_evidence. CI --fixture-device использует синтетический config
+и policy, отрицательный тест удаляет только ioctl клиента. Это не
+доказательство наличия node, DAC/ueventd, ioctl xperm или обмена IPC.
+Фактическую конфигурацию ядра и тип устройства необходимо предоставить.
