@@ -83,13 +83,18 @@ int main(int argc,char **argv) {
 
     def test_bridge_reader_owns_close(self):
         s = self.bridge
-        out = s[s.index("static void out("):s.index("static int daemon_mode")]
-        self.assertIn("shutdown(client, 2)", out)
-        self.assertNotIn("close(client);", out)
+        owner = (ROOT / "src/tools/gps/gps_client.h").read_text()
+        out = owner[owner.index("static void gps_client_send("):]
+        self.assertIn("MSG_DONTWAIT | MSG_NOSIGNAL", out)
+        self.assertIn("shutdown(c->fd, SHUT_RDWR)", out)
+        self.assertNotIn("close(", out)
+        self.assertIn("gps_client_send(&connection, epoch, line, len)", s)
+        self.assertIn("gps_client_detach(&connection, c);\n\t\tclose(c);", s)
 
     def test_failed_session_not_marked_active(self):
-        self.assertIn("if (session(1))", self.bridge)
-        self.assertIn("if (session(0))", self.bridge)
+        self.assertIn("if (session(1) != 0)", self.bridge)
+        self.assertIn("if (session(0) != 0)", self.bridge)
+        self.assertIn("if (fatal || (on && session(0) != 0))", self.bridge)
 
     def test_overlong_frame_not_reinterpreted(self):
         self.assertIn("if (!ch || have == sizeof(buf) - 1)", self.source)
