@@ -5,6 +5,7 @@ on:
       - development/r800-integration-ci-20261125
       - development/r800-display-error-propagation-20261125
       - development/r800-integration-20261127
+      - development/r800-integration-linker-20261127
   workflow_dispatch:
     inputs:
       kernel_repeatability:
@@ -27,8 +28,13 @@ jobs:
       - name: Install required DTB, AArch64 ELF and EXT4/SELinux regression tools
         run: |
           set -eu
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # Only Ubuntu's signed distribution repositories are required here.
+          # Unrelated preinstalled third-party repositories must not block tests.
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends \
             device-tree-compiler clang lld binutils e2fsprogs selinux-utils
           for tool in dtc fdtget clang ld.lld readelf mke2fs e2fsck debugfs matchpathcon; do
             command -v "$tool"
