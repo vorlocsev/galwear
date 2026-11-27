@@ -90,8 +90,8 @@ def compile_probe(ndk, hals, output, source_sha):
 
 
 def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=False,
-              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False):
-    if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context, sensors_evdev)) > 1:
+              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False, gps_fixture=False):
+    if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context, sensors_evdev, gps_fixture)) > 1:
         raise ValueError("Choose one probe mode")
     if os.geteuid() == 0:
         raise ValueError("Non-root execution required")
@@ -146,7 +146,12 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             return {p.relative_to(root).as_posix(): ("symlink:"+os.readlink(p) if p.is_symlink() else sha(p.read_bytes()))
                     for p in sorted(root.rglob("*")) if p.is_file() or p.is_symlink()}
         fixture = None
-        if sensors_evdev:
+        if gps_fixture:
+            fixture = Path(tmp)/"gps-fixture"
+            fixture.mkdir()
+            (fixture/".galwear-fixture").write_text("GALWEAR_GPS_FIXTURE_V1\n")
+            (root/"oem/r800dev").mkdir(parents=True)
+        elif sensors_evdev:
             add(probe_dir/"libevdev-fixture.so", "system/lib/libevdev-fixture.so",
                 evidence["evdev_fixture_sha256"], True)
             fixture = Path(tmp)/"evdev-ssp"
@@ -178,7 +183,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         before = snapshot()
         selected = {name: identity for name, identity in HALS.items()
                     if (not lights_fixture or identity == "lights") and
-                       (not (sensors_fixture or sensors_context or sensors_evdev) or identity == "sensors")}
+                       (not (sensors_fixture or sensors_context or sensors_evdev) or identity == "sensors") and (not gps_fixture or identity == "gps")}
         for name, identity in selected.items():
             cmd = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
                    "--clearenv", "--ro-bind", str(root), "/", "--ro-bind", qemu, "/qemu",
@@ -205,6 +210,9 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 cmd[cmd.index("/system/bin/hal-probe"):cmd.index("/system/bin/hal-probe")] = [
                     "-E", "LD_PRELOAD=/system/lib/libevdev-fixture.so"]
                 cmd.append("--sensors-evdev")
+            if gps_fixture:
+                cmd[cmd.index("--chdir"):cmd.index("--chdir")] = ["--bind", str(fixture), "/oem/r800dev"]
+                cmd.append("--gps-fixture")
             try:
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 log = proc.stdout + proc.stderr
@@ -233,10 +241,15 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
                                   (fixture/"enable").read_bytes() == b"1073741824" and
                                   (fixture/"hrm_lib_poll_delay").read_bytes() == b"1000000000")
+                if gps_fixture:
+                    fixture_marker = "HAL_GPS_FIXTURE_PASS fixes=2 nmea=3 sv=1 reconnect=1 commands=5"
+                    fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
+                                  not (fixture/"gps.sock").exists())
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
-                          (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev) or fixture_ok))
-                results[name] = {"status": ("SENSORS_EVDEV_PASS" if sensors_evdev else
+                          (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture) or fixture_ok))
+                results[name] = {"status": ("GPS_FIXTURE_PASS" if gps_fixture else
+                                             "SENSORS_EVDEV_PASS" if sensors_evdev else
                                              "SENSORS_CONTEXT_PASS" if sensors_context else
                                              "SENSORS_FIXTURE_PASS" if sensors_fixture else
                                              "LIGHTS_FIXTURE_PASS" if lights_fixture else
@@ -250,12 +263,14 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 results[name] = {"status": "REVIEW_REQUIRED", "reason": "Timeout"}
         if snapshot() != before:
             raise ValueError("Guest input changed")
-    expected_status = ("SENSORS_EVDEV_PASS" if sensors_evdev else
+    expected_status = ("GPS_FIXTURE_PASS" if gps_fixture else
+                       "SENSORS_EVDEV_PASS" if sensors_evdev else
                        "SENSORS_CONTEXT_PASS" if sensors_context else
                        "SENSORS_FIXTURE_PASS" if sensors_fixture else
                        "LIGHTS_FIXTURE_PASS" if lights_fixture else
                        "LIFECYCLE_ONLY_PASS" if lifecycle else "HMI_ONLY_PASS")
-    result = {"status": ("ARM32_SENSORS_SYNTHETIC_EVDEV_ONLY" if sensors_evdev else
+    result = {"status": ("ARM32_GPS_SYNTHETIC_BRIDGE_ONLY" if gps_fixture else
+                         "ARM32_SENSORS_SYNTHETIC_EVDEV_ONLY" if sensors_evdev else
                          "ARM32_SENSORS_SYNTHETIC_CONTEXT_ONLY" if sensors_context else
                          "ARM32_SENSORS_SYNTHETIC_SSP_ONLY" if sensors_fixture else
                          "ARM32_LIGHTS_SYNTHETIC_SYSFS_ONLY" if lights_fixture else
@@ -264,13 +279,16 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         v["status"] == expected_status for v in results.values()) else "REVIEW_REQUIRED",
         "source_sha": evidence["source_sha"], "runtime_sha256": pins,
         "hal_sha256": evidence["hal_sha256"], "results": results,
-        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context or sensors_evdev,
+        "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture,
         "lifecycle_requested": lifecycle, "lights_fixture_requested": lights_fixture,
         "sensors_fixture_requested": sensors_fixture, "sensors_context_requested": sensors_context,
         "synthetic_context_events_passed": sensors_context and all(v["status"] == expected_status for v in results.values()),
         "sensors_evdev_requested": sensors_evdev,
         "synthetic_evdev_events_passed": sensors_evdev and all(v["status"] == expected_status for v in results.values()),
         "evdev_fixture_sha256": evidence.get("evdev_fixture_sha256") if sensors_evdev else None,
+        "gps_fixture_requested": gps_fixture,
+        "synthetic_gps_callbacks_passed": gps_fixture and all(v["status"] == expected_status for v in results.values()),
+        "gps_reader_cleanup_verified": False, "gnss_hardware_verified": False,
         "sensor_events_tested": False,
         "hardware_io_methods_tested": False,
         "hardware_tested": False, "safe_to_flash": False}
@@ -294,10 +312,11 @@ def main():
     modes.add_argument("--sensors-fixture", action="store_true")
     modes.add_argument("--sensors-context", action="store_true")
     modes.add_argument("--sensors-evdev", action="store_true")
+    modes.add_argument("--gps-fixture", action="store_true")
     a = p.parse_args()
     result = (compile_probe(a.ndk, a.hals, a.output, a.source_sha) if a.action == "compile"
               else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output,
-                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev))
+                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev, a.gps_fixture))
     print(json.dumps(result, sort_keys=True))
     return 2 if result["status"] == "REVIEW_REQUIRED" else 0
 

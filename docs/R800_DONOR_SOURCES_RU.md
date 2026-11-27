@@ -516,3 +516,13 @@ Sensors HAL неизменён. Проверки: шесть физически�
 recovery и сохранение внешнего бита 30. Adapter не входит в payload.
 Не тестируются реальные evdev driver, MCU, калибровка или аппаратные
 показания. Новый CI pending.
+
+
+CI 46033939650 / job 140624467942 exact ae61126: 6 EV_REL channels,
+8 events, pressure reject and SYN_DROPPED PASS. Новый --gps-fixture
+использует private Unix socket /oem/r800dev/gps.sock: START/TIME/LOC/
+START reconnect/STOP, FIX, NMEA checksum, GSV/GSA/RMC satellite callback,
+malformed/NUL/overlong rejection. STATUS barrier and atomics. HAL unchanged.
+cleanup() не завершает reader, поэтому тест завершает процесс без dlclose.
+Реальные Tizen GPSBridge, GNSS, cleanup safety и Wear OS не подтверждены.
+Новый CI pending.

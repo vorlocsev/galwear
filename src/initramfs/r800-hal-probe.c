@@ -487,16 +487,19 @@ static int sensors_evdev(const hw_module_t *module)
     return 0;
 }
 
+#include "r800-gps-fixture.h"
+
 int main(int argc, char **argv)
 {
     if (argc != 3 && (argc != 4 ||
         (strcmp(argv[3], "--lifecycle") && strcmp(argv[3], "--lights-fixture") &&
          strcmp(argv[3], "--sensors-fixture") && strcmp(argv[3], "--sensors-context") &&
-         strcmp(argv[3], "--sensors-evdev")))) return 2;
+         strcmp(argv[3], "--sensors-evdev") && strcmp(argv[3], "--gps-fixture")))) return 2;
     if (argc == 4 && !strcmp(argv[3], "--lights-fixture") && strcmp(argv[2], "lights")) return 2;
     if (argc == 4 && (!strcmp(argv[3], "--sensors-fixture") ||
         !strcmp(argv[3], "--sensors-context") || !strcmp(argv[3], "--sensors-evdev")) &&
         strcmp(argv[2], "sensors")) return 2;
+    if (argc == 4 && !strcmp(argv[3], "--gps-fixture") && strcmp(argv[2], "gps")) return 2;
     void *handle = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fprintf(stderr, "dlopen failed: %s\n", dlerror());
@@ -517,6 +520,13 @@ int main(int argc, char **argv)
     printf("HAL_HMI_PASS %s module_api=%u hal_api=%u\n", argv[2],
            (unsigned)module->module_api_version, (unsigned)module->hal_api_version);
     int rc = 0;
+    if (argc == 4 && !strcmp(argv[3], "--gps-fixture")) {
+        rc = gps_fixture(module);
+        /* Current HAL does not join reader; never unload it while running. */
+        fflush(stdout);
+        fflush(stderr);
+        _exit(rc);
+    }
     if (argc == 4)
         rc = !strcmp(argv[3], "--lights-fixture") ? lights_fixture(module) :
              !strcmp(argv[3], "--sensors-fixture") ? sensors_fixture(module) :

@@ -283,6 +283,14 @@ jobs:
             --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
             --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
             --output "$RUNNER_TEMP/r800-sensors-evdev" --sensors-evdev
+      - name: Test GPS HAL callbacks and reconnect with private Unix socket bridge
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-phh-reference/runtime"
+          python3 build/r800_hal_dlopen_probe.py run \
+            --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
+            --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
+            --output "$RUNNER_TEMP/r800-gps-fixture" --gps-fixture
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -296,6 +304,7 @@ jobs:
             ${{ runner.temp }}/r800-sensors-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-sensors-context/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-sensors-evdev/hal-runtime-evidence.json
+            ${{ runner.temp }}/r800-gps-fixture/hal-runtime-evidence.json
           if-no-files-found: warn
           retention-days: 7
   overlay-independent:
