@@ -367,3 +367,15 @@ unreached_vendor_objects показывает объекты, не охваче�
 от bin/* (включая потенциальный dlopen HAL). Реальный порядок загрузки,
 генерация linkerconfig, dlopen и runtime не проверены. Конфигурация
 предоставляется явно; её происхождение не подтверждено.
+
+
+ARM32 Bionic HAL probe: build/r800_hal_dlopen_probe.py compile проверяет
+exact SHA и пять реально скомпилированных HAL, компилирует API28 probe.
+Подкоманда run принимает явно подготовленный trusted ARM32 runtime
+(linker, libc.so, libdl.so, libm.so, liblog.so) и JSON со SHA-256 каждого
+файла, probe-dir и те же HAL. Каждый модуль запускается отдельно в
+non-root bwrap --unshare-all с read-only гостевым деревом и qemu-arm-static.
+Проверяются dlopen RTLD_NOW, dlsym HMI, tag, module id, API и указатель
+methods->open, но сама функция open не вызывается. CI компилирует probe
+и сохраняет только JSON; запуск с реальным runtime пока не проверен.
+Не является проверкой оригинальных Android namespaces, драйверов или железа.

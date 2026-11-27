@@ -275,6 +275,21 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+      - name: Compile ARM32 Bionic HAL dlopen metadata probe (no runtime)
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          python3 build/r800_hal_dlopen_probe.py compile \
+            --ndk "$RUNNER_TEMP/android-ndk-r27c" --hals "$RUNNER_TEMP/r800-hal" \
+            --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/r800-hal-probe"
+      - name: Upload HAL probe compile evidence only
+        if: always() && github.ref_name == 'development/r800-integration-20261127'
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-hal-dlopen-probe-evidence
+          path: ${{ runner.temp }}/r800-hal-probe/hal-probe-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Compile static ARM32 watch utilities (never execute)
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
