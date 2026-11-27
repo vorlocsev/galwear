@@ -113,7 +113,7 @@ def inspect_cpio(archive: Path, init_binary: Path) -> dict:
                 raise CpioError("Embedded /init size differs from validated ELF")
         elif length != 0:
             raise CpioError(f"Unexpected content in CPIO device/directory: {name}")
-        names[name] = {"mode": mode, "size_bytes": length}
+        names[name] = {"mode": mode, "size_bytes": length, "mtime": fields[5]}
         pos = _aligned(end)
         count += 1
         if count > MAX_ENTRY_COUNT:
@@ -126,6 +126,8 @@ def inspect_cpio(archive: Path, init_binary: Path) -> dict:
         "schema": "galwear-r800-cpio-audit-v1",
         "status": "SYNTHETIC_STRUCTURE_PASS_ONLY",
         "entries_checked": count,
+        "newc_sha256": hashlib.sha256(content).hexdigest(),
+        "entry_mtimes": {name: entry["mtime"] for name, entry in sorted(names.items())},
         "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
         "embedded_init_sha256": elf["sha256"],
         "embedded_init_exact_match": True,
