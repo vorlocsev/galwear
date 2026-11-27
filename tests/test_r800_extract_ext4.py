@@ -90,6 +90,30 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertEqual(report["files"]["vendor/lib/libeffectsconfig.so"]["status"], "EXTRACTED")
         self.assertTrue(report["missing_or_ambiguous"])
 
+    def test_vendor_identity_reports_properties_and_incomplete_groups(self):
+        self.put("build.prop", b"ro.product.vendor.model=Fixture Watch\nro.vendor.build.id=FIXTURE\nro.serialno=excluded\n")
+        self.put("etc/vintf/manifest.xml", b"<manifest/>")
+        self.put("bin/vndservicemanager", b"not ELF")
+        sha = self.make_image()
+        report = extract(self.image, self.output, "vendor-identity", sha)
+        identity = report["vendor_identity"]
+        self.assertEqual(identity["properties"], {
+            "ro.product.vendor.model": "Fixture Watch", "ro.vendor.build.id": "FIXTURE"})
+        self.assertTrue(identity["vintf_manifest_present"])
+        self.assertEqual(identity["elf"]["vendor/bin/vndservicemanager"]["status"], "REJECTED")
+        self.assertFalse(identity["hidl_groups"]["wifi"]["inventory_complete"])
+        self.assertFalse(identity["identity_verified"])
+        self.assertFalse(identity["safe_to_flash"])
+
+    def test_vendor_identity_conflicting_properties(self):
+        self.put("build.prop", b"ro.product.vendor.model=One\n")
+        self.put("default.prop", b"ro.product.vendor.model=Two\n")
+        sha = self.make_image()
+        report = extract(self.image, self.output, "vendor-identity", sha)
+        self.assertEqual(report["vendor_identity"]["property_conflicts"],
+                         ["ro.product.vendor.model"])
+        self.assertFalse(report["safe_to_flash"])
+
     def test_ambiguous_glibc(self):
         self.put("lib/libc-2.24.so", b"one")
         self.put("usr/lib/libc-2.24.so", b"two")

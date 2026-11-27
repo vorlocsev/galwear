@@ -46,8 +46,71 @@ VENDOR_NAMES = (
     "lib/android.hardware.wifi.supplicant@1.0.so",
 )
 TIZEN_GPS = {name: paths for name, paths in TIZEN.items() if name.startswith("tizen/")}
+VENDOR_IDENTITY_FILES = ("build.prop", "default.prop", "etc/vintf/manifest.xml",
+                         "bin/vndservicemanager") + VENDOR_NAMES
+VENDOR_PROPERTIES = frozenset((
+    "ro.product.vendor.brand", "ro.product.vendor.manufacturer",
+    "ro.product.vendor.model", "ro.product.vendor.device", "ro.product.vendor.name",
+    "ro.vendor.build.fingerprint", "ro.vendor.build.id", "ro.vendor.build.version.sdk",
+    "ro.vendor.build.version.release", "ro.board.platform", "ro.product.cpu.abilist",
+    "ro.product.vendor.cpu.abilist", "ro.vndk.version",
+))
 PROFILES = {"tizen": TIZEN, "tizen-gps": TIZEN_GPS,
-            "vendor": {"vendor/"+n: ("/"+n,) for n in VENDOR_NAMES}}
+            "vendor": {"vendor/"+n: ("/"+n,) for n in VENDOR_NAMES},
+            "vendor-identity": {"vendor/"+n: ("/"+n,) for n in VENDOR_IDENTITY_FILES}}
+
+
+def vendor_identity(tree, files):
+    """Report observed identity and group completeness, not donor compatibility."""
+    from r800_android_linker_audit import inspect
+    properties = {}
+    conflicts = []
+    for name in ("vendor/build.prop", "vendor/default.prop"):
+        if files[name]["status"] != "EXTRACTED":
+            continue
+        p = tree / name
+        if p.stat().st_size > 1024 * 1024:
+            raise ValueError("Vendor properties exceed byte budget")
+        for line in p.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if not sep or key not in VENDOR_PROPERTIES:
+                continue
+            if not value or len(value) > 512 or not value.isprintable():
+                raise ValueError("Invalid vendor property: " + key)
+            if key in properties and properties[key] != value:
+                conflicts.append(key)
+            else:
+                properties[key] = value
+    elf = {}
+    for name, row in files.items():
+        if not (name.endswith(".so") or name.startswith("vendor/bin/")):
+            continue
+        if row["status"] != "EXTRACTED":
+            continue
+        try:
+            info = inspect((tree / name).read_bytes())
+            elf[name] = {"status": "ARM32_DYNAMIC" if info["abi"] == "arm" and
+                         info["has_dynamic"] else "REVIEW_REQUIRED",
+                         "abi": info["abi"], "elf_type": info["elf_type"],
+                         "needed": info["needed"]}
+        except (ValueError, KeyError) as exc:
+            elf[name] = {"status": "REJECTED", "reason": str(exc)}
+    groups = {}
+    for group in ("wifi", "sensors", "gnss"):
+        names = ["vendor/"+n for n in VENDOR_NAMES if
+                 ("hardware."+group+"@" in n or
+                  (group == "wifi" and ("wpa_supplicant" in n or "hardware.wifi.supplicant@" in n)))]
+        missing = [n for n in names if files[n]["status"] != "EXTRACTED"]
+        invalid = [n for n in names if n in elf and elf[n]["status"] != "ARM32_DYNAMIC"]
+        groups[group] = {"missing": missing, "elf_review": invalid,
+                         "inventory_complete": not missing and not invalid}
+    return {"properties": properties, "property_conflicts": sorted(set(conflicts)),
+            "elf": elf, "hidl_groups": groups,
+            "vintf_manifest_present": files["vendor/etc/vintf/manifest.xml"]["status"] == "EXTRACTED",
+            "identity_verified": False, "dependency_closure_verified": False,
+            "runtime_verified": False, "safe_to_flash": False}
+
 
 
 def command(tool, image, request, cwd=None):
@@ -164,6 +227,8 @@ def extract(image, output, profile, expected_sha):
                   "missing_or_ambiguous":[n for n,v in files.items() if v["status"]!="EXTRACTED"],
                   "donor_compatibility_verified":False,"xattrs_preserved":False,
                   "safe_to_flash":False}
+        if profile == "vendor-identity":
+            report["vendor_identity"] = vendor_identity(tree, files)
         (tree/"ext4-evidence.json").write_text(json.dumps(report,indent=2,sort_keys=True))
         os.rename(tree,output)
     return report
@@ -178,7 +243,10 @@ def main():
     a=p.parse_args()
     report=extract(a.image,a.output,a.profile,a.sha256)
     print(json.dumps(report,sort_keys=True))
-    return 2 if report["missing_or_ambiguous"] else 0
+    identity = report.get("vendor_identity", {})
+    review = identity.get("property_conflicts") or any(
+        item["status"] != "ARM32_DYNAMIC" for item in identity.get("elf", {}).values())
+    return 2 if report["missing_or_ambiguous"] or review else 0
 
 
 if __name__=="__main__":

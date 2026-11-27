@@ -61,3 +61,23 @@ python3 build/r800_gps_acceptance.py --out /path/to/new-gnss-report \
 угадываются. Структурное извлечение не доказывает версию ABI, подлинность
 или совместимость: перед использованием требуется проверка источника и
 статический GPS link gate. QEMU — отдельная явно запрошенная фаза.
+
+
+## Идентификация кандидата TicWatch vendor
+
+Исторический рецепт в коммите `0f865fa6adf01f85d8a5d18ccb8748441c0bb317`
+указывает `/mnt/d/r800/donor/x/images/vendor.img`, но не модель и не build ID.
+Для локального raw ext4 образа:
+
+```sh
+python3 build/r800_extract_ext4.py --profile vendor-identity \
+  --image /path/to/vendor.img --sha256 "$VENDOR_SHA256" \
+  --output /path/to/new-vendor-identity
+```
+
+Отчёт ext4-evidence.json содержит разрешённые свойства модели, производителя,
+build ID, fingerprint, SDK и ABI, наличие VINTF и инвентарь трёх групп HIDL
+(Wi-Fi, sensors, GNSS), а также статическую информацию об извлечённых ELF.
+Конфликт свойств, неполный набор и невалидные ELF требуют проверки.
+Это не проверка содержимого VINTF, подлинности образа, замыкания зависимостей
+или аппаратного runtime. Извлечённые файлы остаются локальными.
