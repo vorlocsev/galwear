@@ -14,6 +14,7 @@
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <limits.h>
+#include <stddef.h>
 #include <math.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -103,6 +104,7 @@ struct r800_hwc {
 	int logged_handle;
 	unsigned long frames;
 	uint64_t no_buffer;                /* layers prepare() saw as BACKGROUND/SIDEBAND */
+	size_t layer_stride;                /* selected once at open */
 	int allow_unknown_size;            /* explicit experimental ION compatibility */
 	int swap_rb;                       /* RGBA buffers -> BGRA panel: swap R and B */
 	int zerocopy;                      /* 1: S3CFB_WIN_CONFIG, 0: CPU copy + pan */
@@ -535,39 +537,59 @@ static int wc_present(struct r800_hwc *h, hwc_layer_1_t *l, int *retire)
 }
 
 /*
- * Layer stride. Samsung's libhwc2on1adapter (J4 vendor) is built against an
- * hwc_layer_1_t of 100 bytes (one extra int after the AOSP 96), so indexing
- * hwLayers[] with our header read every layer after the first from the wrong
- * place: the FB target was never found (its acquire fence leaked every frame,
- * hang 3), prepare() wrote composition types into the adapter's padding, and
- * "zero-copy" showed layer 0 instead of the composed frame. The last layer is
- * always the FB target, so pick the stride that puts it there.
+ * Layer stride: the caller's ABI is an explicit startup contract.
+ * Do not probe a second stride by reading beyond the caller array.
  */
-static size_t g_stride;
-static size_t layer_stride(const hwc_display_contents_1_t *c)
+/* Only the ARM32 prefix of the donor layer is assumed to match AOSP.
+ * Do not probe an alternative stride by reading beyond the caller array. */
+_Static_assert(sizeof(void *) == 4, "R800 composer requires ARM32");
+_Static_assert(sizeof(hwc_layer_1_t) == 96, "AOSP layer size");
+_Static_assert(offsetof(hwc_layer_1_t, handle) == 12, "handle offset");
+_Static_assert(offsetof(hwc_layer_1_t, acquireFenceFd) == 64, "acquire offset");
+_Static_assert(offsetof(hwc_layer_1_t, releaseFenceFd) == 68, "release offset");
+_Static_assert(offsetof(hwc_display_contents_1_t, hwLayers) == 20, "layer array offset");
+
+#define R800_MAX_LAYERS 256
+#define R800_MAX_DISPLAYS 3
+
+static size_t select_layer_stride(const char *property)
 {
-	static const size_t cand[2] = { 100, sizeof(hwc_layer_1_t) };
-	size_t s = 100;
-	int k;
-	if (c->numHwLayers > 1)
-		for (k = 0; k < 2; k++) {
-			const hwc_layer_1_t *last = (const hwc_layer_1_t *)((const char *)c->hwLayers +
-									  (c->numHwLayers - 1) * cand[k]);
-			if (last->compositionType == HWC_FRAMEBUFFER_TARGET) {
-				s = cand[k];
-				break;
-			}
-		}
-	else
-		s = g_stride ? g_stride : 100;
-	if (s != g_stride) {
-		LOGE("hwc_layer_1 stride %zu (header sizeof %zu, %zu layers)", s, sizeof(hwc_layer_1_t),
-		     c->numHwLayers);
-		g_stride = s;
-	}
-	return s;
+	/* The existing J4 donor contract is the historical default. */
+	if (!property[0] || !strcmp(property, "100"))
+		return 100;
+	if (!strcmp(property, "96"))
+		return 96;
+	return 0;
 }
-#define LAYER(c, i) ((hwc_layer_1_t *)((char *)(c)->hwLayers + (size_t)(i) * layer_stride(c)))
+
+#define LAYER(c, i) ((hwc_layer_1_t *)((char *)(c)->hwLayers + (size_t)(i) * h->layer_stride))
+
+static int validate_display(struct r800_hwc *h, const hwc_display_contents_1_t *c, int primary)
+{
+	if (!c)
+		return 0;
+	if (c->numHwLayers > R800_MAX_LAYERS)
+		return -EINVAL;
+	if (primary && c->numHwLayers) {
+		size_t i;
+		for (i = 0; i < c->numHwLayers; i++) {
+			if ((LAYER(c, i)->compositionType == HWC_FRAMEBUFFER_TARGET) !=
+			    (i == c->numHwLayers - 1))
+				return -EINVAL;
+		}
+	}
+	return 0;
+}
+
+static int validate_displays(struct r800_hwc *h, size_t n, hwc_display_contents_1_t **displays)
+{
+	if (n > R800_MAX_DISPLAYS || (n && !displays))
+		return -EINVAL;
+	for (size_t i = 0; i < n; i++)
+		if (validate_display(h, displays[i], i == 0))
+			return -EINVAL;
+	return 0;
+}
 
 /*
  * ---- Overlays (2026-11-18) ----
@@ -582,10 +604,8 @@ static size_t layer_stride(const hwc_display_contents_1_t *c)
  * vendor.hwc.r800.overlay=0 turns it off.
  *
  * Pixel format: the Exynos private handle has "... format, width, height,
- * stride ..." as consecutive ints (handle_stride() already relies on
- * width/height/stride). The format guess is checked once on the client
- * target, which is always RGBA_8888; if it does not read 1 there, overlays
- * stay off (fmt_verified = -1).
+ * stride ..." as consecutive ints. Geometry and padded capacity are
+ * checked on every submission; this remains a donor-layout heuristic.
  */
 static int ovl_enabled(struct r800_hwc *h)
 {
@@ -703,12 +723,19 @@ static int r800_prepare(hwc_composer_device_1_t *dev, size_t n, hwc_display_cont
 	struct r800_hwc *h = (struct r800_hwc *)dev;
 	size_t i;
 	int nl = 0, ok;
-	if (n < 1 || !displays[0])
-		return 0;
-	h->no_buffer = 0;
 	pthread_mutex_lock(&h->doze_lock);
+	h->ovl_n = 0;
+	if (validate_displays(h, n, displays)) {
+		LOGE("prepare: incompatible layer list (stride %zu)", h->layer_stride);
+		pthread_mutex_unlock(&h->doze_lock);
+		return -EINVAL;
+	}
+	if (n < 1 || !displays[0]) {
+		pthread_mutex_unlock(&h->doze_lock);
+		return 0;
+	}
+	h->no_buffer = 0;
 	ok = !h->power_unknown && ovl_enabled(h);
-	pthread_mutex_unlock(&h->doze_lock);
 	for (i = 0; i < displays[0]->numHwLayers; i++) {
 		hwc_layer_1_t *l = LAYER(displays[0], i);
 		if ((l->compositionType == HWC_BACKGROUND || l->compositionType == HWC_SIDEBAND) && i < 64)
@@ -728,6 +755,7 @@ static int r800_prepare(hwc_composer_device_1_t *dev, size_t n, hwc_display_cont
 	}
 	if (!h->ovl_n)
 		h->gpu_frames++;
+	pthread_mutex_unlock(&h->doze_lock);
 	return 0;
 }
 
@@ -742,6 +770,12 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 	int power_ret;
 	int present_ok;
 	pthread_mutex_lock(&h->doze_lock);
+	if (validate_displays(h, n, displays)) {
+		h->ovl_n = 0;
+		LOGE("set: incompatible layer list (stride %zu); not touching FDs", h->layer_stride);
+		pthread_mutex_unlock(&h->doze_lock);
+		return -EINVAL;
+	}
 	power_ret = doze_resume_locked(h);
 	present_ok = !power_ret && !h->blanked && !h->power_unknown && !h->doze_susp;
 
@@ -801,7 +835,33 @@ static int r800_set(hwc_composer_device_1_t *dev, size_t n, hwc_display_contents
 		if (d == 0 && h->ovl_n > 0) {
 			/* prepare() marked these layers HWC_OVERLAY: nothing was composed
 			 * into the FB target. On failure the previous frame stays up. */
-			int w, ok = present_ok && h->power_mode == HWC_POWER_MODE_NORMAL && ovl_present(h, c, &retire) == 0;
+			int w, valid = h->ovl_n <= R800_MAX_DECON_WIN;
+			for (w = 0; valid && w < h->ovl_n; w++) {
+				if (h->ovl_idx[w] >= c->numHwLayers ||
+				    LAYER(c, h->ovl_idx[w])->compositionType != HWC_OVERLAY)
+					valid = 0;
+				for (int prev = 0; valid && prev < w; prev++)
+					if (h->ovl_idx[prev] == h->ovl_idx[w])
+						valid = 0;
+			}
+			/* Every overlay must be selected exactly once. */
+			size_t overlays = 0;
+			for (i = 0; i < c->numHwLayers; i++)
+				if (LAYER(c, i)->compositionType == HWC_OVERLAY)
+					overlays++;
+			if (!valid || overlays != (size_t)h->ovl_n) {
+				h->ovl_off = 1;
+				h->ovl_n = 0;
+				for (i = 0; i < c->numHwLayers; i++) {
+					hwc_layer_1_t *l = LAYER(c, i);
+					if (l->acquireFenceFd >= 0)
+						close(l->acquireFenceFd);
+					l->acquireFenceFd = l->releaseFenceFd = -1;
+				}
+				c->retireFenceFd = -1;
+				continue;
+			}
+			int ok = present_ok && h->power_mode == HWC_POWER_MODE_NORMAL && ovl_present(h, c, &retire) == 0;
 			if (ok)
 				presented = 1;
 			for (w = 0; w < h->ovl_n; w++) {
@@ -1426,10 +1486,19 @@ static int r800_open(const hw_module_t *module, const char *name, hw_device_t **
 	*device = NULL;
 	if (!module || !name || strcmp(name, HWC_HARDWARE_COMPOSER))
 		return -EINVAL;
+	char stride_prop[PROP_VALUE_MAX] = "";
+	__system_property_get("debug.r800.layer_stride", stride_prop);
+	size_t stride = select_layer_stride(stride_prop);
+	if (!stride) {
+		LOGE("unsupported layer_stride property");
+		return -EINVAL;
+	}
 	h = calloc(1, sizeof(*h));
 	if (!h)
 		return -ENOMEM;
 	h->fb_fd = -1;
+	h->layer_stride = stride;
+	LOGI("fixed HWC layer stride %zu", stride);
 	if ((r = pthread_mutex_init(&h->lock, NULL)))
 		goto fail_alloc;
 	if ((r = pthread_cond_init(&h->cond, NULL)))
