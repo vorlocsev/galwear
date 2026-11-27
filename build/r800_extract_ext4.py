@@ -634,7 +634,115 @@ def selected_apex_payloads(tool, snapshot, scratch, vndk):
     return inventory, locations
 
 
-def system_dependency_candidates(tool, image, expected_sha, scratch, walk, properties, include_apex=False, symbols=None):
+def selected_selinux_inventory(tool, snapshot, scratch, partition):
+    """Read fixed SELinux files from one verified donor snapshot, metadata only."""
+    from r800_selinux_inventory import policy_header, contexts, MAX_POLICY, MAX_TEXT, CONTEXT
+    base = "/etc/selinux/"
+    prefixes = ("", "/system") if partition == "system" else ("", "/vendor")
+    suffix = "plat_sepolicy_and_mapping.sha256"
+    if partition == "vendor":
+        wanted = {"precompiled_sepolicy": "policy", "precompiled_sepolicy." + suffix: "id",
+                  "plat_sepolicy_vers.txt": "version", "vendor_sepolicy.cil": "cil",
+                  "vendor_file_contexts": "file_contexts",
+                  "vendor_hwservice_contexts": "hwservice_contexts"}
+    else:
+        wanted = {suffix: "id", "plat_sepolicy.cil": "cil",
+                  "plat_file_contexts": "file_contexts", "plat_hwservice_contexts": "hwservice_contexts"}
+    files = {}
+    for name, kind in wanted.items():
+        paths = [prefix + base + name for prefix in prefixes]
+        row = {"status": "MISSING"}
+        files[name] = row
+        try:
+            limit = MAX_POLICY if kind == "policy" else MAX_TEXT
+            if kind in ("id", "version"):
+                limit = 256
+            found = [(path, locate(tool, snapshot, path, limit)) for path in paths]
+            found = [(path, item) for path, item in found if item is not None]
+            if not found:
+                continue
+            if len(found) != 1:
+                row.update(status="AMBIGUOUS", paths=[path for path, _ in found])
+                continue
+            path, (inode, length) = found[0]
+            target = scratch / "selinux-member"
+            try:
+                command(tool, snapshot, "dump <%d> selinux-member" % inode, cwd=scratch)
+                st = target.lstat()
+                if not stat.S_ISREG(st.st_mode) or st.st_size != length:
+                    raise ValueError("SELinux member size mismatch")
+                raw = target.read_bytes()
+            finally:
+                target.unlink(missing_ok=True)
+            row.update(path=path, sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw))
+            if kind == "policy":
+                row["header"] = policy_header(raw)
+                if not 19 <= row["header"]["version"] <= 31 or not row["header"]["config_bits"] & 1:
+                    raise ValueError("Policy outside target MLS version range 19..31")
+            elif kind == "id":
+                value = raw.decode("ascii").strip()
+                if not re.fullmatch(r"[a-f0-9]{64}", value):
+                    raise ValueError("Invalid partition policy identifier")
+                row["identifier"] = value
+            elif kind == "version":
+                value = raw.decode("ascii").strip()
+                if not re.fullmatch(r"[0-9]{1,4}\\.[0-9]{1,4}", value):
+                    raise ValueError("Invalid policy version marker")
+                row["version"] = value
+            elif kind.endswith("_contexts"):
+                row["inventory"] = contexts(raw, kind)
+                if row["inventory"]["duplicates"] or row["inventory"]["unsupported_lines"]:
+                    raise ValueError("Context inventory requires review")
+                if kind == "hwservice_contexts":
+                    labels = {}
+                    for line in raw.decode("utf-8").splitlines():
+                        fields = line.split()
+                        if fields and not line.lstrip().startswith("#"):
+                            values = [field for field in fields[1:] if CONTEXT.fullmatch(field)]
+                            if len(values) == 1:
+                                labels[fields[0]] = values[0]
+                    row["labels"] = labels
+            else:
+                row["cil_compiled"] = False
+            row["status"] = "INVENTORIED"
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            row.update(status="REVIEW_REQUIRED", reason=str(exc))
+    return {"files": files, "policy_loaded": False, "safe_to_flash": False}
+
+
+def donor_selinux_comparison(vendor, system):
+    suffix = "plat_sepolicy_and_mapping.sha256"
+    vf, sf = vendor["files"], system.get("files", {})
+    actual = sf.get(suffix, {})
+    expected = vf.get("precompiled_sepolicy." + suffix, {})
+    ids_match = (actual.get("status") == expected.get("status") == "INVENTORIED" and
+                 actual.get("identifier") == expected.get("identifier"))
+    service_labels = {}
+    conflicts = []
+    for files, name in ((sf, "plat_hwservice_contexts"), (vf, "vendor_hwservice_contexts")):
+        row = files.get(name, {})
+        if row.get("status") != "INVENTORIED":
+            continue
+        for service, label in row["labels"].items():
+            if service in service_labels and service_labels[service] != label:
+                conflicts.append(service)
+            service_labels[service] = label
+    required = sorted(package + "::" + interface
+                      for pairs in VINTF_REQUIRED.values() for package, interface in pairs)
+    missing = [name for name in required if name not in service_labels]
+    complete = (ids_match and not missing and not conflicts and
+                vf.get("precompiled_sepolicy", {}).get("status") == "INVENTORIED" and
+                all(row["status"] == "INVENTORIED" for row in list(vf.values()) + list(sf.values())))
+    return {"status": "SELECTED_SELINUX_METADATA_ONLY" if complete else "REVIEW_REQUIRED",
+            "platform_policy_ids_match": ids_match, "required_hwservice_labels": required,
+            "missing_hwservice_labels": missing, "conflicting_hwservice_labels": sorted(set(conflicts)),
+            "selected_hwservice_labels": {k: service_labels[k] for k in required if k in service_labels},
+            "policy_compiled_verified": False, "policy_loaded_verified": False,
+            "neverallow_verified": False, "domain_transitions_verified": False,
+            "runtime_enforcing_verified": False, "safe_to_flash": False}
+
+
+def system_dependency_candidates(tool, image, expected_sha, scratch, walk, properties, include_apex=False, symbols=None, include_selinux=False):
     """Probe explicit raw EXT4 system paths for vendor external names.
 
     No APEX activation, symlink resolution, namespace ordering or guest execution.
@@ -731,6 +839,7 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
             break
     for edge in edges:
         edge["status"] = results.get(edge["needed"], {}).get("status", "NOT_INSPECTED")
+    selinux = selected_selinux_inventory(tool, snapshot, scratch, "system") if include_selinux else {}
     current = image.lstat()
     if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
             current.st_mtime_ns, current.st_ctime_ns) != identity:
@@ -753,13 +862,14 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
             "budget_exhausted": exhausted,
             "bytes_inspected": total, "apex_inspected": bool(apex_locations),
             "apex_requested": include_apex, "apex_inventory": apex_inventory,
+            "selinux_inventory": selinux,
             "apex_signature_verified": False, "apex_activation_verified": False,
             "dependency_closure_verified": False, "namespace_resolution_verified": False,
             "runtime_verified": False, "safe_to_flash": False}
 
 
 def extract(image, output, profile, expected_sha, system_image=None, system_sha=None, include_apex=False,
-            linker_config=None, linker_config_sha=None):
+            linker_config=None, linker_config_sha=None, include_selinux=False):
     image, output = Path(image).absolute(), Path(output).absolute()
     if profile not in PROFILES or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         raise ValueError("Expected donor profile and SHA-256")
@@ -771,6 +881,8 @@ def extract(image, output, profile, expected_sha, system_image=None, system_sha=
             (linker_config is not None and (profile != "vendor-identity" or
              not re.fullmatch(r"[0-9a-f]{64}", linker_config_sha)))):
         raise ValueError("Linker config and SHA-256 require vendor-identity profile")
+    if include_selinux and profile != "vendor-identity":
+        raise ValueError("SELinux inventory requires vendor-identity profile")
     if include_apex and system_image is None:
         raise ValueError("APEX inspection requires system image")
     if output.exists() or output.is_symlink():
@@ -824,7 +936,12 @@ def extract(image, output, profile, expected_sha, system_image=None, system_sha=
             identity_report = vendor_identity(tree, files)
             if system_image is not None:
                 identity_report["system_dependency_candidates"] = system_dependency_candidates(
-                    tool, system_image, system_sha, scratch, dependency_walk, identity_report["properties"], include_apex, symbols)
+                    tool, system_image, system_sha, scratch, dependency_walk, identity_report["properties"], include_apex, symbols, include_selinux)
+            if include_selinux:
+                vendor_policy = selected_selinux_inventory(tool, snapshot, scratch, "vendor")
+                system_policy = identity_report.get("system_dependency_candidates", {}).get("selinux_inventory", {})
+                identity_report["selinux_inventory"] = {"vendor": vendor_policy, "system": system_policy,
+                    "comparison": donor_selinux_comparison(vendor_policy, system_policy)}
             identity_report["symbol_candidate_audit"] = donor_symbol_candidates(
                 symbols, dependency_walk, identity_report.get("system_dependency_candidates", {}))
             if linker_config is not None:
@@ -861,9 +978,10 @@ def main():
     p.add_argument("--include-apex", action="store_true")
     p.add_argument("--linker-config", type=Path)
     p.add_argument("--linker-config-sha256")
+    p.add_argument("--include-selinux", action="store_true")
     a=p.parse_args()
     report=extract(a.image,a.output,a.profile,a.sha256,a.system_image,a.system_sha256,a.include_apex,
-                   a.linker_config,a.linker_config_sha256)
+                   a.linker_config,a.linker_config_sha256,a.include_selinux)
     print(json.dumps(report,sort_keys=True))
     identity = report.get("vendor_identity", {})
     review = identity.get("property_conflicts") or any(

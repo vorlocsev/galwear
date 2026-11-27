@@ -173,3 +173,12 @@ CONFIG_PATH_MATCHES_ONLY означает только совпадение пу
 permitted paths, реальное разрешение symlink или активацию APEX.
 Происхождение конфигурации остаётся неподтверждённым. Без параметров
 этот дополнительный аудит не запускается.
+
+
+Опция --include-selinux добавляет read-only инвентарь выбранных файлов
+vendor/system sepolicy и HIDL hwservice_contexts. Сравниваются записанные
+plat_sepolicy_and_mapping.sha256 идентификаторы и наличие точных имён
+HIDL интерфейсов, проверяется заголовок MLS policy (19..31).
+Сравнение идентификаторов не пересчитывает хеши CIL/mapping.
+Контексты wildcard, regex-переходы, system_ext/product/odm, компиляция
+CIL, neverallow, checkfc и enforcing runtime остаются вне этой проверки.

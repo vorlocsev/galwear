@@ -498,6 +498,43 @@ namespace.runtime.search.paths = /apex/com.android.runtime/${LIB}/bionic
         with self.assertRaisesRegex(ValueError, "SHA-256"):
             extractor.donor_namespace_candidates(config, "0"*64, vendor, system)
 
+    def test_selinux_selected_snapshot_policy_ids_and_hidl_labels(self):
+        import struct
+        suffix = "plat_sepolicy_and_mapping.sha256"
+        policy = struct.pack("<II8sIIII", 0xf97cff8c, 8, b"SE Linux", 30, 1, 8, 8)
+        self.put("etc/selinux/precompiled_sepolicy", policy)
+        self.put("etc/selinux/precompiled_sepolicy." + suffix, b"a"*64)
+        self.put("etc/selinux/plat_sepolicy_vers.txt", b"28.0")
+        self.put("etc/selinux/vendor_sepolicy.cil", b"(type fixture)")
+        self.put("etc/selinux/vendor_file_contexts", b"/vendor/bin/fixture u:object_r:fixture_exec:s0\n")
+        labels = "".join(package + "::" + iface + " u:object_r:fixture_hwservice:s0\n"
+                         for pairs in extractor.VINTF_REQUIRED.values() for package, iface in pairs)
+        self.put("etc/selinux/vendor_hwservice_contexts", labels.encode())
+        vendor_sha = self.make_image()
+        vendor = self.image
+        self.tree = self.root / "system-tree"
+        self.tree.mkdir()
+        self.image = self.root / "system.img"
+        self.put("etc/selinux/" + suffix, b"a"*64)
+        self.put("etc/selinux/plat_sepolicy.cil", b"(type fixture)")
+        self.put("etc/selinux/plat_file_contexts", b"/system/bin/fixture u:object_r:fixture_exec:s0\n")
+        self.put("etc/selinux/plat_hwservice_contexts", b"# fixture\n")
+        system_sha = self.make_image()
+        result = extract(vendor, self.output, "vendor-identity", vendor_sha,
+                         self.image, system_sha, include_selinux=True)
+        comparison = result["vendor_identity"]["selinux_inventory"]["comparison"]
+        self.assertEqual(comparison["status"], "SELECTED_SELINUX_METADATA_ONLY")
+        self.assertTrue(comparison["platform_policy_ids_match"])
+        self.assertFalse(comparison["policy_loaded_verified"])
+        self.assertFalse(comparison["safe_to_flash"])
+        self.put("etc/selinux/" + suffix, b"b"*64)
+        system_sha = self.make_image()
+        result = extract(vendor, self.root/"mismatch", "vendor-identity", vendor_sha,
+                         self.image, system_sha, include_selinux=True)
+        comparison = result["vendor_identity"]["selinux_inventory"]["comparison"]
+        self.assertEqual(comparison["status"], "REVIEW_REQUIRED")
+        self.assertFalse(comparison["platform_policy_ids_match"])
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")
