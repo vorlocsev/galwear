@@ -109,6 +109,42 @@ def vintf_inventory(path):
                 "compatibility_verified": False}
 
 
+# This is an identification checklist, not a list of supported devices.
+IDENTITY_REQUIRED = ("ro.product.vendor.model", "ro.product.vendor.device",
+                     "ro.vendor.build.id", "ro.vendor.build.fingerprint")
+FINGERPRINT = re.compile(
+    r"(?P<brand>[^/:\s]+)/(?P<product>[^/:\s]+)/(?P<device>[^/:\s]+):"
+    r"(?P<release>[^/:\s]+)/(?P<build_id>[^/:\s]+)/(?P<incremental>[^/:\s]+):"
+    r"(?P<type>[^/:\s]+)/(?P<tags>[^/:\s]+)")
+
+
+def identity_inventory(properties, conflicts):
+    """Report observed identity completeness and contradictions only."""
+    missing = [key for key in IDENTITY_REQUIRED if not properties.get(key)]
+    problems = ["Conflicting property: " + key for key in sorted(set(conflicts))]
+    fingerprint = properties.get("ro.vendor.build.fingerprint")
+    fields = {}
+    if fingerprint:
+        match = FINGERPRINT.fullmatch(fingerprint)
+        if not match:
+            problems.append("Unrecognized fingerprint format")
+        else:
+            fields = match.groupdict()
+            for field, key in (("brand", "ro.product.vendor.brand"),
+                               ("device", "ro.product.vendor.device"),
+                               ("build_id", "ro.vendor.build.id"),
+                               ("release", "ro.vendor.build.version.release")):
+                if key in properties and properties[key] != fields[field]:
+                    problems.append("Fingerprint differs from " + key)
+    sdk = properties.get("ro.vendor.build.version.sdk")
+    if sdk is not None and not re.fullmatch(r"[1-9][0-9]{0,2}", sdk):
+        problems.append("Unrecognized vendor SDK")
+    return {"status": "IDENTITY_FIELDS_PRESENT" if not missing and not problems else "REVIEW_REQUIRED",
+            "missing": missing, "problems": problems, "fingerprint_fields": fields,
+            "identity_verified": False, "donor_authenticity_verified": False,
+            "compatibility_verified": False, "safe_to_flash": False}
+
+
 def vendor_identity(tree, files):
     """Report observed identity and group completeness, not donor compatibility."""
     from r800_android_linker_audit import inspect
@@ -160,6 +196,7 @@ def vendor_identity(tree, files):
         "status": "REVIEW_REQUIRED", "reason": "Missing device manifest",
         "compatibility_verified": False}
     return {"properties": properties, "property_conflicts": sorted(set(conflicts)),
+            "identity_inventory": identity_inventory(properties, conflicts),
             "vintf": vintf,
             "elf": elf, "hidl_groups": groups,
             "vintf_manifest_present": files["vendor/etc/vintf/manifest.xml"]["status"] == "EXTRACTED",
@@ -302,6 +339,7 @@ def main():
     review = identity.get("property_conflicts") or any(
         item["status"] != "ARM32_DYNAMIC" for item in identity.get("elf", {}).values())
     review = review or (identity and identity["vintf"]["status"] != "DECLARATIONS_PRESENT")
+    review = review or (identity and identity["identity_inventory"]["status"] != "IDENTITY_FIELDS_PRESENT")
     return 2 if report["missing_or_ambiguous"] or review else 0
 
 

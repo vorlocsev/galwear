@@ -145,6 +145,49 @@ class Ext4ExtractionTests(unittest.TestCase):
                 self.assertEqual(report["status"], "REVIEW_REQUIRED")
                 self.assertFalse(report["compatibility_verified"])
 
+    def test_identity_inventory_requires_model_device_build_and_fingerprint(self):
+        props = {"ro.product.vendor.model": "Fixture Watch",
+                 "ro.product.vendor.device": "fixture",
+                 "ro.product.vendor.brand": "example",
+                 "ro.vendor.build.id": "BUILD1",
+                 "ro.vendor.build.fingerprint": "example/product/fixture:9/BUILD1/123:user/release-keys",
+                 "ro.vendor.build.version.release": "9",
+                 "ro.vendor.build.version.sdk": "28"}
+        report = extractor.identity_inventory(props, [])
+        self.assertEqual(report["status"], "IDENTITY_FIELDS_PRESENT")
+        self.assertEqual(report["fingerprint_fields"]["device"], "fixture")
+        self.assertFalse(report["identity_verified"])
+        self.assertFalse(report["compatibility_verified"])
+        for key in extractor.IDENTITY_REQUIRED:
+            with self.subTest(key=key):
+                incomplete = dict(props)
+                del incomplete[key]
+                report = extractor.identity_inventory(incomplete, [])
+                self.assertEqual(report["status"], "REVIEW_REQUIRED")
+                self.assertIn(key, report["missing"])
+        for key, value in (("ro.product.vendor.device", "other"),
+                           ("ro.vendor.build.id", "BUILD2"),
+                           ("ro.vendor.build.version.release", "11"),
+                           ("ro.product.vendor.brand", "other"),
+                           ("ro.vendor.build.version.sdk", "unknown"),
+                           ("ro.vendor.build.fingerprint", "malformed")):
+            with self.subTest(key=key):
+                invalid = dict(props)
+                invalid[key] = value
+                report = extractor.identity_inventory(invalid, [])
+                self.assertEqual(report["status"], "REVIEW_REQUIRED")
+                self.assertTrue(report["problems"])
+        self.assertEqual(extractor.identity_inventory(props, ["ro.product.vendor.model"])["status"],
+                         "REVIEW_REQUIRED")
+        self.put("build.prop", "".join(k + "=" + v + "\n" for k, v in props.items()).encode())
+        sha = self.make_image()
+        report = extract(self.image, self.output, "vendor-identity", sha)
+        self.assertEqual(report["vendor_identity"]["identity_inventory"]["status"],
+                         "IDENTITY_FIELDS_PRESENT")
+        self.assertFalse(report["vendor_identity"]["identity_verified"])
+        self.assertIn("vendor/default.prop", report["missing_or_ambiguous"])
+        self.assertFalse(report["safe_to_flash"])
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")
