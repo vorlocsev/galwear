@@ -92,6 +92,7 @@ jobs:
               R800_SMOKE_INITRAMFS_LIST=/scratch/r800-embedded-initramfs/initramfs.list \
                 sh /repo/build/r800_kernel_compile_smoke.sh \
                 /source /repo /scratch/r800-embedded-kernel
+              python3 -c "import json; from pathlib import Path; r=json.loads(Path(\"/scratch/r800-embedded-kernel/embedded-cpio-audit.json\").read_text()); assert r[\"entry_mtimes\"] and all(v == 0 for v in r[\"entry_mtimes\"].values()), r[\"entry_mtimes\"]"
               python3 /repo/build/r800_reproducibility_audit.py \
                 --output /scratch/r800-image-repeatability.json emit \
                 --image /scratch/r800-embedded-kernel/arch/arm64/boot/Image \
@@ -119,6 +120,7 @@ jobs:
           path: |
             ${{ runner.temp }}/r800-image-repeatability.json
             ${{ runner.temp }}/r800-apk-inventory.json
+            ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
           if-no-files-found: error
           retention-days: 7
 
@@ -145,10 +147,13 @@ jobs:
             --image-b "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json"
       - name: Compare Image, CPIO, init, compiler, configuration and container hashes
         run: |
+          rc=0
           python3 build/r800_reproducibility_audit.py \
             --output "$RUNNER_TEMP/r800-two-image-comparison.json" compare \
             --first "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-a/r800-image-repeatability.json" \
-            --second "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json"
+            --second "$RUNNER_TEMP/r800-two-builds/r800-image-evidence-b/r800-image-repeatability.json" || rc=$?
+          cat "$RUNNER_TEMP/r800-two-image-comparison.json"
+          test "$rc" -eq 0
           python3 - <<'PY'
           import json, os
           from pathlib import Path
