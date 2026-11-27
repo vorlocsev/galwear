@@ -7,6 +7,8 @@ on:
     paths:
       - ".github/workflows/r800-kernel-repeatability.yml"
       - "build/r800_reproducibility_audit.py"
+      - "build/r800_kernel_diff_evidence.py"
+      - "tests/test_kernel_diff_evidence.py"
       - "build/r800_apk_inventory.py"
       - "tests/test_apk_inventory.py"
       - "build/r800_kernel_compile_smoke.sh"
@@ -46,6 +48,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p 'test_apk_inventory.py' -v
           python3 -m unittest discover -s tests -p 'test_reproducibility_audit.py' -v
+          python3 -m unittest discover -s tests -p 'test_kernel_diff_evidence.py' -v
           python3 -m unittest discover -s tests -p 'test_readonly_init.py' -v
           python3 -m unittest discover -s tests -p 'test_embedded_initramfs.py' -v
           python3 -m unittest discover -s tests -p 'test_cpio_audit.py' -v
@@ -106,6 +109,7 @@ jobs:
                 --galwear-commit "$GITHUB_SHA" \
                 --container-image-id "$R800_CONTAINER_IMAGE_ID" \
                 --runner-replica "$R800_REPLICA"
+              python3 /repo/build/r800_kernel_diff_evidence.py --root /scratch/r800-embedded-kernel --output /scratch/r800-kernel-diff-evidence.json
               apk info -v > /scratch/apk-after.txt
               python3 /repo/build/r800_apk_inventory.py \
                 --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
@@ -120,6 +124,7 @@ jobs:
           name: r800-image-evidence-${{ matrix.replica }}
           path: |
             ${{ runner.temp }}/r800-image-repeatability.json
+            ${{ runner.temp }}/r800-kernel-diff-evidence.json
             ${{ runner.temp }}/r800-apk-inventory.json
             ${{ runner.temp }}/r800-embedded-kernel/embedded-cpio-audit.json
           if-no-files-found: error
