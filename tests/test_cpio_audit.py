@@ -62,6 +62,30 @@ class CpioAuditTests(unittest.TestCase):
         self.assertFalse(result["kernel_boot_tested"])
         self.assertFalse(result["safe_to_flash"])
 
+    def test_regular_file_mtime_changes_archive_not_elf_hash(self):
+        before = audit.inspect_cpio(self.cpio, self.init)
+        raw = bytearray(self.cpio.read_bytes())
+        pos = 0
+        while raw[pos:pos + 6] == b"070701":
+            name_length = int(raw[pos + 94:pos + 102], 16)
+            size = int(raw[pos + 54:pos + 62], 16)
+            name = raw[pos + 110:pos + 110 + name_length - 1]
+            if name == b"init":
+                raw[pos + 46:pos + 54] = b"00000001"
+                break
+            pos = ((pos + 110 + name_length + 3) & ~3)
+            pos = (pos + size + 3) & ~3
+        else:
+            self.fail("Synthetic init entry missing")
+        self.cpio.write_bytes(raw)
+        after = audit.inspect_cpio(self.cpio, self.init)
+        self.assertEqual(before["embedded_init_sha256"], after["embedded_init_sha256"])
+        self.assertNotEqual(before["archive_sha256"], after["archive_sha256"])
+        self.assertNotEqual(before["newc_sha256"], after["newc_sha256"])
+        self.assertEqual(before["entry_mtimes"]["init"], 0)
+        self.assertEqual(after["entry_mtimes"]["init"], 1)
+
+
     def test_gzip_wrapped_newc_passes(self):
         self.cpio.write_bytes(gzip.compress(make_newc(self.entries), mtime=0))
         result = audit.inspect_cpio(self.cpio, self.init)
