@@ -188,6 +188,52 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertIn("vendor/default.prop", report["missing_or_ambiguous"])
         self.assertFalse(report["safe_to_flash"])
 
+    def test_hidl_direct_dependencies_distinguish_candidate_scope(self):
+        def obj(needed=(), soname=None, status="ARM32_DYNAMIC", elf_type="ET_DYN",
+                search=False):
+            return {"status": status, "needed": list(needed), "soname": soname,
+                    "elf_type": elf_type, "custom_search_path": search}
+        service = "vendor/bin/hw/test-service"
+        same = "vendor/lib/libsame.so"
+        other = "vendor/lib/libother.so"
+        bad = "vendor/lib/libbad.so"
+        absent = "vendor/lib/libmissing.so"
+        elf = {service: obj(("libsame.so", "libother.so", "libbad.so", "libmissing.so",
+                             "libhwonly.so")),
+               same: obj(soname="libsame.so"),
+               other: obj(soname="libother.so"),
+               bad: obj(soname="libwrong.so"),
+               "vendor/lib/hw/libhwonly.so": obj(soname="libhwonly.so")}
+        report = extractor.hidl_dependency_inventory(elf, [service, same, absent])
+        statuses = {e["needed"]: e["status"] for e in report["edges"]}
+        self.assertEqual(statuses, {"libsame.so": "SAME_GROUP_CANDIDATE",
+                                   "libother.so": "OTHER_GROUP_CANDIDATE",
+                                   "libbad.so": "CANDIDATE_REJECTED",
+                                   "libmissing.so": "OUTSIDE_SELECTED_INVENTORY",
+                                   "libhwonly.so": "OUTSIDE_SELECTED_INVENTORY"})
+        self.assertEqual(report["external_names"], ["libhwonly.so", "libmissing.so"])
+        self.assertEqual(report["elf_review"][0]["object"], absent)
+        self.assertEqual(report["status"], "REVIEW_REQUIRED")
+        self.assertFalse(report["dependency_closure_verified"])
+        self.assertFalse(report["namespace_resolution_verified"])
+
+    def test_hidl_direct_inventory_never_claims_closure(self):
+        service = "vendor/bin/hw/test-service"
+        lib = "vendor/lib/libfixture.so"
+        elf = {service: {"status": "ARM32_DYNAMIC", "needed": ["libfixture.so"],
+                         "custom_search_path": False},
+               lib: {"status": "ARM32_DYNAMIC", "needed": [], "elf_type": "ET_DYN",
+                     "soname": "libfixture.so", "custom_search_path": False}}
+        report = extractor.hidl_dependency_inventory(elf, [service, lib])
+        self.assertEqual(report["status"], "DIRECT_INVENTORY_ONLY")
+        self.assertFalse(report["dependency_closure_verified"])
+        elf[service]["custom_search_path"] = True
+        self.assertEqual(extractor.hidl_dependency_inventory(elf, [service, lib])["status"],
+                         "REVIEW_REQUIRED")
+        elf[lib]["elf_type"] = "ET_EXEC"
+        self.assertEqual(extractor.hidl_dependency_inventory(elf, [service, lib])["edges"][0]["status"],
+                         "CANDIDATE_REJECTED")
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")

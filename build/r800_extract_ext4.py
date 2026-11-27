@@ -145,6 +145,45 @@ def identity_inventory(properties, conflicts):
             "compatibility_verified": False, "safe_to_flash": False}
 
 
+def hidl_dependency_inventory(elf, names):
+    """Classify direct dependencies in the selected donor inventory only.
+
+    /vendor/lib is the explicit candidate directory for ARM32 here.
+    Never infer Android namespace resolution or treat lib/hw as a search path.
+    """
+    objects = sorted(n for n in names if n.startswith("vendor/bin/") or n.endswith(".so"))
+    edges, review = [], []
+    for name in objects:
+        info = elf.get(name)
+        if not info or info["status"] != "ARM32_DYNAMIC":
+            review.append({"object": name, "reason": "Missing or invalid ELF"})
+            continue
+        if info["custom_search_path"]:
+            review.append({"object": name, "reason": "RPATH/RUNPATH requires review"})
+        for dep in sorted(info["needed"]):
+            candidate = "vendor/lib/" + dep
+            provider = elf.get(candidate)
+            if provider is None:
+                status = "OUTSIDE_SELECTED_INVENTORY"
+            elif (provider["status"] != "ARM32_DYNAMIC" or
+                  provider["elf_type"] != "ET_DYN" or
+                  provider["soname"] not in (None, dep)):
+                status = "CANDIDATE_REJECTED"
+            elif candidate in names:
+                status = "SAME_GROUP_CANDIDATE"
+            else:
+                status = "OTHER_GROUP_CANDIDATE"
+            edges.append({"from": name, "needed": dep, "candidate": candidate,
+                          "status": status})
+    return {"status": "DIRECT_INVENTORY_ONLY" if not review and all(
+                e["status"] == "SAME_GROUP_CANDIDATE" for e in edges) else "REVIEW_REQUIRED",
+            "objects": objects, "edges": edges, "elf_review": review,
+            "external_names": sorted({e["needed"] for e in edges
+                                      if e["status"] == "OUTSIDE_SELECTED_INVENTORY"}),
+            "dependency_closure_verified": False, "namespace_resolution_verified": False,
+            "runtime_verified": False, "safe_to_flash": False}
+
+
 def vendor_identity(tree, files):
     """Report observed identity and group completeness, not donor compatibility."""
     from r800_android_linker_audit import inspect
@@ -179,7 +218,8 @@ def vendor_identity(tree, files):
                          info["has_dynamic"] and (not name.endswith(".so") or
                          info["elf_type"] == "ET_DYN") else "REVIEW_REQUIRED",
                          "abi": info["abi"], "elf_type": info["elf_type"],
-                         "needed": info["needed"]}
+                         "needed": info["needed"], "soname": info["soname"],
+                         "custom_search_path": info["custom_search_path"]}
         except (ValueError, KeyError) as exc:
             elf[name] = {"status": "REJECTED", "reason": str(exc)}
     groups = {}
@@ -190,7 +230,8 @@ def vendor_identity(tree, files):
         missing = [n for n in names if files[n]["status"] != "EXTRACTED"]
         invalid = [n for n in names if n in elf and elf[n]["status"] != "ARM32_DYNAMIC"]
         groups[group] = {"missing": missing, "elf_review": invalid,
-                         "inventory_complete": not missing and not invalid}
+                         "inventory_complete": not missing and not invalid,
+                         "direct_dependencies": hidl_dependency_inventory(elf, names)}
     manifest = "vendor/etc/vintf/manifest.xml"
     vintf = vintf_inventory(tree / manifest) if files[manifest]["status"] == "EXTRACTED" else {
         "status": "REVIEW_REQUIRED", "reason": "Missing device manifest",
