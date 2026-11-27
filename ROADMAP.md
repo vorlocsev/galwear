@@ -14,6 +14,7 @@
 | BusyBox и Wi-Fi | Статическая сборка и синтетические проверки, не ассоциация с AP | [BusyBox](../../actions/runs/45967733605), [Wi-Fi](../../actions/runs/45968088781) |
 | Bluetooth и KeepWifi | ARM32 vendor HAL и Java/DEX compile; runtime не проверен | [665f522](../../actions/runs/45990278323) |
 | Единое дерево компонентов | 45 файлов, реальная сборка в одном runner, SHA-256 и права доступа | [f629153](../../actions/runs/45990639830) |
+| Приёмка компонентов и donor hold | 45 файлов приняты, 35 входов отсутствуют; stale SHA и изменённый DEX отклонены | [b586376](../../actions/runs/45993177399) |
 | Vendor / Payload / доноры | Синтетические проверки формата, инвентаря, хешей и отказов | [5fa9b00](../../actions/runs/45987707528) |
 | GNSS | 39 PASS, 4 NOT_TESTED, CONSISTENCY_PASS; host-only | [887d2b0](../../actions/runs/45985821319) |
 | PIT / NetOdin | Синтетические проверки, отказ до передачи при неверной геометрии | [78c1f26](../../actions/runs/45985998339) |

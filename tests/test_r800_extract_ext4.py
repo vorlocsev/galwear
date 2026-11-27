@@ -50,6 +50,39 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.image.read_bytes()).hexdigest(), sha)
         self.assertFalse(report["safe_to_flash"])
 
+    def test_gps_profile_extracts_only_four_resolved_libraries(self):
+        names = {"libc.so.6": "libc-2.24.so", "libdl.so.2": "libdl-2.24.so",
+                 "libpthread.so.0": "libpthread-2.24.so", "ld-linux.so.3": "ld-2.24.so"}
+        for dest, source in names.items():
+            self.put("lib/"+source, dest.encode())
+        self.put("usr/lib/firmware/"+HCD, b"excluded radio")
+        self.put("home/user/private.txt", b"excluded private")
+        sha = self.make_image()
+        report = extract(self.image, self.output, "tizen-gps", sha)
+        self.assertEqual(set(report["files"]), {"tizen/"+n for n in names})
+        self.assertEqual(report["missing_or_ambiguous"], [])
+        for name in names:
+            self.assertEqual((self.output/"tizen"/name).read_bytes(), name.encode())
+        self.assertFalse((self.output/"payload").exists())
+        self.assertFalse((self.output/"home").exists())
+        self.assertFalse(report["donor_compatibility_verified"])
+        self.assertFalse(report["safe_to_flash"])
+
+    def test_gps_profile_missing_loader_blocks(self):
+        self.put("lib/libc-2.24.so", b"synthetic libc")
+        sha = self.make_image()
+        report = extract(self.image, self.output, "tizen-gps", sha)
+        self.assertIn("tizen/ld-linux.so.3", report["missing_or_ambiguous"])
+        self.assertEqual(report["files"]["tizen/ld-linux.so.3"]["status"], "MISSING")
+
+    def test_gps_profile_ambiguous_loader_blocks(self):
+        self.put("lib/ld-2.24.so", b"one")
+        self.put("usr/lib/ld-2.24.so", b"two")
+        sha = self.make_image()
+        report = extract(self.image, self.output, "tizen-gps", sha)
+        self.assertEqual(report["files"]["tizen/ld-linux.so.3"]["status"], "AMBIGUOUS")
+        self.assertFalse((self.output/"tizen/ld-linux.so.3").exists())
+
     def test_vendor_profile(self):
         self.put("lib/libeffectsconfig.so", b"synthetic library")
         sha = self.make_image()

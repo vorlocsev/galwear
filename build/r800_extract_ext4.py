@@ -22,6 +22,7 @@ TIZEN = {
     "tizen/libc.so.6": ("/lib/libc-2.24.so", "/usr/lib/libc-2.24.so"),
     "tizen/libdl.so.2": ("/lib/libdl-2.24.so", "/usr/lib/libdl-2.24.so"),
     "tizen/libpthread.so.0": ("/lib/libpthread-2.24.so", "/usr/lib/libpthread-2.24.so"),
+    "tizen/ld-linux.so.3": ("/lib/ld-2.24.so", "/usr/lib/ld-2.24.so"),
     "payload/fw/bt/" + HCD: ("/usr/lib/firmware/" + HCD,),
     "payload/fw/bcmdhd_sta.bin": ("/usr/lib/firmware/bcmdhd_sta.bin",),
     "payload/fw/nvram_net.txt": ("/usr/lib/firmware/nvram_net.txt",),
@@ -44,7 +45,9 @@ VENDOR_NAMES = (
     "lib/android.hardware.wifi@1.0.so",
     "lib/android.hardware.wifi.supplicant@1.0.so",
 )
-PROFILES = {"tizen": TIZEN, "vendor": {"vendor/"+n: ("/"+n,) for n in VENDOR_NAMES}}
+TIZEN_GPS = {name: paths for name, paths in TIZEN.items() if name.startswith("tizen/")}
+PROFILES = {"tizen": TIZEN, "tizen-gps": TIZEN_GPS,
+            "vendor": {"vendor/"+n: ("/"+n,) for n in VENDOR_NAMES}}
 
 
 def command(tool, image, request, cwd=None):
