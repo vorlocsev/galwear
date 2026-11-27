@@ -1894,6 +1894,38 @@ class LinkerTests(unittest.TestCase):
         self.assertFalse(out["egl_initialized"])
         self.assertFalse(out["gpu_driver_compatible"])
 
+    def test_graphics_dependencies_include_dlopen_candidates(self):
+        self.graphics_fixture()
+        self.put("vendor/lib/egl/libEGL_mali.so",
+                 fixture("arm", needed=("libgfxdep.so",), sonames=("libEGL_mali.so",)))
+        self.put("vendor/lib/libgfxdep.so", fixture("arm", sonames=("libgfxdep.so",)))
+        out = audit.audit_graphics_dependencies(self.root)
+        root = "/vendor/lib/egl/libEGL_mali.so"
+        self.assertIn(root, out["roots"])
+        self.assertEqual(out["graph"]["dependency_edges"][root]["libgfxdep.so"],
+                         ["/vendor/lib/libgfxdep.so"])
+        self.assertIn(root, out["uninspected_symbol_tables"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+        self.assertFalse(out["safe_to_flash"])
+
+    def test_graphics_dependencies_wrong_abi_and_missing_dependency(self):
+        self.graphics_fixture()
+        self.put("vendor/lib/egl/libEGL_mali.so",
+                 fixture("arm", needed=("libgfxdep.so",)))
+        self.put("vendor/lib/libgfxdep.so", fixture("arm64"))
+        self.put("vendor/lib/egl/libGLESv2_mali.so", fixture("arm64"))
+        out = audit.audit_graphics_dependencies(self.root)
+        self.assertIn("/vendor/lib/egl/libGLESv2_mali.so", out["invalid_library_roots"])
+        self.assertIn({"from": "/vendor/lib/egl/libEGL_mali.so", "needed": "libgfxdep.so",
+                       "abi": "arm"}, out["graph"]["missing_candidates"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
+    def test_graphics_dependencies_empty_root(self):
+        out = audit.audit_graphics_dependencies(self.root)
+        self.assertEqual(out["roots"], [])
+        self.assertIsNone(out["graph"])
+        self.assertEqual(out["status"], "REVIEW_REQUIRED")
+
     def test_graphics_wrong_library_abi(self):
         self.graphics_fixture()
         self.put("vendor/lib/egl/libEGL_mali.so", fixture("arm64"))

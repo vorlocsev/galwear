@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline graphics candidate inventory; does not initialize EGL or access devices."""
 from __future__ import annotations
+import hashlib
 import re
 import stat
 
@@ -81,7 +82,12 @@ def audit(root, init, vintf, inspect_elf, kernel_config=None):
                                     not info["has_dynamic"]):
                                 raise ValueError("Graphics library is not compatible dynamic ELF")
                             libraries[guest] = {"abi": abi, "soname": info["soname"],
-                                                "needed": info["needed"]}
+                                                "sha256": hashlib.sha256(data).hexdigest(),
+                                                "bytes": len(data), "needed": info["needed"],
+                                                "version_needs": info["version_needs"],
+                                                "version_definitions": info["version_definitions"],
+                                                "dynamic_symbol_count": info["dynamic_symbol_count"],
+                                                "custom_search_path": info["custom_search_path"]}
                         except (OSError, ValueError) as exc:
                             errors.append(guest + ": " + str(exc))
                             if "budget exceeded" in str(exc):

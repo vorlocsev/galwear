@@ -2,6 +2,7 @@
 """Bounded offline ELF DT_NEEDED inventory. Not Android namespace resolution."""
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -935,9 +936,55 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
             "android_boot_tested": False, "safe_to_flash": False}
 
 
+def audit_graphics_dependencies(root, kernel_config=None, dtb=None):
+    """Explicit dlopen roots discovered from graphics inventory, not just init.
+    
+    The generic linker graph deliberately does not invent EGL loader search
+    order or namespaces for plugins. This is candidate evidence, not runtime.
+    """
+    inventory = r800_graphics_inventory.audit(
+        root, r800_init_inventory.audit(root), r800_vintf_inventory.audit(root),
+        inspect, kernel_config)
+    roots = sorted(set(path for path, info in inventory["libraries"].items() if info) |
+                   {s["path"] for s in inventory["services"] if s["elf"]})
+    invalid = sorted(path for path, info in inventory["libraries"].items() if info is None)
+    report = {"status": "REVIEW_REQUIRED", "roots": roots, "invalid_library_roots": invalid,
+              "inventory": inventory, "graph": None, "errors": [],
+              "namespace_resolution_verified": False, "egl_initialized": False,
+              "hardware_tested": False, "safe_to_flash": False}
+    if not roots or len(roots) > MAX_NODES:
+        report["errors"].append("Empty or oversized graphics root set")
+        return report
+    graph = audit(root, roots, kernel_config, dtb)
+    report["graph"] = graph
+    # Detect changed graphics library identities between the discovery scan
+    # and the later graph scan. The input tree must remain read-only.
+    for path, entry in inventory["libraries"].items():
+        if entry is None:
+            continue
+        try:
+            raw = read_regular(guest_path(root, path), MAX_ELF)
+            if hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+                raise ValueError("Graphics input changed")
+            if graph["objects"].get(path) is None:
+                raise ValueError("Graphics root missing from dependency graph")
+        except (OSError, ValueError) as exc:
+            report["errors"].append(path + ": " + str(exc))
+    unknown_symbols = sorted(path for path, info in graph["objects"].items()
+                             if info and info["has_dynamic"] and info["dynamic_symbol_count"] is None)
+    report["uninspected_symbol_tables"] = unknown_symbols
+    if (not invalid and not report["errors"] and not unknown_symbols and
+            inventory["status"] == "STATIC_GRAPHICS_INVENTORY_ONLY" and
+            graph["status"] == "CANDIDATES_FOUND_ONLY"):
+        report["status"] = "STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY"
+    return report
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", required=True, type=Path)
+    p.add_argument("--graphics-dependencies", action="store_true",
+                   help="Audit discovered graphics ELF and service roots, including dlopen candidates")
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--dtb", type=Path, help="Optional exact target DTB for static display inventory")
     p.add_argument("--config", type=Path, help="Optional exact target kernel .config")
@@ -946,10 +993,11 @@ def main():
         p.error("Report must be outside guest root")
     dtb = read_regular(args.dtb, r800_display_inventory.MAX_DTB) if args.dtb else None
     kernel_config = parse_kernel_config(read_regular(args.config, MAX_CONFIG)) if args.config else None
-    result = audit(args.root, kernel_config=kernel_config, dtb=dtb)
+    result = (audit_graphics_dependencies(args.root, kernel_config, dtb)
+              if args.graphics_dependencies else audit(args.root, kernel_config=kernel_config, dtb=dtb))
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(result["status"])
-    return 0 if result["status"] == "CANDIDATES_FOUND_ONLY" else 2
+    return 0 if result["status"] in ("CANDIDATES_FOUND_ONLY", "STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY") else 2
 
 
 if __name__ == "__main__":

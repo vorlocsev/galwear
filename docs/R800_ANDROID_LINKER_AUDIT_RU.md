@@ -44,3 +44,21 @@ CANDIDATES_FOUND_ONLY не означает, что Android linker реальн�
 проприетарные образы и не переходить к аппаратной прошивке.
 
 `safe_to_flash=false` при любом результате.
+
+## Отдельный аудит графических зависимостей
+
+```sh
+python3 build/r800_android_linker_audit.py --root /path/to/android-root \
+  --graphics-dependencies --output /tmp/r800-graphics-deps.json
+```
+
+В отличие от стандартных корней init, профиль включает обнаруженные EGL,
+GLES, Mali, gralloc, hwcomposer и graphics HAL ELF, а также исполняемые
+файлы графических сервисов. Инвентарь фиксирует SHA-256, ABI, SONAME,
+DT_NEEDED и сведения о версиях символов. Транзитивный граф использует
+существующие проверки ELF, версий, кандидатов символов и relocation.
+Отсутствующие/неоднозначные зависимости и неисследованные таблицы символов
+требуют REVIEW_REQUIRED. Поиск кандидатов использует общие каталоги ABI,
+не моделирует EGL dlopen или реальные правила выбора драйвера; даже
+STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY не доказывает runtime.
+Синтетический CI не содержит реальных донорских образов.
