@@ -140,8 +140,10 @@ def build(components, source_sha, output):
         image = result/"overlay-test.ext4"
         with image.open("xb") as stream:
             stream.truncate(IMAGE_BYTES)
-        fs_uuid = str(uuid.UUID(sha(manifest_raw)[:32]))
-        hash_seed = str(uuid.UUID(sha(manifest_raw + b":dirhash")[:32]))
+        overlay_identity = json.dumps({"source_sha": source_sha, "members": rows},
+                                      sort_keys=True, separators=(",", ":")).encode("utf-8")
+        fs_uuid = str(uuid.UUID(sha(overlay_identity)[:32]))
+        hash_seed = str(uuid.UUID(sha(overlay_identity + b":dirhash")[:32]))
         for path in sorted(tree.rglob("*")):
             os.utime(path, (FIXED_EPOCH, FIXED_EPOCH))
         os.utime(tree, (FIXED_EPOCH, FIXED_EPOCH))
@@ -178,6 +180,7 @@ def build(components, source_sha, output):
             raise ValueError("Component manifest changed")
         report = {"status": "COMPILED_OVERLAY_EXT4_TEST_ONLY", "source_sha": source_sha,
                   "component_manifest_sha256": sha(manifest_raw), "image": before,
+                  "overlay_identity_sha256": sha(overlay_identity),
                   "fixed_epoch": FIXED_EPOCH, "filesystem_uuid": fs_uuid, "directory_hash_seed": hash_seed,
                   "mke2fs_version": subprocess.run([tools["mke2fs"], "-V"], capture_output=True,
                                                     text=True, check=True, timeout=10).stderr.strip(),
@@ -192,13 +195,41 @@ def build(components, source_sha, output):
     return report
 
 
+def build_from_hals(hal_dir, vendor_sources, source_sha, output):
+    """Independently stage five validated HALs and six configs; no other components."""
+    from r800_stage_hals import stage
+    import stat
+    with tempfile.TemporaryDirectory(dir=output.absolute().parent, prefix="r800-hals-") as tmp:
+        root = Path(tmp)/"components"
+        stage(hal_dir, vendor_sources, root)
+        files = {}
+        for item in sorted(root.rglob("*")):
+            if item.is_file():
+                raw = read_regular(item, MAX_FILE)
+                files[item.relative_to(root).as_posix()] = {
+                    "sha256": sha(raw), "bytes": len(raw),
+                    "mode": oct(stat.S_IMODE(item.stat().st_mode))}
+        manifest = {"status": "PARTIAL_COMPILED_COMPONENTS_ONLY", "source_sha": source_sha,
+                    "scope": "HAL_OVERLAY_ONLY", "files": files,
+                    "payload_complete": False, "vendor_image_built": False,
+                    "runtime_verified": False, "safe_to_flash": False}
+        (root/"component-evidence.json").write_text(json.dumps(manifest, sort_keys=True))
+        return build(root, source_sha, output)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--components", type=Path, required=True)
+    p.add_argument("--components", type=Path)
+    p.add_argument("--hal-dir", type=Path)
+    p.add_argument("--vendor-sources", type=Path)
     p.add_argument("--source-sha", required=True)
     p.add_argument("--output", type=Path, required=True)
     a = p.parse_args()
-    print(json.dumps(build(a.components, a.source_sha, a.output), sort_keys=True))
+    if bool(a.components) == bool(a.hal_dir) or bool(a.hal_dir) != bool(a.vendor_sources):
+        p.error("Specify components or hal-dir with vendor-sources")
+    report = (build(a.components, a.source_sha, a.output) if a.components else
+              build_from_hals(a.hal_dir, a.vendor_sources, a.source_sha, a.output))
+    print(json.dumps(report, sort_keys=True))
     return 0
 
 

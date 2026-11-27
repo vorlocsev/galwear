@@ -142,6 +142,105 @@ jobs:
           path: ${{ runner.temp }}/r800-integrated-regression.json
           if-no-files-found: warn
           retention-days: 7
+  overlay-independent:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install exact NDK release without sdkmanager
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          curl --fail --location --retry 3 --connect-timeout 30 --max-time 600 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o "$archive"
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e "$archive" | sha1sum --check -
+          unzip -q "$archive" -d "$RUNNER_TEMP"
+          rm -f "$archive"
+          test -x "$RUNNER_TEMP/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang"
+      - name: Fetch tinyalsa header source by immutable commit
+        run: |
+          git init "$RUNNER_TEMP/tinyalsa"
+          git -C "$RUNNER_TEMP/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
+          git -C "$RUNNER_TEMP/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
+          git -C "$RUNNER_TEMP/tinyalsa" checkout --detach FETCH_HEAD
+      - name: Compare DECON ABI against pinned kernel on ARM32 and ARM64
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          base=https://raw.githubusercontent.com/xanderlent/COMBINED_android-kernel-exynos/50db73fc799f20a7120a8b5f653b16cc123d856f
+          curl --fail --location --retry 3 --max-time 90 "$base/drivers/video/fbdev/exynos/dpu30/decon.h" -o "$RUNNER_TEMP/decon.h"
+          python3 build/r800_decon_abi_check.py \
+            --kernel-header "$RUNNER_TEMP/decon.h" --mirror src/hal/r800_decon_abi.h \
+            --ndk "$RUNNER_TEMP/android-ndk-r27c" --scratch "$RUNNER_TEMP/decon-layout"
+      - name: Compile and link five HALs (Audio experimental)
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+      - name: Independently pack compiled HAL overlay
+        run: |
+          set -eu
+          for tool in mke2fs e2fsck debugfs; do command -v "$tool"; done
+          python3 build/r800_compiled_overlay_ext4.py \
+            --hal-dir "$RUNNER_TEMP/r800-hal" --vendor-sources src/vendor \
+            --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/r800-independent-overlay"
+          rm -- "$RUNNER_TEMP/r800-independent-overlay/overlay-test.ext4"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r800-independent-overlay-evidence
+          path: ${{ runner.temp }}/r800-independent-overlay/overlay-ext4-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+  overlay-cross-host:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    needs: [hal-compile, overlay-independent]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: r800-real-component-stage-evidence
+          path: full
+      - uses: actions/download-artifact@v4
+        with:
+          name: r800-independent-overlay-evidence
+          path: independent
+      - name: Compare independent compiled overlay images using metadata only
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          matches = list(pathlib.Path("full").rglob("overlay-ext4-evidence.json"))
+          assert len(matches) == 2, matches
+          first = [p for p in matches if p.parent.name == "r800-overlay-ext4"]
+          assert len(first) == 1, first
+          a = json.loads(first[0].read_text())
+          b = json.loads(pathlib.Path("independent/overlay-ext4-evidence.json").read_text())
+          for report in (a, b):
+              assert report["source_sha"] == os.environ["GITHUB_SHA"]
+              assert report["status"] == "COMPILED_OVERLAY_EXT4_TEST_ONLY"
+              assert report["safe_to_flash"] is False
+              assert report["fixture_metadata_verified"] is True
+          keys = ("overlay_identity_sha256", "members", "inode_metadata", "image",
+                  "filesystem_uuid", "directory_hash_seed", "fixed_epoch", "mke2fs_version")
+          different = [key for key in keys if a[key] != b[key]]
+          report = {"status": "OVERLAY_EXT4_CROSS_HOST_MATCH" if not different else "REVIEW_REQUIRED",
+                    "source_sha": a["source_sha"], "different_fields": different,
+                    "first_image": a["image"], "second_image": b["image"],
+                    "first_overlay_identity": a["overlay_identity_sha256"],
+                    "second_overlay_identity": b["overlay_identity_sha256"],
+                    "same_os_family": "ubuntu-24.04", "cross_distribution_verified": False,
+                    "complete_vendor_image_built": False, "safe_to_flash": False}
+          pathlib.Path("overlay-cross-host.json").write_text(json.dumps(report, indent=2)+"\n")
+          print(report["status"], different, a["image"]["sha256"], b["image"]["sha256"])
+          assert not different
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r800-overlay-cross-host-evidence
+          path: overlay-cross-host.json
+          if-no-files-found: warn
+          retention-days: 7
   hal-compile:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
