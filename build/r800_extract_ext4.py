@@ -276,7 +276,96 @@ MAX_WALK_DEPTH = 16
 MAX_WALK_EDGES = 4096
 
 
-def vendor_dependency_walk(tool, snapshot, scratch, tree, files):
+class DonorSymbolInventory:
+    """Bounded transient ELF symbol metadata; never publish raw library bytes."""
+
+    def __init__(self):
+        self.objects = {}
+        self.records = 0
+        self.name_bytes = 0
+        self.exhausted = False
+
+    def add(self, path, info):
+        keys = ("abi", "has_dynamic", "dynamic_symbol_count", "symbol_imports",
+                "symbol_exports", "unsupported_symbols", "version_needs",
+                "version_definitions")
+        if self.exhausted or any(key not in info for key in keys):
+            return
+        symbols = info["symbol_imports"] + info["symbol_exports"] + info["unsupported_symbols"]
+        count = len(symbols)
+        size = sum(len(v["name"].encode("utf-8", "surrogateescape")) for v in symbols)
+        if self.records + count > 32768 or self.name_bytes + size > 4 * 1024**2:
+            self.exhausted = True
+            return
+        self.records += count
+        self.name_bytes += size
+        self.objects[path] = {key: info[key] for key in keys}
+
+
+def donor_symbol_candidates(inventory, vendor, system):
+    """Compare potential providers in the selected graph, not linker lookup order."""
+    from r800_android_linker_audit import symbol_candidates
+    selected, edges = {}, {}
+    for path, row in vendor["objects"].items():
+        if row["status"] == "CANDIDATE_ONLY":
+            selected[path] = inventory.objects.get(path)
+            edges[path] = {dep: [] for dep in row["needed"]}
+    system_paths = {}
+    for name, row in system.get("system_candidate_graph", {}).items():
+        if row["status"] != "CANDIDATE_ONLY":
+            continue
+        candidate = row["candidates"][0]
+        path = candidate["origin"] + ":" + candidate["path"]
+        system_paths[name] = path
+        selected[path] = inventory.objects.get(path)
+        edges[path] = {dep: [] for dep in candidate["needed"]}
+    for edge in vendor["edges"]:
+        path = edge["from"]
+        if path not in edges:
+            continue
+        candidate = edge["candidate"]
+        if edge["status"] == "CANDIDATE_ONLY" and candidate in selected:
+            edges[path][edge["needed"]] = [candidate]
+        elif edge["status"] == "OUTSIDE_VENDOR_LIB" and edge["needed"] in system_paths:
+            edges[path][edge["needed"]] = [system_paths[edge["needed"]]]
+    for edge in system.get("system_dependency_edges", []):
+        if edge["from"] in system_paths and edge["needed"] in system_paths:
+            edges[system_paths[edge["from"]]][edge["needed"]] = [system_paths[edge["needed"]]]
+    missing_metadata = sorted(path for path, info in selected.items()
+                              if info is None or info["dynamic_symbol_count"] is None)
+    unsupported = sorted(path for path, info in selected.items()
+                         if info is not None and info["unsupported_symbols"])
+    version_review = []
+    for path, info in selected.items():
+        if info is None:
+            continue
+        for need in info["version_needs"]:
+            providers = edges[path].get(need["library"], [])
+            if len(providers) != 1 or selected.get(providers[0]) is None:
+                version_review.append({"from": path, **need, "reason": "Provider not inspected"})
+                continue
+            definitions = selected[providers[0]]["version_definitions"]
+            if need["version"] not in {v["version"] for v in definitions if not v["base"]}:
+                version_review.append({"from": path, **need, "reason": "Version definition not found"})
+    result = symbol_candidates(selected, edges)
+    unresolved_edges = sum(not providers for deps in edges.values() for providers in deps.values())
+    graph_complete = (bool(selected) and not vendor["budget_exhausted"] and not vendor["problems"]
+                      and (vendor["status"] == "VENDOR_LIB_CANDIDATES_ONLY" or
+                           system.get("status") == "SYSTEM_PATH_CANDIDATES_ONLY"))
+    review = (not graph_complete or inventory.exhausted or missing_metadata or unsupported or
+              version_review or unresolved_edges or result["limit_exceeded"] or
+              any(result[key] for key in ("missing_strong", "ambiguous", "incomplete")))
+    return {"status": "SYMBOL_CANDIDATES_ONLY" if not review else "REVIEW_REQUIRED",
+            "objects": sorted(selected), "missing_metadata": missing_metadata,
+            "unsupported_symbol_objects": unsupported, "version_review": version_review,
+            "unresolved_edges": unresolved_edges, "symbol_candidates": result,
+            "inventory_budget_exhausted": inventory.exhausted,
+            "inventory_records": inventory.records, "inventory_name_bytes": inventory.name_bytes,
+            "symbol_resolution_verified": False, "namespace_resolution_verified": False,
+            "runtime_verified": False, "safe_to_flash": False}
+
+
+def vendor_dependency_walk(tool, snapshot, scratch, tree, files, symbols=None):
     """Bounded ARM32 vendor/lib candidate graph, not Android resolution.
 
     Read only from the same verified snapshot, retain only metadata for
@@ -335,6 +424,8 @@ def vendor_dependency_walk(tool, snapshot, scratch, tree, files):
                 raise ValueError("Invalid shared object type or SONAME")
             if info["custom_search_path"]:
                 raise ValueError("RPATH/RUNPATH requires review")
+            if symbols is not None:
+                symbols.add(name, info)
             objects[name] = {"status": "CANDIDATE_ONLY", "sha256": hashlib.sha256(raw).hexdigest(),
                              "bytes": len(raw), "needed": info["needed"], "depth": depth}
             for dep in sorted(info["needed"]):
@@ -436,7 +527,7 @@ def selected_apex_payloads(tool, snapshot, scratch, vndk):
     return inventory, locations
 
 
-def system_dependency_candidates(tool, image, expected_sha, scratch, walk, properties, include_apex=False):
+def system_dependency_candidates(tool, image, expected_sha, scratch, walk, properties, include_apex=False, symbols=None):
     """Probe explicit raw EXT4 system paths for vendor external names.
 
     No APEX activation, symlink resolution, namespace ordering or guest execution.
@@ -502,6 +593,8 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
                         not info["has_dynamic"] or info["soname"] not in (None, name) or
                         info["custom_search_path"]):
                     raise ValueError("System candidate ELF/SONAME/search path requires review")
+                if symbols is not None:
+                    symbols.add(origin + ":" + guest, info)
                 candidates.append({"path": guest, "origin": origin, "sha256": hashlib.sha256(raw).hexdigest(),
                                    "bytes": len(raw), "needed": info["needed"]})
             except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
@@ -611,14 +704,17 @@ def extract(image, output, profile, expected_sha, system_image=None, system_sha=
             files[dest] = {"status":"EXTRACTED", "source":guest,
                            "bytes":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
         dependency_walk = None
+        symbols = DonorSymbolInventory()
         if profile == "vendor-identity":
-            dependency_walk = vendor_dependency_walk(tool, snapshot, scratch, tree, files)
+            dependency_walk = vendor_dependency_walk(tool, snapshot, scratch, tree, files, symbols)
         identity_report = None
         if profile == "vendor-identity":
             identity_report = vendor_identity(tree, files)
             if system_image is not None:
                 identity_report["system_dependency_candidates"] = system_dependency_candidates(
-                    tool, system_image, system_sha, scratch, dependency_walk, identity_report["properties"], include_apex)
+                    tool, system_image, system_sha, scratch, dependency_walk, identity_report["properties"], include_apex, symbols)
+            identity_report["symbol_candidate_audit"] = donor_symbol_candidates(
+                symbols, dependency_walk, identity_report.get("system_dependency_candidates", {}))
         current = image.lstat()
         if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
                 current.st_mtime_ns, current.st_ctime_ns) != source_identity:

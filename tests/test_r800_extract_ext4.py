@@ -417,6 +417,50 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertFalse(result["apex_inspected"])
         self.assertFalse(result["safe_to_flash"])
 
+    def test_donor_symbol_candidates_are_static_and_version_bound(self):
+        def symbol(name, version=None, library=None, weak=False, typ=2):
+            return {"name": name, "version": version, "version_library": library,
+                    "weak": weak, "type": typ, "version_hidden": False}
+        def info(imports=(), exports=(), needs=(), definitions=()):
+            return {"abi": "arm", "has_dynamic": True, "dynamic_symbol_count": 3,
+                    "symbol_imports": list(imports), "symbol_exports": list(exports),
+                    "unsupported_symbols": [], "version_needs": list(needs),
+                    "version_definitions": list(definitions)}
+        root = "vendor/bin/hw/fixture"
+        lib = "libfixture.so"
+        provider = "com.android.runtime:/lib/bionic/" + lib
+        walk = {"status": "REVIEW_REQUIRED", "objects": {
+                    root: {"status": "CANDIDATE_ONLY", "needed": [lib]}},
+                "edges": [{"from": root, "needed": lib, "candidate": "vendor/lib/" + lib,
+                           "status": "OUTSIDE_VENDOR_LIB"}],
+                "budget_exhausted": False, "problems": []}
+        system = {"status": "SYSTEM_PATH_CANDIDATES_ONLY",
+                  "system_candidate_graph": {lib: {"status": "CANDIDATE_ONLY",
+                      "candidates": [{"origin": "com.android.runtime",
+                                      "path": "/lib/bionic/" + lib, "needed": []}]}},
+                  "system_dependency_edges": []}
+        inv = extractor.DonorSymbolInventory()
+        inv.add(root, info([symbol("foo", "V1", lib), symbol("optional", weak=True)],
+                           needs=[{"library": lib, "version": "V1"}]))
+        inv.add(provider, info(exports=[symbol("foo", "V1")],
+                               definitions=[{"version": "V1", "base": False}]))
+        result = extractor.donor_symbol_candidates(inv, walk, system)
+        self.assertEqual(result["status"], "SYMBOL_CANDIDATES_ONLY")
+        self.assertEqual(result["symbol_candidates"]["matched"], 1)
+        self.assertEqual(len(result["symbol_candidates"]["missing_weak"]), 1)
+        self.assertFalse(result["symbol_resolution_verified"])
+        inv.objects[provider]["symbol_exports"] = [symbol("foo", "V2")]
+        inv.objects[provider]["version_definitions"] = [{"version": "V2", "base": False}]
+        result = extractor.donor_symbol_candidates(inv, walk, system)
+        self.assertEqual(result["status"], "REVIEW_REQUIRED")
+        self.assertEqual(len(result["version_review"]), 1)
+        self.assertEqual(len(result["symbol_candidates"]["missing_strong"]), 1)
+        del inv.objects[provider]
+        result = extractor.donor_symbol_candidates(inv, walk, system)
+        self.assertEqual(result["missing_metadata"], [provider])
+        self.assertTrue(result["symbol_candidates"]["incomplete"])
+        self.assertFalse(result["safe_to_flash"])
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")
