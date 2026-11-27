@@ -254,7 +254,7 @@ def command(tool, image, request, cwd=None):
                           check=True)
 
 
-def locate(tool, image, guest):
+def locate(tool, image, guest, limit=MAX_FILE):
     if not re.fullmatch(r"/[A-Za-z0-9_./@+-]+", guest) or ".." in guest.split("/"):
         raise ValueError("Invalid guest path")
     result = command(tool, image, "stat " + guest)
@@ -265,7 +265,7 @@ def locate(tool, image, guest):
     if not match or not size or match[2] != "regular":
         raise ValueError("Expected regular donor file: " + guest)
     length = int(size[1])
-    if not 0 < length <= MAX_FILE:
+    if not 0 < length <= limit:
         raise ValueError("Donor file size out of bounds: " + guest)
     return int(match[1]), length
 
@@ -395,7 +395,48 @@ def snapshot_image(image, snapshot, expected_sha):
     return identity(initial)
 
 
-def system_dependency_candidates(tool, image, expected_sha, scratch, walk, properties):
+def selected_apex_payloads(tool, snapshot, scratch, vndk):
+    """Read fixed APEX archive locations; never activate or mount payloads."""
+    import zipfile
+    from r800_android_runtime_extract import extract_payload, MAX_APEX
+    packages = {"com.android.runtime": ("/lib/bionic", "/lib")}
+    if vndk and re.fullmatch(r"[1-9][0-9]{0,2}", vndk):
+        packages["com.android.vndk.v" + vndk] = ("/lib",)
+    inventory, locations = {}, []
+    for index, (package, directories) in enumerate(packages.items()):
+        paths = [prefix + "/" + package + ".apex" for prefix in ("/apex", "/system/apex")]
+        row = {"status": "NOT_FOUND_IN_SELECTED_PATHS", "paths": paths}
+        inventory[package] = row
+        try:
+            found = [(path, locate(tool, snapshot, path, MAX_APEX)) for path in paths]
+            found = [(path, item) for path, item in found if item is not None]
+            if not found:
+                continue
+            if len(found) != 1:
+                row["status"] = "AMBIGUOUS"
+                continue
+            path, (inode, length) = found[0]
+            archive = scratch / ("apex-%d.zip" % index)
+            payload = scratch / ("apex-%d.img" % index)
+            command(tool, snapshot, "dump <%d> %s" % (inode, archive.name), cwd=scratch)
+            st = archive.lstat()
+            if not stat.S_ISREG(st.st_mode) or st.st_size != length:
+                raise ValueError("APEX archive size mismatch")
+            from r800_android_runtime_extract import digest
+            archive_sha = digest(archive, MAX_APEX)
+            extract_payload(archive, payload)
+            payload.chmod(0o400)
+            metadata = image_info(payload)
+            row.update({"status": "PAYLOAD_CANDIDATE_ONLY", "source": path,
+                        "archive_sha256": archive_sha, "payload_sha256": metadata["sha256"],
+                        "payload_bytes": metadata["bytes"]})
+            locations.extend((package, payload, directory) for directory in directories)
+        except (OSError, ValueError, zipfile.BadZipFile, subprocess.SubprocessError) as exc:
+            row.update({"status": "REVIEW_REQUIRED", "reason": str(exc)})
+    return inventory, locations
+
+
+def system_dependency_candidates(tool, image, expected_sha, scratch, walk, properties, include_apex=False):
     """Probe explicit raw EXT4 system paths for vendor external names.
 
     No APEX activation, symlink resolution, namespace ordering or guest execution.
@@ -413,6 +454,8 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
     if vndk and re.fullmatch(r"[1-9][0-9]{0,2}", vndk):
         dirs += [base + "/" + sub + "-" + vndk
                  for base in ("/lib", "/system/lib") for sub in ("vndk", "vndk-sp")]
+    apex_inventory, apex_locations = selected_apex_payloads(tool, snapshot, scratch, vndk) if include_apex else ({}, [])
+    search_locations = [("system", snapshot, directory) for directory in dirs] + apex_locations
     results = {}
     edges = []
     roots = sorted(set(walk['external_names']))
@@ -430,14 +473,14 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
             raise ValueError("Invalid system dependency basename")
         candidates = []
         problems = []
-        for directory in dirs:
+        for origin, filesystem, directory in search_locations:
             guest = directory + "/" + name
             if probes >= MAX_WALK_EDGES or total >= MAX_WALK_BYTES:
                 exhausted = True
                 break
             probes += 1
             try:
-                found = locate(tool, snapshot, guest)
+                found = locate(tool, filesystem, guest)
                 if found is None:
                     continue
                 inode, length = found
@@ -447,7 +490,7 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
                 total += length
                 target = scratch / "system-member"
                 try:
-                    command(tool, snapshot, "dump <%d> system-member" % inode, cwd=scratch)
+                    command(tool, filesystem, "dump <%d> system-member" % inode, cwd=scratch)
                     st = target.lstat()
                     if not stat.S_ISREG(st.st_mode) or st.st_size != length:
                         raise ValueError("System dependency size mismatch")
@@ -459,10 +502,10 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
                         not info["has_dynamic"] or info["soname"] not in (None, name) or
                         info["custom_search_path"]):
                     raise ValueError("System candidate ELF/SONAME/search path requires review")
-                candidates.append({"path": guest, "sha256": hashlib.sha256(raw).hexdigest(),
+                candidates.append({"path": guest, "origin": origin, "sha256": hashlib.sha256(raw).hexdigest(),
                                    "bytes": len(raw), "needed": info["needed"]})
             except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
-                problems.append({"path": guest, "reason": str(exc)})
+                problems.append({"path": guest, "origin": origin, "reason": str(exc)})
         status = ("REVIEW_REQUIRED" if exhausted or problems else
                   "NOT_FOUND_IN_SELECTED_PATHS" if not candidates else
                   "AMBIGUOUS" if len(candidates) > 1 else "CANDIDATE_ONLY")
@@ -494,7 +537,11 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
         raise ValueError("System donor image changed")
     if image_info(snapshot) != before:
         raise ValueError("System snapshot changed")
+    for package, payload, _ in apex_locations:
+        if image_info(payload)["sha256"] != apex_inventory[package]["payload_sha256"]:
+            raise ValueError("APEX payload changed during inspection")
     complete = (bool(walk["roots"]) and not exhausted and not walk["budget_exhausted"]
+                and all(row["status"] == "PAYLOAD_CANDIDATE_ONLY" for row in apex_inventory.values())
                 and not walk["problems"] and set(results) == queued and
                 all(row["status"] == "CANDIDATE_ONLY" for row in results.values()))
     return {"status": "SYSTEM_PATH_CANDIDATES_ONLY" if complete else "REVIEW_REQUIRED",
@@ -504,12 +551,14 @@ def system_dependency_candidates(tool, image, expected_sha, scratch, walk, prope
             "system_candidate_graph": results, "system_dependency_edges": edges,
             "uninspected_names": sorted(queued - set(results)),
             "budget_exhausted": exhausted,
-            "bytes_inspected": total, "apex_inspected": False,
+            "bytes_inspected": total, "apex_inspected": bool(apex_locations),
+            "apex_requested": include_apex, "apex_inventory": apex_inventory,
+            "apex_signature_verified": False, "apex_activation_verified": False,
             "dependency_closure_verified": False, "namespace_resolution_verified": False,
             "runtime_verified": False, "safe_to_flash": False}
 
 
-def extract(image, output, profile, expected_sha, system_image=None, system_sha=None):
+def extract(image, output, profile, expected_sha, system_image=None, system_sha=None, include_apex=False):
     image, output = Path(image).absolute(), Path(output).absolute()
     if profile not in PROFILES or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         raise ValueError("Expected donor profile and SHA-256")
@@ -517,6 +566,8 @@ def extract(image, output, profile, expected_sha, system_image=None, system_sha=
             (system_image is not None and (profile != "vendor-identity" or
              not re.fullmatch(r"[0-9a-f]{64}", system_sha)))):
         raise ValueError("System image and SHA-256 require vendor-identity profile")
+    if include_apex and system_image is None:
+        raise ValueError("APEX inspection requires system image")
     if output.exists() or output.is_symlink():
         raise ValueError("Output already exists")
     tool = shutil.which("debugfs")
@@ -567,7 +618,7 @@ def extract(image, output, profile, expected_sha, system_image=None, system_sha=
             identity_report = vendor_identity(tree, files)
             if system_image is not None:
                 identity_report["system_dependency_candidates"] = system_dependency_candidates(
-                    tool, system_image, system_sha, scratch, dependency_walk, identity_report["properties"])
+                    tool, system_image, system_sha, scratch, dependency_walk, identity_report["properties"], include_apex)
         current = image.lstat()
         if (current.st_dev, current.st_ino, current.st_mode, current.st_size,
                 current.st_mtime_ns, current.st_ctime_ns) != source_identity:
@@ -595,8 +646,9 @@ def main():
     p.add_argument("--sha256",required=True)
     p.add_argument("--system-image", type=Path)
     p.add_argument("--system-sha256")
+    p.add_argument("--include-apex", action="store_true")
     a=p.parse_args()
-    report=extract(a.image,a.output,a.profile,a.sha256,a.system_image,a.system_sha256)
+    report=extract(a.image,a.output,a.profile,a.sha256,a.system_image,a.system_sha256,a.include_apex)
     print(json.dumps(report,sort_keys=True))
     identity = report.get("vendor_identity", {})
     review = identity.get("property_conflicts") or any(

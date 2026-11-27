@@ -370,6 +370,53 @@ class Ext4ExtractionTests(unittest.TestCase):
         self.assertEqual(result["system_dependency_edges"][0]["status"], "NOT_INSPECTED")
         self.assertFalse(result["safe_to_flash"])
 
+    def test_system_apex_candidates_from_nested_ext4(self):
+        import zipfile
+        self.put("lib/bionic/libfixture.so", b"runtime")
+        self.make_image()
+        payload = self.image
+        self.tree = self.root / "system-tree"
+        self.tree.mkdir()
+        self.image = self.root / "system.img"
+        archive = self.tree / "apex/com.android.runtime.apex"
+        archive.parent.mkdir()
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            z.write(payload, "apex_payload.img")
+        system_sha = self.make_image()
+        scratch = self.root / "apex-audit"
+        scratch.mkdir()
+        walk = {"roots": ["service"], "external_names": ["libfixture.so"],
+                "budget_exhausted": False, "problems": []}
+        info = {"abi": "arm", "has_dynamic": True, "elf_type": "ET_DYN",
+                "needed": [], "soname": "libfixture.so", "custom_search_path": False}
+        with mock.patch("r800_android_linker_audit.inspect", return_value=info):
+            result = extractor.system_dependency_candidates(shutil.which("debugfs"),
+                self.image, system_sha, scratch, walk, {}, True)
+        self.assertEqual(result["status"], "SYSTEM_PATH_CANDIDATES_ONLY")
+        self.assertEqual(result["external_candidates"]["libfixture.so"]["candidates"][0]["origin"],
+                         "com.android.runtime")
+        self.assertEqual(result["apex_inventory"]["com.android.runtime"]["payload_sha256"],
+                         hashlib.sha256(payload.read_bytes()).hexdigest())
+        self.assertTrue(result["apex_inspected"])
+        self.assertFalse(result["apex_activation_verified"])
+        self.assertFalse(result["dependency_closure_verified"])
+        self.assertEqual(hashlib.sha256(self.image.read_bytes()).hexdigest(), system_sha)
+
+    def test_apex_ambiguous_archive_requires_review(self):
+        self.put("apex/com.android.runtime.apex", b"fixture")
+        self.put("system/apex/com.android.runtime.apex", b"other")
+        sha = self.make_image()
+        scratch = self.root / "apex-ambiguity"
+        scratch.mkdir()
+        result = extractor.system_dependency_candidates(shutil.which("debugfs"),
+            self.image, sha, scratch,
+            {"roots": ["service"], "external_names": ["libfixture.so"],
+             "budget_exhausted": False, "problems": []}, {}, True)
+        self.assertEqual(result["apex_inventory"]["com.android.runtime"]["status"], "AMBIGUOUS")
+        self.assertEqual(result["status"], "REVIEW_REQUIRED")
+        self.assertFalse(result["apex_inspected"])
+        self.assertFalse(result["safe_to_flash"])
+
     def test_vendor_identity_conflicting_properties(self):
         self.put("build.prop", b"ro.product.vendor.model=One\n")
         self.put("default.prop", b"ro.product.vendor.model=Two\n")

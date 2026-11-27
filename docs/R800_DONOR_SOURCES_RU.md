@@ -138,7 +138,17 @@ python3 build/r800_extract_ext4.py --profile vendor-identity \
 наблюдаемом числовом ro.vndk.version. Кандидаты проверяются на ARM32
 ET_DYN, SONAME и RPATH/RUNPATH; неоднозначность требует review.
 Оригиналы и приватные снимки проверяются на изменения. Выход содержит
-только метаданные дополнительных библиотек. Не анализируются APEX,
-транзитивные зависимости system-кандидатов, namespace или symbol binding.
+только метаданные дополнительных библиотек. Без --include-apex не анализируются APEX; namespace и symbol binding не моделируются.
 Диагностический статус не является release gate; исходный код завершения
 vendor-identity не изменён.
+
+
+Граф system_candidate_graph рекурсивно обходит однозначных кандидатов
+system/VNDK. Опция --include-apex дополнительно проверяет только
+com.android.runtime.apex и com.android.vndk.vN.apex (N из наблюдаемого
+ro.vndk.version) в /apex и /system/apex на том же snapshot. Читается
+только apex_payload.img из ZIP; поиск ARM32 в /lib/bionic и /lib
+Runtime, /lib VNDK. Архив и payload остаются временными; отчёт содержит
+их хеши и происхождение кандидатов. Отсутствие/неоднозначность пакета
+требуют review. CAPEX, версионные имена, другие APEX, подписи,
+AVB, активация и linker namespaces не подтверждены.
