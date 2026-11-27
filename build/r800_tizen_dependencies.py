@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Inventory Tizen ARM32 userspace dependencies from an offline, clean donor tree."""
+from collections import deque
+import argparse
+import hashlib
+import json
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import struct
+from r800_android_linker_audit import inspect
+from r800_android_userspace_preflight import read_regular
+
+TARGETS = ("/usr/bin/lhd", "/usr/bin/gpsd", "/usr/bin/sensord",
+           "/usr/bin/sensorctl", "/usr/bin/env", "/usr/bin/chown",
+           "/usr/lib/libbrcm.so")
+DIRS = ("/lib", "/usr/lib", "/usr/lib/sensor")
+MAX_NODES = 256
+MAX_FILE = 64*1024**2
+MAX_TOTAL = 256*1024**2
+MAX_SYMBOLS = 131072
+MAX_SYMBOL_NAME_BYTES = 16*1024**2
+MAX_SYMBOL_COMPARISONS = 4000000
+
+def resolve_guest(root, guest):
+    """Resolve guest absolute symlinks within donor root, never on host."""
+    if not guest.startswith("/"):
+        raise ValueError("Expected absolute guest path")
+    parts = deque(PurePosixPath(guest).parts[1:])
+    done = []
+    links = 0
+    while parts:
+        part = parts.popleft()
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not done:
+                raise ValueError("Guest link escapes root")
+            done.pop()
+            continue
+        candidate = root.joinpath(*done, part)
+        st = candidate.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            links += 1
+            if links > 40:
+                raise ValueError("Guest symlink loop")
+            target = candidate.readlink()
+            if target.is_absolute():
+                done.clear()
+            parts.extendleft(reversed(target.parts[1:] if target.is_absolute() else target.parts))
+        else:
+            if parts and not stat.S_ISDIR(st.st_mode):
+                raise ValueError("Guest parent is not a directory")
+            done.append(part)
+    path = root.joinpath(*done)
+    relative = "/" + "/".join(done)
+    if not relative.startswith(("/usr/bin/", "/bin/", "/usr/lib/", "/lib/")):
+        raise ValueError("Guest executable/library outside allowed roots")
+    return path, relative
+
+def interpreter(raw):
+    if len(raw) < 52 or raw[:7] != b"\x7fELF\x01\x01\x01":
+        raise ValueError("Expected ARM32 ELF")
+    phoff = struct.unpack_from("<I", raw, 28)[0]
+    entry, count = struct.unpack_from("<HH", raw, 42)
+    if entry != 32 or not 1 <= count <= 128 or phoff+entry*count > len(raw):
+        raise ValueError("Invalid program headers")
+    paths = []
+    for i in range(count):
+        typ, off, _, _, size, _, _, _ = struct.unpack_from("<8I", raw, phoff+i*entry)
+        if typ == 3:
+            if not 2 <= size <= 256 or off+size > len(raw):
+                raise ValueError("Invalid PT_INTERP bounds")
+            value = raw[off:off+size]
+            if not value.endswith(b"\0") or b"\0" in value[:-1]:
+                raise ValueError("Invalid PT_INTERP string")
+            paths.append(value[:-1].decode("ascii"))
+    if len(paths)>1:
+        raise ValueError("Duplicate PT_INTERP")
+    if paths and paths[0] != "/lib/ld-linux.so.3":
+        raise ValueError("Unexpected Tizen ARM soft-float interpreter")
+    return paths[0] if paths else None
+
+def review_loads(raw, *, strict_pages=False):
+    """Conservative ARM32 load geometry, independent of relocation formats."""
+    if len(raw) < 52 or raw[:7] != b"\x7fELF\x01\x01\x01":
+        raise ValueError("Expected ARM32 ELF")
+    if struct.unpack_from("<HH", raw, 16) not in ((2, 40), (3, 40)):
+        raise ValueError("Expected Tizen ARM32 executable or shared object")
+    phoff = struct.unpack_from("<I", raw, 28)[0]
+    entry, count = struct.unpack_from("<HH", raw, 42)
+    if entry != 32 or not 1 <= count <= 128 or phoff + entry * count > len(raw):
+        raise ValueError("Invalid program headers")
+    ranges = []
+    for i in range(count):
+        typ, off, va, _, fs, ms, flags, align = struct.unpack_from("<8I", raw, phoff + i * entry)
+        if typ != 1:
+            continue
+        if fs > ms or off + fs > len(raw) or va + ms > 2**32:
+            raise ValueError("Invalid PT_LOAD bounds")
+        if align > 1 and (align & (align - 1) or va % align != off % align):
+            raise ValueError("Invalid PT_LOAD alignment")
+        if strict_pages and (va & 4095) != (off & 4095):
+            raise ValueError("PT_LOAD page offset mismatch")
+        if ms:
+            lo, hi = va, va + ms
+            if strict_pages:
+                lo, hi = lo & ~4095, (hi + 4095) & ~4095
+            if any(lo < end and start < hi for start, end in ranges):
+                raise ValueError("PT_LOAD shared memory page requires review" if strict_pages
+                                 else "Overlapping PT_LOAD memory ranges")
+            ranges.append((lo, hi))
+    if not ranges:
+        raise ValueError("Missing nonempty PT_LOAD")
+    return {"nonempty_load_count": len(ranges), "strict_4k_page_review": strict_pages}
+
+
+def audit_symbols(targets, aliases, objects, edges):
+    """Potential glibc providers within each target's static closure.
+
+    This is not glibc lookup order, LD_PRELOAD, dlopen, or relocation execution.
+    Separate target scopes prevent an unrelated daemon from satisfying imports.
+    """
+    graph = {name: {} for name in objects}
+    for edge in edges:
+        source = aliases.get(edge["from"])
+        provider = aliases.get(edge["provider"])
+        if source in graph:
+            graph[source].setdefault(edge["needed"], set()).add(provider)
+    reports = {}
+    budget = MAX_SYMBOL_COMPARISONS
+    for target in dict.fromkeys(targets):
+        pending = [aliases.get(target)]
+        reached = set()
+        incomplete = False
+        while pending:
+            name = pending.pop()
+            if name in reached:
+                continue
+            reached.add(name)
+            if name not in objects:
+                incomplete = True
+                continue
+            if any(dep not in graph[name] for dep in objects[name]["needed"]):
+                incomplete = True
+            pending.extend(p for group in graph[name].values() for p in group)
+        index = {}
+        missing, weak_missing, ambiguous, unknown = [], [], [], []
+        matched = 0
+        for name in sorted(reached - {None}):
+            info = objects.get(name)
+            if info is None:
+                continue
+            if info["unsupported_symbols"] or (info["has_dynamic"] and info["dynamic_symbol_count"] is None):
+                incomplete = True
+            for symbol in info["symbol_exports"]:
+                index.setdefault(symbol["name"], []).append((name, symbol))
+        for name in sorted(reached - {None}):
+            info = objects.get(name)
+            if info is None:
+                continue
+            for symbol in info["symbol_imports"]:
+                budget -= 1  # bound even imports without any indexed candidates
+                if budget < 0:
+                    return {"targets":reports,"limit_exceeded":True}
+                record = {"from":name, **symbol}
+                allowed = reached
+                if symbol["version_library"] is not None:
+                    allowed = graph[name].get(symbol["version_library"], set())
+                candidates = set()
+                for provider, export in index.get(symbol["name"], ()):
+                    budget -= 1
+                    if budget < 0:
+                        return {"targets":reports,"limit_exceeded":True}
+                    if provider not in allowed or (symbol["type"] == 6) != (export["type"] == 6):
+                        continue
+                    if symbol["version"] is not None:
+                        if symbol["version"] != export["version"]:
+                            continue
+                    elif export["version_hidden"]:
+                        continue
+                    candidates.add(provider)
+                if not candidates:
+                    (unknown if incomplete else weak_missing if symbol["weak"] else missing).append(record)
+                elif len(candidates) > 1:
+                    ambiguous.append({**record,"providers":sorted(candidates)})
+                else:
+                    matched += 1
+        reports[target] = {"matched":matched,"missing_strong":missing,
+                           "missing_weak":weak_missing,"ambiguous":ambiguous,
+                           "incomplete":unknown,"inventory_incomplete":incomplete}
+    return {"targets":reports,"limit_exceeded":False}
+
+
+def audit(root, targets=TARGETS, *, strict_pages=False):
+    root = root.resolve(strict=True)
+    targets = tuple(targets)
+    queue = deque(targets)
+    visited, files, edges, problems, aliases = set(), {}, [], [], {}
+    total = 0
+    objects = {}
+    symbol_count = symbol_name_bytes = 0
+    while queue:
+        guest = queue.popleft()
+        if guest in visited:
+            continue
+        if len(visited) >= MAX_NODES:
+            raise ValueError("Tizen dependency count exceeds budget")
+        visited.add(guest)
+        try:
+            path, canonical = resolve_guest(root, guest)
+            aliases[guest] = canonical
+            if canonical in files:
+                continue
+            raw = read_regular(path, MAX_FILE)
+            total += len(raw)
+            if total > MAX_TOTAL:
+                raise ValueError("Tizen dependency byte budget exceeded")
+            load_review = review_loads(raw, strict_pages=strict_pages)
+            info = inspect(raw)
+            if info["abi"] != "arm":
+                raise ValueError("Expected Tizen ARM32 ABI")
+            flags = struct.unpack_from("<I", raw, 36)[0]
+            if flags & 0x400:  # EF_ARM_ABI_FLOAT_HARD
+                raise ValueError("Hard-float ARM ELF incompatible with Tizen soft-float contract")
+            interp = interpreter(raw)
+            symbols = info["symbol_imports"] + info["symbol_exports"] + info["unsupported_symbols"]
+            symbol_count += len(symbols)
+            symbol_name_bytes += sum(len(s["name"].encode("utf-8","surrogateescape")) for s in symbols)
+            if symbol_count > MAX_SYMBOLS or symbol_name_bytes > MAX_SYMBOL_NAME_BYTES:
+                raise ValueError("Tizen symbol inventory budget exceeded")
+            objects[canonical] = info
+            reloc = info["relocations"]
+            if info["custom_search_path"]:
+                problems.append({"path":guest,"reason":"RPATH/RUNPATH requires review"})
+            files[canonical] = {"bytes":len(raw), "sha256":hashlib.sha256(raw).hexdigest(),
+                                "needed":info["needed"], "interpreter":interp,
+                                "load_review":load_review,
+                                "elf_type":info["elf_type"], "has_dynamic":info["has_dynamic"],
+                                "soname":info["soname"], "arm_flags":flags,
+                                "dynamic_symbol_count":info["dynamic_symbol_count"],
+                                "tls_segment":info["tls_segment"],
+                                "tls_symbol_count":info["tls_symbol_count"],
+                                "relocations":reloc,
+                                "version_needs":info["version_needs"],
+                                "version_definitions":info["version_definitions"]}
+            for need in info["version_needs"]:
+                if need["library"] not in info["needed"]:
+                    problems.append({"path":guest,"needed":need["library"],
+                                     "version":need["version"],"reason":"UNBOUND_VERSION_NEED"})
+            if interp:
+                queue.append(interp)
+                edges.append({"from":guest,"needed":interp,"provider":interp,"kind":"interpreter"})
+            for dep in info["needed"]:
+                if not re.fullmatch(r"[A-Za-z0-9_.+-]+", dep) or dep in (".",".."):
+                    raise ValueError("Unsafe dependency name")
+                providers = {}
+                for directory in DIRS:
+                    candidate = directory+"/"+dep
+                    try:
+                        _, real = resolve_guest(root, candidate)
+                        providers.setdefault(real, candidate)
+                    except FileNotFoundError:
+                        continue
+                if len(providers)!=1:
+                    problems.append({"path":guest,"needed":dep,
+                                     "reason":"MISSING" if not providers else "AMBIGUOUS",
+                                     "candidates":sorted(providers)})
+                    continue
+                provider = next(iter(providers.values()))
+                edges.append({"from":guest,"needed":dep,"provider":provider,"kind":"library"})
+                queue.append(provider)
+        except (OSError, ValueError) as exc:
+            problems.append({"path":guest,"reason":str(exc)})
+    versions_checked = 0
+    weak_missing = []
+    for edge in edges:
+        source = files.get(aliases.get(edge["from"]))
+        provider = files.get(aliases.get(edge["provider"]))
+        if source is None or provider is None:
+            continue
+        # Check the provider on every edge, even if its canonical file was
+        # already visited as an independent target or under another alias.
+        if provider["elf_type"] != "ET_DYN" or not provider["has_dynamic"]:
+            problems.append({"path":edge["from"],"needed":edge["needed"],
+                             "provider":edge["provider"],"reason":"INVALID_DYNAMIC_PROVIDER"})
+        # Glibc libc.so.6 may itself be executable; PT_INTERP on a shared
+        # library is not sufficient grounds for rejection. A loader must
+        # not require another interpreter under this contract.
+        if edge["kind"] == "interpreter" and provider["interpreter"] is not None:
+            problems.append({"path":edge["from"],"needed":edge["needed"],
+                             "provider":edge["provider"],"reason":"PROVIDER_HAS_INTERPRETER"})
+        if edge["kind"] == "library" and provider["soname"] not in (None, edge["needed"]):
+            problems.append({"path":edge["from"],"needed":edge["needed"],
+                             "provider":edge["provider"],"reason":"SONAME_MISMATCH"})
+        supplied = {v["version"] for v in provider["version_definitions"] if not v["base"]}
+        for need in source["version_needs"]:
+            if need["library"] != edge["needed"]:
+                continue
+            versions_checked += 1
+            if need["version"] not in supplied:
+                issue = {"path":edge["from"],"needed":edge["needed"],
+                         "version":need["version"],"reason":"VERSION_NOT_PROVIDED"}
+                (weak_missing if need["weak"] else problems).append(issue)
+    symbol_report = audit_symbols(targets, aliases, objects, edges)
+    # A static scope may omit executable exports from dlopen callers.
+    # Report rather than claim that these are definitive runtime failures.
+    relocation_review = sorted(name for name, info in objects.items()
+        if info["unsupported_symbols"] or info["relocations"]["unsupported_types"]
+        or info["relocations"]["packed_tags"] or info["relocations"]["nonwritable_targets"]
+        or not info["relocations"]["symbol_indices_checked"]
+        or not info["relocations"]["tls_symbol_types_checked"])
+    return {"status":"TIZEN_DEPENDENCY_REVIEW_REQUIRED" if problems else "TIZEN_STATIC_CLOSURE_ONLY",
+            "strict_4k_page_review":strict_pages,"symbol_candidates":symbol_report,"relocation_review_objects":relocation_review,
+            "files":files,"edges":edges,"problems":problems,"aliases":aliases,
+            "version_records_checked":versions_checked,"weak_versions_missing":weak_missing,
+            "dlopen_plugins_verified":False,"symbol_resolution_verified":False,
+            "permissions_verified":False,"runtime_verified":False,"safe_to_flash":False}
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--root",type=Path,required=True)
+    p.add_argument("--strict-pages",action="store_true",help="Conservative 4 KiB PT_LOAD page review")
+    a=p.parse_args()
+    report=audit(a.root,strict_pages=a.strict_pages)
+    print(json.dumps(report,indent=2,sort_keys=True))
+    return 2 if report["problems"] else 0
+
+if __name__=="__main__":
+    raise SystemExit(main())
