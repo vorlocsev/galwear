@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "development/r800-integration-20261127"
+      - "development/r800-integration-linker-20261127"
 
 permissions: {}
 
@@ -24,7 +25,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == "vorlocsev/galwear" ]]
-          [[ "$GITHUB_REF" == "refs/heads/development/r800-integration-20261127" ]]
+          [[ "$GITHUB_REF" == "refs/heads/development/r800-integration-20261127" || "$GITHUB_REF" == "refs/heads/development/r800-integration-linker-20261127" ]]
           for sha in "$CURRENT_SHA" "$PREVIOUS_SHA"; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
             [[ "$sha" != "0000000000000000000000000000000000000000" ]] || continue
