@@ -568,6 +568,19 @@ jobs:
           path: ${{ runner.temp }}/decon-buffer/buffer-evidence.json
           if-no-files-found: error
           retention-days: 7
+      - name: Test DECON completion order and absent retire fence
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_decon_completion_guard.py --core-source "$RUNNER_TEMP/decon-core.c" --patch src/kernel/r800-wearos.patch --scratch "$RUNNER_TEMP/decon-completion" --source-sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        if: github.ref_name == 'development/r800-integration-20261127'
+        with:
+          name: r800-decon-completion-evidence
+          path: ${{ runner.temp }}/decon-completion/completion-evidence.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Compile ARM32 Bionic HAL dlopen metadata probe (no runtime)
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |

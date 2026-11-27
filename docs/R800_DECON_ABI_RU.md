@@ -66,3 +66,15 @@ Video/DP/WB policy и сигнализация retire не изменены. 10 
 случаев используют извлечённые функции pinned patched decon_core.c,
 разные plane counts, пустой кадр и модель следующего принятого кадра.
 Это модель владения ID, не проверка реальных DMA mapping или GPU.
+
+## Completion order / absent retire fence
+
+При пустом кадре retire_fence может быть NULL. Worker теперь не вызывает
+signal/put для отсутствующего fence. Для существующего fence сохраняется
+порядок release buffers -> signal -> put worker ref. 8 host-only случаев
+из pinned patched completion branch проверяют наличие fence, rollback и
+win_up.enabled. Исходные NULL calls воспроизводятся моделью; pinned
+Linux dma_fence_signal(NULL) возвращает EINVAL, это не доказательство crash.
+Release и retire используют общий sync_file; статус ошибки при rejected
+frame намеренно не меняется без проверки контракта Android consumer.
+Сигнализация означает завершение владения, не доказательство вывода кадра.

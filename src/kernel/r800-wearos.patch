@@ -27213,7 +27213,20 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  				else
  					decon_save_cur_buf_info(decon, regs);
  				decon_wait_for_vsync(decon, VSYNC_TIMEOUT_MSEC);
-@@ -2720,122 +2813,156 @@
+@@ -2466,8 +2559,10 @@
+ 	decon_release_sec_buf(decon);
+ #endif
+ 	decon_release_old_bufs(decon, regs, old_dma_bufs, old_plane_cnt);
+-	decon_signal_fence(decon, regs->retire_fence);
+-	dma_fence_put(regs->retire_fence);
++	if (regs->retire_fence) {
++		decon_signal_fence(decon, regs->retire_fence);
++		dma_fence_put(regs->retire_fence);
++	}
+ 	DPU_EVENT_LOG(DPU_EVT_FENCE_RELEASE, &decon->sd, ktime_set(0, 0));
+ 
+ #if defined(CONFIG_EXYNOS_AFBC_DEBUG)
+@@ -2720,122 +2815,156 @@
  	return ret;
  }
  
@@ -27486,7 +27499,7 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  
  static int decon_get_hdr_capa(struct decon_device *decon,
  		struct decon_hdr_capabilities *hdr_capa)
-@@ -3049,14 +3176,7 @@
+@@ -3049,14 +3178,7 @@
  		 */
  		decon_translate_idma2ch(decon, &win_data);
  #endif
@@ -27502,7 +27515,7 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  		break;
  
  	case S3CFB_GET_HDR_CAPABILITIES:
-@@ -3397,8 +3517,10 @@
+@@ -3397,8 +3519,10 @@
  	if (decon->dt.out_type == DECON_OUT_DSI) {
  		decon_hiber_block_exit(decon);
  		/* Unused DECON state is DECON_STATE_INIT */
@@ -27514,7 +27527,7 @@ diff --git a/drivers/video/fbdev/exynos/dpu30/decon_core.c b/drivers/video/fbdev
  		decon_hiber_unblock(decon);
  	}
  
-@@ -3853,6 +3975,22 @@
+@@ -3853,6 +3977,22 @@
  		win->videomode.vsync_len = lcd_info->vsa;
  		win->videomode.xres = lcd_info->xres;
  		win->videomode.yres = lcd_info->yres;
