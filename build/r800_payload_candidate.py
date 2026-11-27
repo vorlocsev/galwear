@@ -36,7 +36,7 @@ RADIO_FILES = ("fw/bcmdhd_sta.bin", "fw/nvram_net.txt", "fw/bcmdhd_clm.blob",
 STATE = {"DEV", "STAY", "SLEEP", "CPUIDLE_DEEP", "OVERLAY", "RESET_DATA", "TZTRACE",
          "GPU_SCALE", "DIAG", "gemini.tries", "userdata.img", "product_overlay", "props",
          "accounts.db", "accounts_ce.db", "accounts_de.db", "wpa_supplicant.conf",
-         "bt_config.conf", ".mac.info", "hook.sh"}
+         "bt_config.conf", ".mac.info", "hook.sh"} | NEVER_SHIP_ANDROID_FILES
 
 
 def inventory(src, release):
