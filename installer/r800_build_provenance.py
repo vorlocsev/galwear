@@ -29,6 +29,7 @@ REQUIRED_COMBINATION = frozenset((*COPIED_FROM_COMBINATION, "user.img", "csc.img
 # mkpayload-release.sh must strip flags from the *device's* /android tree.
 NEVER_SHIP_ANDROID_FILES = frozenset((
     "DEV", "STAY", "SLEEP", "CPUIDLE_DEEP", "OVERLAY",
+    "PANEL_REALBLANK", "ABOX_POWEROFF", "HWC_RESTART",
     "gemini.tries", "userdata.img", "RESET_DATA", "TZTRACE", "GPU_SCALE", "DIAG",
 ))
 SOURCE_FILES = (
