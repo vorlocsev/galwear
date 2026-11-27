@@ -195,11 +195,32 @@ class Stage10Tests(unittest.TestCase):
                         script.index('tar -C "$W/combo" -xf'))
         self.assertIn('python3 "$AUDIT" finalize', script)
         self.assertNotIn('[ -f $W/combo/user.img ] || tar', script)
+        self.assertLess(script.index('python3 "$AUDIT" finalize'), script.index('mv -- "$PKG"'))
+        self.assertIn('e2fsck -fy "$1" || rc=$?', script)
+        self.assertNotIn("|| true", script)
 
-    def test_payload_script_removes_sleep_flags(self):
+    def test_payload_script_delegates_to_curated_builder(self):
         script = (ROOT / "build" / "mkpayload-release.sh").read_text(encoding="utf-8")
-        for marker in ("SLEEP", "CPUIDLE_DEEP", "DEV", "STAY", "OVERLAY"):
-            self.assertIn(marker, script)
+        self.assertIn("r800_payload_candidate.py", script)
+        self.assertNotIn("cp -a", script)
+
+    def test_additional_debug_flags_rejected(self):
+        for marker in ("TZTRACE", "GPU_SCALE", "DIAG"):
+            with self.subTest(marker=marker):
+                altered = dict(self.payload_files)
+                altered["r800dev/android/" + marker] = b""
+                write_tar(self.payload, altered)
+                with self.assertRaisesRegex(SafetyError, "Watch-specific"):
+                    provenance.validate_payload(self.payload)
+
+    def test_finalize_explicit_candidate_without_release_output(self):
+        before = provenance.prebuild(self.dir)
+        package = self.dir / "candidate.tar.md5"
+        shutil.move(str(self.images / "R800-WearOS.tar.md5"), str(package))
+        result = provenance.finalize(self.dir, before, package)
+        self.assertEqual(result["release"]["name"], package.name)
+        self.assertFalse(result["safe_to_flash"])
+        self.assertFalse((self.images / "R800-WearOS.tar.md5").exists())
 
     def test_inventory_includes_additional_vendor_source_file(self):
         extra = self.dir / "src" / "vendor" / "experimental.c"
