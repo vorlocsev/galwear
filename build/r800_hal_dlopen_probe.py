@@ -103,17 +103,20 @@ def compile_probe(ndk, hals, output, source_sha):
     if not set(gralloc_info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected gralloc test adapter dependency")
     ns_hashes = {}
-    for name, extra in (
-        ("libgalwear-ns-leaf.so", ["-DR800_NAMESPACE_LEAF"]),
-        ("libgalwear-ns-parent.so", ["-L"+str(output), "-lgalwear-ns-leaf"]),
+    for name, extra, private in (
+        ("libgalwear-ns-leaf.so", ["-DR800_NAMESPACE_LEAF"], set()),
+        ("libgalwear-ns-parent.so", ["-L"+str(output), "-lgalwear-ns-leaf"], {"libgalwear-ns-leaf.so"}),
+        ("libgalwear-ns-absent.so", ["-DR800_NAMESPACE_LEAF"], set()),
+        ("libgalwear-ns-missing.so", ["-L"+str(output), "-lgalwear-ns-absent"], {"libgalwear-ns-absent.so"}),
+        ("libgalwear-ns-bad-symbol.so", ["-DR800_NAMESPACE_BAD_SYMBOL"], set()),
     ):
         target = output/name
         subprocess.run([str(cc), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2",
                         "-shared", "-fPIC", str(ROOT/"src/initramfs/r800-namespace-fixture.c"),
-                        *extra, "-Wl,-soname,"+name, "-Wl,--no-undefined", "-o", str(target)],
-                       check=True, timeout=60)
+                        *extra, "-Wl,-soname,"+name,
+                        *([] if name == "libgalwear-ns-bad-symbol.so" else ["-Wl,--no-undefined"]),
+                        "-o", str(target)], check=True, timeout=60)
         ns_raw, ns_info = check(target, True)
-        private = {"libgalwear-ns-leaf.so"} if name.endswith("parent.so") else set()
         if set(ns_info["needed"]) - HAL_COMPILE_LIBS != private:
             raise ValueError("Unexpected synthetic namespace dependency graph")
         ns_hashes[name] = sha(ns_raw)
@@ -184,13 +187,24 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             "namespace.default.isolated = false\n"
             "namespace.default.search.paths = /apex/com.android.runtime/lib/bionic:/system/lib\n")
         if namespace_fixture:
-            ns_names = ("libgalwear-ns-leaf.so", "libgalwear-ns-parent.so")
+            ns_graph = {
+                "libgalwear-ns-leaf.so": (),
+                "libgalwear-ns-parent.so": ("libgalwear-ns-leaf.so",),
+                "libgalwear-ns-missing.so": ("libgalwear-ns-absent.so",),
+                "libgalwear-ns-bad-symbol.so": (),
+            }
+            absent = "libgalwear-ns-absent.so"
             ns_hashes = evidence["namespace_fixture_sha256"]
-            if set(ns_hashes) != set(ns_names):
+            if set(ns_hashes) != set(ns_graph) | {absent}:
                 raise ValueError("Unexpected synthetic namespace inventory")
-            for name in ns_names:
+            # Verify the intentionally omitted provider, but do not stage it.
+            absent_raw, absent_info = check(probe_dir/absent, True)
+            if sha(absent_raw) != ns_hashes[absent]:
+                raise ValueError("Omitted provider digest mismatch")
+            runtime_dependencies(absent, absent_info, linker_soname)
+            for name, private_needed in ns_graph.items():
                 add(probe_dir/name, "vendor/lib/hw/"+name, ns_hashes[name], True,
-                    private_needed=(ns_names[0],) if name == ns_names[1] else ())
+                    private_needed=private_needed)
             # Deliberately no LD_LIBRARY_PATH, no permissive default namespace.
             # Only this synthetic configuration is tested, not donor policy.
             (root/"linkerconfig/ld.config.txt").write_text(
@@ -199,7 +213,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 "namespace.default.isolated = true\n"
                 "namespace.default.search.paths = /apex/com.android.runtime/lib/bionic:/system/lib\n"
                 "namespace.default.links = vendor\n"
-                "namespace.default.link.vendor.shared_libs = lights.r800.so:libgalwear-ns-parent.so\n"
+                "namespace.default.link.vendor.shared_libs = lights.r800.so:libgalwear-ns-parent.so:libgalwear-ns-missing.so:libgalwear-ns-bad-symbol.so\n"
                 "namespace.vendor.isolated = true\n"
                 "namespace.vendor.search.paths = /vendor/lib/hw\n"
                 "namespace.vendor.links = default\n"
@@ -376,7 +390,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 if namespace_fixture:
                     fixture_marker = "HAL_NAMESPACE_FIXTURE_PASS linked_lights=1 denied_name=2 denied_absolute=2"
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
-                                  log.splitlines().count("HAL_NAMESPACE_TRANSITIVE_PASS parent=1 relocated=1 private_denials=6") == 1)
+                                  log.splitlines().count("HAL_NAMESPACE_TRANSITIVE_PASS parent=1 relocated=1 private_denials=6") == 1 and
+                                  log.splitlines().count("HAL_NAMESPACE_FAILURE_RECOVERY_PASS missing_needed=3 missing_symbol=3 recovered=6 fd_stable=1") == 1)
                 passed = (proc.returncode == 0 and len(matches) == 1 and
                           (not lifecycle or life_ok) and
                           (not (lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture or namespace_fixture) or fixture_ok))
@@ -426,6 +441,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "namespace_fixture_requested": namespace_fixture,
         "synthetic_namespace_link_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_config_sha256": namespace_config_sha if namespace_fixture else None,
+        "synthetic_namespace_failure_recovery_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "synthetic_namespace_transitive_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
         "namespace_fixture_sha256": evidence.get("namespace_fixture_sha256") if namespace_fixture else None,
         "android_namespace_runtime_verified": False, "hal_open_called": lifecycle or lights_fixture or sensors_fixture or sensors_context or sensors_evdev or gps_fixture or audio_fixture or audio_pcm_fixture or hwc_fixture,

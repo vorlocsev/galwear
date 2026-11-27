@@ -544,6 +544,41 @@ static int namespace_transitive(void)
     return ok && namespace_private_denied();
 }
 
+/* Prove failures are dependency/relocation errors, not allowlist denials.
+ * Reopen and call a known-good library after every rejected load. */
+static int namespace_failure_recovery(void)
+{
+    const char *names[]={"libgalwear-ns-missing.so","libgalwear-ns-bad-symbol.so"};
+    const char *files[]={"/vendor/lib/hw/libgalwear-ns-missing.so",
+                         "/vendor/lib/hw/libgalwear-ns-bad-symbol.so"};
+    struct stat st;
+    for (int i=0;i<2;++i)
+        if (lstat(files[i],&st) || !S_ISREG(st.st_mode) || st.st_size<=0) return 0;
+    if (lstat("/vendor/lib/hw/libgalwear-ns-absent.so",&st)!=-1 || errno!=ENOENT) return 0;
+    int before=fd_count();
+    if (before<0) return 0;
+    for (int round=0;round<3;++round) {
+        for (int i=0;i<2;++i) {
+            dlerror();
+            void *bad=dlopen(names[i],RTLD_NOW|RTLD_LOCAL);
+            const char *err=dlerror();
+            if (bad) { dlclose(bad); return 0; }
+            fprintf(stderr,"namespace expected failure %s: %s\n",names[i],err?err:"none");
+            if (!err || (i==0 && (!strstr(err,"libgalwear-ns-absent.so") || !strstr(err,"not found"))) ||
+                (i==1 && (!strstr(err,"r800_namespace_missing_symbol") || !strstr(err,"cannot locate symbol"))))
+                return 0;
+            void *good=dlopen("libgalwear-ns-parent.so",RTLD_NOW|RTLD_LOCAL);
+            if (!good) return 0;
+            dlerror();
+            int (*call)(void)=dlsym(good,"r800_namespace_parent");
+            const char *lookup=dlerror();
+            int ok=!lookup && call && call()==0x827;
+            if (dlclose(good) || !ok || fd_count()!=before) return 0;
+        }
+    }
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3 && (argc != 4 ||
@@ -583,6 +618,8 @@ int main(int argc, char **argv)
         if (!namespace_denied()) { dlclose(handle); return 187; }
         if (!namespace_transitive()) { dlclose(handle); return 188; }
         puts("HAL_NAMESPACE_TRANSITIVE_PASS parent=1 relocated=1 private_denials=6");
+        if (!namespace_failure_recovery()) { dlclose(handle); return 189; }
+        puts("HAL_NAMESPACE_FAILURE_RECOVERY_PASS missing_needed=3 missing_symbol=3 recovered=6 fd_stable=1");
         if (dlclose(handle)) return 5;
         puts("HAL_NAMESPACE_FIXTURE_PASS linked_lights=1 denied_name=2 denied_absolute=2");
         return 0;
