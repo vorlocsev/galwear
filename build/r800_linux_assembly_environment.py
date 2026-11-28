@@ -116,6 +116,64 @@ def verify(lock_path,pin,source_sha):
             "reproducible_build_verified":False,"hardware_tested":False,"safe_to_flash":False}
 
 
+PROBE_CHECKS={"private_namespace","rw_loop_mount","selinux_xattr",
+              "tar_xattr_roundtrip","ro_remount_persistence","unmount","offline_fsck"}
+
+
+def saved_environment(lock,probe,pin,source_sha):
+    require(isinstance(lock,dict) and set(lock)=={"schema","source_sha","os","architecture",
+            "python_version","tools","complete_environment_verified","dynamic_libraries_verified","safe_to_flash"}
+            and lock["schema"]==SCHEMA and lock["source_sha"]==source_sha and
+            lock["os"]==OS and lock["architecture"]=="x86_64" and
+            isinstance(lock["python_version"],str) and
+            all(lock[k] is False for k in ("complete_environment_verified","dynamic_libraries_verified","safe_to_flash")),
+            "Unexpected saved environment lock scope")
+    tools=lock["tools"]
+    require(isinstance(tools,dict) and set(tools)==set(TOOLS),"Host tool inventory mismatch")
+    for row in tools.values():
+        require(isinstance(row,dict) and set(row)=={"bytes","sha256","resolved"} and
+                type(row["bytes"]) is int and 0<row["bytes"]<=TOOL_LIMIT and valid_pin(row["sha256"]) and
+                isinstance(row["resolved"],str),"Invalid saved host executable identity")
+        target=Path(row["resolved"])
+        require(target.is_absolute() and ".." not in target.parts and
+                any(target.is_relative_to(root) for root in SYSTEM_DIRS),"Invalid saved host executable path")
+    require(isinstance(probe,dict) and probe.get("schema")=="galwear-r800-synthetic-mount-probe-v1" and
+            probe.get("source_sha")==source_sha and probe.get("environment_lock_sha256")==pin and
+            probe.get("status")=="SYNTHETIC_EXT4_MOUNT_XATTR_PASS_ONLY" and
+            probe.get("loop_detached_and_workspace_removed") is True and
+            "retained_fixture" in probe and probe["retained_fixture"] is None and
+            "error" in probe and probe["error"] is None and
+            all(probe.get(k) is False for k in ("donor_images_used","physical_devices_used",
+                "vendor_build_verified","reproducible_build_verified","hardware_tested","safe_to_flash")),
+            "Synthetic mount probe scope or lock binding mismatch")
+    checks=probe.get("checks")
+    require(isinstance(checks,dict) and set(checks)==PROBE_CHECKS and
+            all(v is True for v in checks.values()),"Incomplete saved synthetic mount checks")
+    return "SAVED_HOST_LOCK_AND_SYNTHETIC_PROBE_ONLY"
+
+
+def read_pinned(path,pin):
+    path=Path(path).absolute()
+    require(path.resolve(strict=True)==path,"Canonical host evidence path required")
+    raw=read_regular(path,REPORT_LIMIT)
+    require(valid_pin(pin) and hashlib.sha256(raw).hexdigest()==pin,"Host evidence SHA-256 mismatch")
+    return raw,json.loads(raw,object_pairs_hook=unique_keys)
+
+
+def verify_bundle(bundle,source_sha):
+    lock_path,lock_pin,probe_path,probe_pin=bundle
+    require(Path(lock_path)!=Path(probe_path),"Distinct host evidence files required")
+    require(os.environ.get("PATH")=="/usr/sbin:/usr/bin:/sbin:/bin","Set documented system PATH")
+    lock_raw,lock=read_pinned(lock_path,lock_pin)
+    probe_raw,probe=read_pinned(probe_path,probe_pin)
+    saved_environment(lock,probe,lock_pin,source_sha)
+    live=verify(lock_path,lock_pin,source_sha)
+    require(not live["prerequisites"]["blockers"],"Live host prerequisites review required")
+    require(read_pinned(lock_path,lock_pin)[0]==lock_raw and
+            read_pinned(probe_path,probe_pin)[0]==probe_raw,"Host evidence changed")
+    return lock_raw,probe_raw,live
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--mode",choices=("capture","check"),required=True)
