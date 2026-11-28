@@ -1417,6 +1417,26 @@ jobs:
               assert r[flag] is False
           print("REAL_STAGED_REFERENCE_LOADER_PASS")
           PY
+      - name: Observe actual staged GPSBridge entry without proprietary GNSS plugin
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          pin=$(sha256sum "$RUNNER_TEMP/r800-loader-runtime/runtime-layer-evidence.json" | cut -d' ' -f1)
+          loader_pin=$(sha256sum "$ref/reference-loader-qemu.json" | cut -d' ' -f1)
+          python3 build/r800_runtime_entry_qemu.py --runtime "$RUNNER_TEMP/r800-loader-runtime" \
+            --runtime-sha256 "$pin" --loader "$ref/reference-loader-qemu.json" --loader-sha256 "$loader_pin" \
+            --scope DEBIAN_REFERENCE_NOT_TIZEN --source-sha "$GITHUB_SHA" --output "$ref/reference-entry-qemu.json"
+          python3 - "$ref/reference-entry-qemu.json" <<'PY'
+          import json, os, sys
+          r=json.load(open(sys.argv[1]))
+          assert r["source_sha"]==os.environ["GITHUB_SHA"]
+          assert r["status"]=="REFERENCE_NEGATIVE_ENTRY_PASS"
+          assert r["scope"]=="DEBIAN_REFERENCE_NOT_TIZEN"
+          assert r["observations"]["/opt/usr/r800dev/gpsbridge"]["classification"]=="REFERENCE_EXPECTED_MISSING_LIBBRCM"
+          for flag in ("daemon_startup_verified","dlopen_runtime_verified","gnss_runtime_verified","hardware_tested","safe_to_flash"):
+              assert r[flag] is False
+          print("REAL_REFERENCE_MISSING_PLUGIN_ENTRY_PASS")
+          PY
       - name: Isolated synthetic GPS HAL and daemon recovery against Debian reference
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
@@ -1477,6 +1497,7 @@ jobs:
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-prelink.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-glibc.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-loader-qemu.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-entry-qemu.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-mock.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-xtra.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-repeatability-*.json
