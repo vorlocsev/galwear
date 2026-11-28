@@ -14,6 +14,23 @@ static int initialized,context,surface,current,bound;
 static GLenum gl_error;
 static char sync_token;
 static int sync_live,sync_signaled;
+#ifdef FIXTURE_NATIVE_FENCE
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
+/* Eventfd substitute; never claim this descriptor is a Linux sync_file. */
+static int native_kind,native_fd=-1;
+static void native_reset(void) {
+    if(native_fd>=0)close(native_fd);
+    native_fd=-1;native_kind=0;
+}
+static int native_ready(void) {
+    if(native_fd<0)return 0;
+    struct pollfd p={.fd=native_fd,.events=POLLIN};
+    return poll(&p,1,0)==1 && (p.revents&POLLIN)!=0;
+}
+#endif
 #define SYNC ((EGLSyncKHR)&sync_token)
 static int shader,source_ok,compiled,program,linked,active,draws;
 static void reset_gl(void) {
@@ -90,7 +107,11 @@ EGLBoolean eglSwapBuffers(EGLDisplay d,EGLSurface s) {
     /* Model successful completion only for this test's bound surface. */
     if(!current)return fail(EGL_BAD_MATCH);
 #ifdef FIXTURE_CONTEXT_GLES
+#ifdef FIXTURE_NATIVE_FENCE
+    if(sync_live&&!native_kind)sync_signaled=1;
+#else
     if(sync_live)sync_signaled=1;
+#endif
 #endif
     return EGL_TRUE;
 }
@@ -112,6 +133,9 @@ EGLBoolean eglTerminate(EGLDisplay d) {
     initialized=context=surface=current=bound=0;reset_gl();
 #ifdef FIXTURE_CONTEXT_GLES
     sync_live=sync_signaled=0;
+#ifdef FIXTURE_NATIVE_FENCE
+    native_reset();
+#endif
 #endif
     return EGL_TRUE;
 }
@@ -119,7 +143,11 @@ const char *eglQueryString(EGLDisplay d,EGLint name) {
     if(!ready(d))return 0;
     if(name!=EGL_EXTENSIONS){fail(EGL_BAD_PARAMETER);return 0;}
 #ifdef FIXTURE_CONTEXT_GLES
+#ifdef FIXTURE_NATIVE_FENCE
+    return "EGL_KHR_fence_sync EGL_ANDROID_native_fence_sync";
+#else
     return "EGL_KHR_fence_sync";
+#endif
 #else
     return "";
 #endif
@@ -127,6 +155,31 @@ const char *eglQueryString(EGLDisplay d,EGLint name) {
 #ifdef FIXTURE_CONTEXT_GLES
 /* Single-object, zero-timeout fence model. No real sync_file, waits or GPU. */
 static EGLSyncKHR create_sync(EGLDisplay d,EGLenum type,const EGLint *attrs) {
+#ifdef FIXTURE_NATIVE_FENCE
+    if(type==EGL_SYNC_NATIVE_FENCE_ANDROID){
+        int fd=-1;
+        if(attrs&&attrs[0]!=EGL_NONE){
+            if(attrs[0]!=EGL_SYNC_NATIVE_FENCE_FD_ANDROID){
+                fail(EGL_BAD_ATTRIBUTE);return EGL_NO_SYNC_KHR;
+            }
+            fd=attrs[1];
+            if(attrs[2]!=EGL_NONE||fd < -1){
+                if(fd>=0)close(fd);
+                fail(EGL_BAD_ATTRIBUTE);return EGL_NO_SYNC_KHR;
+            }
+        }
+        if(fd>=0&&fcntl(fd,F_GETFD)<0){
+            fail(EGL_BAD_PARAMETER);return EGL_NO_SYNC_KHR;
+        }
+        if(!ready(d)){if(fd>=0)close(fd);return EGL_NO_SYNC_KHR;}
+        if(!current||sync_live){
+            if(fd>=0)close(fd);
+            fail(current?EGL_BAD_ALLOC:EGL_BAD_MATCH);return EGL_NO_SYNC_KHR;
+        }
+        native_kind=1;native_fd=fd;
+        sync_live=1;sync_signaled=0;return SYNC;
+    }
+#endif
     if(!ready(d))return EGL_NO_SYNC_KHR;
     if(type!=EGL_SYNC_FENCE_KHR){fail(EGL_BAD_ATTRIBUTE);return EGL_NO_SYNC_KHR;}
     if(attrs&&attrs[0]!=EGL_NONE){fail(EGL_BAD_ATTRIBUTE);return EGL_NO_SYNC_KHR;}
@@ -141,19 +194,47 @@ static EGLBoolean valid_sync(EGLDisplay d,EGLSyncKHR sync) {
 }
 static EGLBoolean destroy_sync(EGLDisplay d,EGLSyncKHR sync) {
     if(!valid_sync(d,sync))return EGL_FALSE;
-    sync_live=sync_signaled=0;return EGL_TRUE;
+    sync_live=sync_signaled=0;
+#ifdef FIXTURE_NATIVE_FENCE
+    native_reset();
+#endif
+    return EGL_TRUE;
 }
 static EGLint wait_sync(EGLDisplay d,EGLSyncKHR sync,EGLint flags,EGLTimeKHR timeout) {
     if(!valid_sync(d,sync))return EGL_FALSE;
     if(flags||timeout!=0){fail(EGL_BAD_PARAMETER);return EGL_FALSE;}
+#ifdef FIXTURE_NATIVE_FENCE
+    if(native_kind)return native_ready()?EGL_CONDITION_SATISFIED_KHR:EGL_TIMEOUT_EXPIRED_KHR;
+#endif
     return sync_signaled?EGL_CONDITION_SATISFIED_KHR:EGL_TIMEOUT_EXPIRED_KHR;
 }
 static EGLBoolean get_sync(EGLDisplay d,EGLSyncKHR sync,EGLint attribute,EGLint *value) {
     if(!valid_sync(d,sync))return EGL_FALSE;
     if(!value)return fail(EGL_BAD_PARAMETER);
     if(attribute!=EGL_SYNC_STATUS_KHR)return fail(EGL_BAD_ATTRIBUTE);
+#ifdef FIXTURE_NATIVE_FENCE
+    if(native_kind){*value=native_ready()?EGL_SIGNALED_KHR:EGL_UNSIGNALED_KHR;return EGL_TRUE;}
+#endif
     *value=sync_signaled?EGL_SIGNALED_KHR:EGL_UNSIGNALED_KHR;return EGL_TRUE;
 }
+#ifdef FIXTURE_NATIVE_FENCE
+static EGLint dup_native(EGLDisplay d,EGLSyncKHR sync) {
+    if(!valid_sync(d,sync))return EGL_NO_NATIVE_FENCE_FD_ANDROID;
+    if(!native_kind||native_fd<0){fail(EGL_BAD_PARAMETER);return EGL_NO_NATIVE_FENCE_FD_ANDROID;}
+    int fd=fcntl(native_fd,F_DUPFD_CLOEXEC,0);
+    if(fd<0)fail(EGL_BAD_ALLOC);
+    return fd;
+}
+/* A flush creates an already-signaled eventfd in this deliberately
+ * synchronous model. Real GPU command completion is not simulated. */
+void glFlush(void) {
+    if(!gl_ready())return;
+    if(sync_live&&native_kind&&native_fd<0){
+        native_fd=eventfd(1,EFD_CLOEXEC|EFD_NONBLOCK);
+        if(native_fd<0)gl_error=GL_OUT_OF_MEMORY;
+    }
+}
+#endif
 #endif
 __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *p) {
 #ifdef FIXTURE_CONTEXT_GLES
@@ -162,6 +243,9 @@ __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *p) {
     if(strcmp(p,"eglDestroySyncKHR")==0)return (__eglMustCastToProperFunctionPointerType)destroy_sync;
     if(strcmp(p,"eglClientWaitSyncKHR")==0)return (__eglMustCastToProperFunctionPointerType)wait_sync;
     if(strcmp(p,"eglGetSyncAttribKHR")==0)return (__eglMustCastToProperFunctionPointerType)get_sync;
+#ifdef FIXTURE_NATIVE_FENCE
+    if(strcmp(p,"eglDupNativeFenceFDANDROID")==0)return (__eglMustCastToProperFunctionPointerType)dup_native;
+#endif
 #else
     (void)p;
 #endif

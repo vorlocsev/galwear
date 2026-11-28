@@ -141,3 +141,15 @@ EGL_ANDROID_native_fence_sync не объявляется, FD не выдают�
 синтетическая модель не доказывает реальное KHR fence semantics или
 kernel sync_file, не проверяет ожидание с ненулевым timeout и не является
 EGL conformance test. Native fence remains unverified.
+
+## Android native fence FD ownership model
+
+Reference: https://registry.khronos.org/EGL/extensions/ANDROID/EGL_ANDROID_native_fence_sync.txt (v3, 2012-09-04).
+Отдельный combined native fixture моделирует передачу FD при импорте,
+CLOEXEC dup при экспорте, сохранение caller-owned dup после destroy/terminate,
+закрытие принятого FD при отказе (явный контракт модели), генерацию eventfd
+при flush, polling до/после сигнала, и стабильность FD. Четыре цикла,
+4 imports, 8 exports, 8 rejected transfers. Прежние unsupported варианты
+сохранены. eventfd — не sync_file; не проверяются kernel ioctls, actual GPU
+completion, ненулевые timeout, многопоточность или EGL conformance.
+Синтетические provider binaries не входят в vendor overlay.

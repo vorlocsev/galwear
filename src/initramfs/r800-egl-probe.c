@@ -5,6 +5,11 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 static const char *egl[]={"eglGetDisplay","eglInitialize","eglChooseConfig","eglCreateContext",
@@ -174,6 +179,82 @@ static void lifecycle(void *h,int with_gles) {
     if(with_gles)gles_context(h,3);
     assert(!p_eglChooseConfig(d,cfgattrs,&config,1,&count));EXPECT_ERROR(EGL_NOT_INITIALIZED);
 }
+static void closed_fd(int fd) {
+    errno=0;assert(fcntl(fd,F_GETFD)==-1&&errno==EBADF);
+}
+static int readable(int fd) {
+    struct pollfd p={.fd=fd,.events=POLLIN};
+    int result=poll(&p,1,0);
+    assert(result>=0&&!(p.revents&(POLLERR|POLLNVAL|POLLHUP)));
+    return result==1&&(p.revents&POLLIN)!=0;
+}
+static void native_fence_cycle(void *h) {
+    int baseline=fds();
+    RESOLVE(eglGetDisplay);RESOLVE(eglInitialize);RESOLVE(eglQueryString);
+    RESOLVE(eglGetProcAddress);RESOLVE(eglGetError);RESOLVE(eglBindAPI);
+    RESOLVE(eglChooseConfig);RESOLVE(eglCreateContext);RESOLVE(eglCreatePbufferSurface);
+    RESOLVE(eglMakeCurrent);RESOLVE(eglDestroyContext);RESOLVE(eglDestroySurface);
+    RESOLVE(eglTerminate);RESOLVE(glFlush);RESOLVE(glGetError);
+    EGLDisplay d=p_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    assert(d!=EGL_NO_DISPLAY&&p_eglInitialize(d,0,0));
+    assert(strcmp(p_eglQueryString(d,EGL_EXTENSIONS),
+                  "EGL_KHR_fence_sync EGL_ANDROID_native_fence_sync")==0);
+    struct fence_api ext={
+        (PFNEGLCREATESYNCKHRPROC)p_eglGetProcAddress("eglCreateSyncKHR"),
+        (PFNEGLDESTROYSYNCKHRPROC)p_eglGetProcAddress("eglDestroySyncKHR"),
+        (PFNEGLCLIENTWAITSYNCKHRPROC)p_eglGetProcAddress("eglClientWaitSyncKHR"),
+        (PFNEGLGETSYNCATTRIBKHRPROC)p_eglGetProcAddress("eglGetSyncAttribKHR")
+    };
+    PFNEGLDUPNATIVEFENCEFDANDROIDPROC export_fd=
+        (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)p_eglGetProcAddress("eglDupNativeFenceFDANDROID");
+    assert(ext.create&&ext.destroy&&ext.wait&&ext.get&&export_fd);
+    absent(h,"eglDupNativeFenceFDANDROID");
+    /* Test-only failure contract: a recognized supplied fd is consumed. */
+    int producer=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);assert(producer>=0);
+    int transferred=fcntl(producer,F_DUPFD_CLOEXEC,0);assert(transferred>=0);
+    EGLint attrs[]={EGL_SYNC_NATIVE_FENCE_FD_ANDROID,transferred,EGL_NONE};
+    assert(ext.create(d,EGL_SYNC_NATIVE_FENCE_ANDROID,attrs)==EGL_NO_SYNC_KHR);
+    EXPECT_ERROR(EGL_BAD_MATCH);closed_fd(transferred);
+    assert(!readable(producer));
+    assert(p_eglBindAPI(EGL_OPENGL_ES_API));
+    const EGLint ctx[]={EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE};
+    const EGLint pb[]={EGL_WIDTH,8,EGL_HEIGHT,8,EGL_NONE};
+    EGLConfig config=0;EGLint n=0;
+    assert(p_eglChooseConfig(d,0,&config,1,&n)&&config&&n==1);
+    EGLContext c=p_eglCreateContext(d,config,EGL_NO_CONTEXT,ctx);assert(c!=EGL_NO_CONTEXT);
+    EGLSurface surface=p_eglCreatePbufferSurface(d,config,pb);assert(surface!=EGL_NO_SURFACE);
+    assert(p_eglMakeCurrent(d,surface,surface,c));
+    transferred=fcntl(producer,F_DUPFD_CLOEXEC,0);assert(transferred>=0);
+    attrs[1]=transferred;
+    EGLSyncKHR sync=ext.create(d,EGL_SYNC_NATIVE_FENCE_ANDROID,attrs);assert(sync!=EGL_NO_SYNC_KHR);
+    int duplicate=export_fd(d,sync);assert(duplicate>=0&&duplicate!=transferred&&duplicate!=producer);
+    assert(fcntl(duplicate,F_GETFD)&FD_CLOEXEC);
+    assert(ext.wait(d,sync,0,0)==EGL_TIMEOUT_EXPIRED_KHR&&!readable(duplicate));
+    /* A second transfer is rejected while the single model slot is occupied. */
+    int rejected=fcntl(producer,F_DUPFD_CLOEXEC,0);assert(rejected>=0);
+    attrs[1]=rejected;
+    assert(ext.create(d,EGL_SYNC_NATIVE_FENCE_ANDROID,attrs)==EGL_NO_SYNC_KHR);
+    EXPECT_ERROR(EGL_BAD_ALLOC);closed_fd(rejected);
+    assert(eventfd_write(producer,1)==0);
+    EGLint status=0;
+    assert(ext.get(d,sync,EGL_SYNC_STATUS_KHR,&status)&&status==EGL_SIGNALED_KHR);
+    assert(ext.wait(d,sync,0,0)==EGL_CONDITION_SATISFIED_KHR&&readable(duplicate));
+    assert(ext.destroy(d,sync));closed_fd(transferred);
+    assert(readable(duplicate)&&readable(producer));
+    assert(export_fd(d,sync)==EGL_NO_NATIVE_FENCE_FD_ANDROID);EXPECT_ERROR(EGL_BAD_PARAMETER);
+    assert(close(duplicate)==0&&close(producer)==0);
+    /* Generate an eventfd model at flush, not at create. */
+    sync=ext.create(d,EGL_SYNC_NATIVE_FENCE_ANDROID,0);assert(sync!=EGL_NO_SYNC_KHR);
+    assert(export_fd(d,sync)==EGL_NO_NATIVE_FENCE_FD_ANDROID);EXPECT_ERROR(EGL_BAD_PARAMETER);
+    p_glFlush();assert(p_glGetError()==GL_NO_ERROR);
+    duplicate=export_fd(d,sync);assert(duplicate>=0&&(fcntl(duplicate,F_GETFD)&FD_CLOEXEC));
+    assert(readable(duplicate));
+    assert(p_eglMakeCurrent(d,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT));
+    assert(p_eglDestroySurface(d,surface)&&p_eglDestroyContext(d,c));
+    /* Terminate closes the internal descriptor, but not the caller's dup. */
+    assert(p_eglTerminate(d));assert(readable(duplicate));assert(close(duplicate)==0);
+    assert(fds()==baseline);
+}
 static void lifecycle_cycles(void) {
     void *h=load("libEGL_galwear_lifecycle.so");
     for(int i=0;i<4;++i)lifecycle(h,0);
@@ -188,10 +269,14 @@ int main(void) {
     void *combined=load("libGLES_galwear_context.so");
     for(int i=0;i<4;++i)lifecycle(combined,1);
     assert(dlclose(combined)==0);
+    void *native=load("libGLES_galwear_native.so");
+    for(int i=0;i<4;++i)native_fence_cycle(native);
+    assert(dlclose(native)==0);
     assert(fds()==before);
     puts("EGL_LINK_FIXTURE_PASS cycles=4 split=1 combined=1 missing=1 private_denials=2 recovery=1 fd_stable=1");
     puts("EGL_LIFECYCLE_FIXTURE_PASS cycles=5 swaps=15 errors=35 partial_rollback=5 reload=1 fd_stable=1");
     puts("EGL_GLES_CONTEXT_FIXTURE_PASS cycles=4 draw_model=12 compile_recovery=4 link_recovery=4 context_reset=4 fd_stable=1");
     puts("EGL_EXTENSION_FIXTURE_PASS supported=4 absent=5 proc_only=4 timeout=4 signaled=4 destroy=4 native_fence_absent=9");
+    puts("EGL_NATIVE_FENCE_EVENTFD_FIXTURE_PASS cycles=4 imports=4 exports=8 rejected_transfers=8 flush_generate=4 terminate_cleanup=4 fd_stable=1");
     return 0;
 }
