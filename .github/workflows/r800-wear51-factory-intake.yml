@@ -16,6 +16,9 @@ on:
       - build/r800_wear51_apex_container.py
       - build/r800_wear51_art_dependencies.py
       - build/r800_wear51_art_probe.py
+      - build/r800_wear51_vm_probe.py
+      - build/r800_wear51_java_fixture.py
+      - tests/test_r800_wear51_java_fixture.py
       - build/r800_wear51_qemu_comparator.sh
       - build/r800_wear51_art_boot_probe.py
       - tests/test_r800_wear51_art_boot_probe.py
@@ -72,6 +75,8 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_r800_wear51_art_probe.py' -v
       - name: Verify experimental ART boot image probe
         run: python3 -m unittest discover -s tests -p 'test_r800_wear51_art_boot_probe.py' -v
+      - name: Verify original synthetic Java DEX fixture and VM controls
+        run: python3 -m unittest discover -s tests -p 'test_r800_wear51_java_fixture.py' -v
       - name: Obtain exact October 2025 factory image
         shell: bash
         run: |
@@ -197,13 +202,21 @@ jobs:
                           print("WEAR51_ART_BOOT_LOGDW",json.dumps(record,sort_keys=True))
                   if "comparison" in boot:
                       comparison=boot["comparison"]
-                      print("WEAR51_ART_QEMU_COMPARISON",json.dumps({k:v for k,v in comparison.items() if k not in ("result","linker_control","speed_experiment","determinism")},sort_keys=True))
+                      print("WEAR51_ART_QEMU_COMPARISON",json.dumps({k:v for k,v in comparison.items() if k not in ("result","linker_control","speed_experiment","determinism","java_vm")},sort_keys=True))
                       for name in ("linker_control","result"):
                           if name in comparison:
                               case=comparison[name]
                               print("WEAR51_ART_QEMU_COMPARISON_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                               for record in case.get("logdw_records",[])[:32]:
                                   print("WEAR51_ART_QEMU_COMPARISON_LOGDW",json.dumps({"case":name,**record},sort_keys=True))
+                      if "java_vm" in comparison:
+                          java=comparison["java_vm"]
+                          (evidence/"java-vm-probe.json").write_text(json.dumps(java,indent=2,sort_keys=True)+"\n")
+                          print("WEAR51_JAVA_VM",json.dumps({k:v for k,v in java.items() if k not in ("cases","staged_sha256")},sort_keys=True))
+                          for name,case in java.get("cases",{}).items():
+                              print("WEAR51_JAVA_VM_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
+                              for record in case.get("logdw_records",[])[:32]:
+                                  print("WEAR51_JAVA_VM_LOGDW",json.dumps({"case":name,**record},sort_keys=True))
                       if "speed_experiment" in comparison:
                           speed=comparison["speed_experiment"]
                           print("WEAR51_ART_SPEED",json.dumps({k:v for k,v in speed.items() if k!="result"},sort_keys=True))
@@ -494,6 +507,7 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/art-startup.json
             ${{ runner.temp }}/wear51-evidence/art-boot-probe.json
             ${{ runner.temp }}/wear51-evidence/dalvikvm-static.json
+            ${{ runner.temp }}/wear51-evidence/java-vm-probe.json
             ${{ runner.temp }}/wear51-evidence/qemu-comparator.json
             ${{ runner.temp }}/wear51-evidence/hal-compile.json
             ${{ runner.temp }}/wear51-evidence/hal-runtime.json
