@@ -106,7 +106,7 @@ def runtime_observations(loader,entry,runtime_pin,source_sha):
     return "OBSERVED_NOT_ACCEPTED"
 
 
-def review(root,pin,source_sha,*,runtime_pin=None,loader_path=None,loader_pin=None,
+def review(root,pin,source_sha,*,runtime_path=None,runtime_pin=None,loader_path=None,loader_pin=None,
            entry_path=None,entry_pin=None):
     checkout_sha(source_sha)
     root=Path(root).absolute()
@@ -136,10 +136,15 @@ def review(root,pin,source_sha,*,runtime_pin=None,loader_path=None,loader_pin=No
         require(verify_overlay(vendor,files,scratch)==u["vendor_overlay_matches"],
                 "Vendor overlay inspection changed")
     observations="NOT_TESTED"
-    supplied=(runtime_pin,loader_path,loader_pin,entry_path,entry_pin)
+    supplied=(runtime_path,runtime_pin,loader_path,loader_pin,entry_path,entry_pin)
     if any(v is not None for v in supplied):
         require(all(v is not None for v in supplied) and valid_pin(runtime_pin),
                 "Provide all local runtime observation inputs together")
+        t=read_report(Path(runtime_path),runtime_pin,source_sha,"LOCAL_TIZEN_ELF_FIRMWARE_RUNTIME_STAGED_ONLY")
+        require(t.get("schema")=="galwear-r800-tizen-runtime-v1" and t.get("chroot_mountpoints")==dirs and
+                set(t["files"])=={n for n,row in files.items() if row.get("layer")=="tizen-runtime"} and
+                all(all(row.get(key)==files[n].get(key) for key in ("bytes","sha256","mode"))
+                    for n,row in t["files"].items()),"Runtime evidence does not match final tree")
         l=read_report(Path(loader_path),loader_pin,source_sha,"ARM32_LOADER_LIST_PASS")
         e=read_report(Path(entry_path),entry_pin,source_sha,"LOCAL_STARTUP_OBSERVATIONS_ONLY")
         require(e.get("loader_evidence_sha256")==loader_pin,"Entry/loader binding mismatch")
@@ -162,7 +167,7 @@ def review(root,pin,source_sha,*,runtime_pin=None,loader_path=None,loader_pin=No
                         "Partition capacity, installation/recovery contract and persistent-state policy",
                         "Actual kernel boot, switch_root and Android framework startup",
                         "Physical HAL, GNSS, power and recovery acceptance"],
-            "runtime_observations_bound_to_final_tree":False,
+            "runtime_observations_bound_to_final_tree":observations=="OBSERVED_NOT_ACCEPTED",
             "daemon_startup_verified":False,"android_handover_tested":False,
             "hardware_tested":False,"safe_to_flash":False}
 
@@ -173,9 +178,13 @@ def main():
     p.add_argument("--tree-sha256",required=True)
     p.add_argument("--source-sha",required=True)
     p.add_argument("--output",type=Path,required=True)
+    for name in ("runtime","loader","entry"):
+        p.add_argument("--"+name,type=Path)
+        p.add_argument("--"+name+"-sha256")
     a=p.parse_args()
     require(not a.output.resolve().is_relative_to(a.tree.resolve()),"Report must be outside tree")
-    report=review(a.tree,a.tree_sha256,a.source_sha)
+    report=review(a.tree,a.tree_sha256,a.source_sha,runtime_path=a.runtime,runtime_pin=a.runtime_sha256,
+                  loader_path=a.loader,loader_pin=a.loader_sha256,entry_path=a.entry,entry_pin=a.entry_sha256)
     with a.output.open("x",encoding="utf-8") as stream:
         json.dump(report,stream,indent=2,sort_keys=True)
         stream.write("\n")
