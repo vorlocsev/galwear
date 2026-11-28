@@ -80,7 +80,7 @@ Catalog-confirmed metadata (2026-11-28):
 
 Status: CATALOG_METADATA_ONLY; archive bytes not downloaded or inspected.
 The managed pipeline still requires its existing RWDC.230905.003 factory
-pin (eb4977308b8fe6a25bbe0c4918d95e79b9f05ae608f48ac2f04b65c42f0b52).
+pin (eb4977308b8fe6a25bbe0c4918d95e6e79b9f05ae608f48ac2f04b65c42f0b52).
 Do not silently substitute the earlier build or relax the pin. Any alternative
 requires separate explicit version-specific qualification, including applicable
 software licensing permissions. Google limits use of factory images to the
@@ -88,3 +88,26 @@ terms accompanying Pixel Watch devices. Public GPL source references are
 separate from the proprietary factory image.
 
 No binary publication, donor compatibility verification or flash approval.
+
+
+## Follow-up evidence: functional kernel and stable regression
+
+- Exact head 555bf15455a26fcbc90e5b68c90139786175dcd2, run 46148823320:
+  functional AArch64 Image compiled, 17868824 bytes, SHA-256
+  cc79817e495c6a3d8fb8a8a9295f066b03db6b2e9acbb577165cd4c24c07c7fb;
+  DTB SHA-256 81d9d97234b3b92dcf4b88933459f68efde92dbe3f79b5697e66708e7ae8d43c.
+  Embedded CPIO and integration input checks passed. No boot test.
+- Exact head 379f1a80412870ad4339f2a41ba0a3db287ba291, run 46149966306:
+  2236 regression tests, OK, zero skips. HAL and cross-host jobs passed.
+  Kernel evidence belongs to the previous head; no same-head combined
+  donor-backed build has been performed.
+- Corrected the transcription of the RWDC catalog pin above to match
+  the official r11btwifi row and existing extractor constant. The LTE r11
+  row is a different archive. No source pin or binary changed.
+
+Factory metadata is not permission to port proprietary components. The
+official catalog restricts use to personal Pixel Watch devices under
+applicable license terms. Obtain appropriate rights before using any
+proprietary donor in GalWearOS; otherwise choose a suitably licensed
+alternative and qualify it independently. No download or extraction is
+claimed here.
