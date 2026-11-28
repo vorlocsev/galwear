@@ -64,3 +64,27 @@ validated; safe_to_flash=false.
 CI links:
 - https://github.com/vorlocsev/galwear/actions/runs/46147946582
 - https://github.com/vorlocsev/galwear/actions/runs/46147946595
+
+
+## Additional Pixel Watch Android 11 reference
+
+Catalog-confirmed metadata (2026-11-28):
+
+- Device: r11btwifi, first-generation Pixel Watch, Bluetooth/Wi-Fi.
+- Version: Android 11, RWD9.220429.033.G1, October 2022.
+- User-supplied factory URL: https://googledownloads.cn/dl/android/aosp/r11btwifi-rwd9.220429.033.g1-factory-e7c434da.zip
+- Published SHA-256: e7c434daf0c22872672207e3c81917a3470ebbf19c0ff5d5eb78e7f3a2895db8
+- Catalog: https://developers.google.cn/android/images-watch?hl=es
+- Google GPL source announcement: https://groups.google.com/g/android-building/c/ALQP58NCpEM
+- Corresponding reference kernel tag: android-wear-11.0.0_r0.1 (kernel/exynos, android-exynos-r11-4.19-android11-wear-jr2). This is not the SM-R800 kernel.
+
+Status: CATALOG_METADATA_ONLY; archive bytes not downloaded or inspected.
+The managed pipeline still requires its existing RWDC.230905.003 factory
+pin (eb4977308b8fe6a25bbe0c4918d95e79b9f05ae608f48ac2f04b65c42f0b52).
+Do not silently substitute the earlier build or relax the pin. Any alternative
+requires separate explicit version-specific qualification, including applicable
+software licensing permissions. Google limits use of factory images to the
+terms accompanying Pixel Watch devices. Public GPL source references are
+separate from the proprietary factory image.
+
+No binary publication, donor compatibility verification or flash approval.
