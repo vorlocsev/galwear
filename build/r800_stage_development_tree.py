@@ -23,6 +23,7 @@ from r800_extract_super import require
 from r800_stage_adaptation_layer import DEVICE, RUNTIME_REQUIRED, MAX_ENTRIES, MAX_TOTAL, MAX_FILE, valid_pin
 from r800_stage_android_layer import inspect_pair, metadata
 from r800_verify_tizen_stage import unique_keys, guest_name
+from r800_tizen_config_layout import layout, check_guest, materialize, verify_dir
 
 ANDROID = {"r800dev/android/system.img", "r800-android/vendor.img"}
 MANIFEST_LIMIT = 4*1024**2
@@ -56,7 +57,9 @@ def load(root, name, pin, source_sha, android):
         require(set(DEVICE)|RUNTIME_REQUIRED <= set(files), "Missing adaptation files")
         require(all(valid_pin(report.get(k)) for k in ("device_manifest_sha256","runtime_manifest_sha256")),
                 "Missing adaptation provenance pins")
-    dirs = set()
+    mountpoints = layout(report, files) if not android else {}
+    require(not android or not report.get("chroot_mountpoints"), "Android layer must not declare Tizen mountpoints")
+    dirs = set(mountpoints)
     for path,row in files.items():
         require(isinstance(path,str) and len(path)<=1024 and
                 all(re.fullmatch(r"[A-Za-z0-9_.@+-]+",p) and p not in (".","..") for p in path.split("/")),
@@ -72,7 +75,7 @@ def load(root, name, pin, source_sha, android):
             require(row.get("layer")=="tizen-runtime" and row.get("mode") in ("0o644","0o755"),
                     "Unexpected runtime metadata")
             if path.startswith("r800dev/tzlite/"):
-                guest_name(path.removeprefix("r800dev/tzlite"))
+                check_guest(path, mountpoints)
             else:
                 require(path in RUNTIME_REQUIRED, "Unexpected runtime member")
             if path=="r800dev/gpsbridge" or path.endswith("/ld-linux.so.3") or path.startswith("r800dev/tzlite/usr/bin/"):
@@ -91,6 +94,7 @@ def load(root, name, pin, source_sha, android):
                 s=entry.stat(follow_symlinks=False)
                 if stat.S_ISDIR(s.st_mode):
                     require(rel in dirs and not s.st_mode&0o7000,"Unexpected layer directory: "+rel)
+                    verify_dir(p, rel, mountpoints)
                     seen_dirs.add(rel)
                     pending.append(p)
                 else:
@@ -159,6 +163,8 @@ def assemble(adaptation, adaptation_sha, android, android_sha, output, source_sh
                     dest.chmod(int(row["mode"],8))
                 rows[path]={**{k:row[k] for k in ("bytes","sha256","mode")},
                             "layer":"android" if kind else row["layer"]}
+        mountpoints = layout(a, a["files"])
+        materialize(tree, mountpoints)
         sysimg=tree/"r800dev/android/system.img"
         venimg=tree/"r800-android/vendor.img"
         inspection=inspect_pair(sysimg,venimg,work)
@@ -182,9 +188,10 @@ def assemble(adaptation, adaptation_sha, android, android_sha, output, source_sh
                 "source_sha":source_sha,"adaptation_manifest_sha256":adaptation_sha,
                 "android_manifest_sha256":android_sha,"files":rows,
                 "total_bytes":sum(r["bytes"] for r in rows.values()),
+                "chroot_mountpoints":mountpoints,
                 "android_inspection":inspection,"vendor_overlay_matches":overlay,
                 "vendor_tree_role":"BUILD_PROVENANCE_ONLY",
-                "missing_inputs_and_gates":["Tizen configuration/plugins and ownership",
+                "missing_inputs_and_gates":["Additional Tizen configuration/plugins and ownership",
                     "Display assets, kernel/DTB handover and partition capacity",
                     "Wear OS provenance, VINTF/SELinux/APEX/ART compatibility",
                     "Hardware boot, recovery and installation acceptance"],
