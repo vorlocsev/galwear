@@ -534,6 +534,13 @@ class LinkerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "offset"):
             audit.inspect(fixture(needed=["libc.so"], bad_offset=True))
 
+    def test_hidl_versioned_needed_and_soname(self):
+        name = "android.hardware.graphics.composer@2.1.so"
+        self.assertEqual(audit.inspect(fixture("arm", needed=[name]))["needed"], [name])
+        self.assertEqual(audit.inspect(fixture("arm", sonames=[name]))["soname"], name)
+        with self.assertRaisesRegex(ValueError, "Unsafe"):
+            audit.inspect(fixture("arm", needed=["../"+name]))
+
     def test_unsafe_needed(self):
         with self.assertRaisesRegex(ValueError, "Unsafe"):
             audit.inspect(fixture(needed=["../libc.so"]))
