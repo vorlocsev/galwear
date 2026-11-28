@@ -107,6 +107,24 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(env.saved_environment(lock,probe,self.pin,SOURCE),
                          "SAVED_HOST_LOCK_AND_SYNTHETIC_PROBE_ONLY")
 
+    def test_versioned_llvm_target(self):
+        for name in ("llvm-readelf","llvm-readobj"):
+            target=Path("/usr/lib/llvm-18/bin")/name
+            self.assertTrue(env.approved_tool_target("llvm-readelf",target))
+            self.assertFalse(env.approved_tool_target("git",target))
+        self.assertFalse(env.approved_tool_target("llvm-readelf",Path("/usr/lib/llvm-custom/bin/llvm-readobj")))
+        self.assertFalse(env.approved_tool_target("llvm-readelf",Path("/usr/lib/llvm-18/bin/clang")))
+
+    def test_saved_versioned_llvm_target(self):
+        lock,probe=self.saved_fixture()
+        lock["tools"]["llvm-readelf"]["resolved"]="/usr/lib/llvm-18/bin/llvm-readobj"
+        self.assertEqual(env.saved_environment(lock,probe,self.pin,SOURCE),
+                         "SAVED_HOST_LOCK_AND_SYNTHETIC_PROBE_ONLY")
+        lock["tools"]["git"]["resolved"]="/usr/lib/llvm-18/bin/llvm-readobj"
+        with self.assertRaisesRegex(ValueError,"Invalid saved host executable path"):
+            env.saved_environment(lock,probe,self.pin,SOURCE)
+
+
     def test_saved_wrong_lock(self):
         lock,probe=self.saved_fixture()
         probe["environment_lock_sha256"]="0"*64
