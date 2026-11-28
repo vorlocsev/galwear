@@ -7,7 +7,7 @@ BUILD = str(Path(__file__).resolve().parents[1] / "build")
 if BUILD not in sys.path:
     sys.path.insert(0, BUILD)
 from r800_graphics_acceptance import (
-    ABI_HOLDS, FIXTURE_HOLDS, HWC_FLAGS, EGL_FLAGS, LIBHARDWARE, SYSTEM_CORE, combine,
+    ABI_HOLDS, FIXTURE_HOLDS, HWC_FLAGS, EGL_FLAGS, LIBHARDWARE, SYSTEM_CORE, combine, expressions,
 )
 
 
@@ -15,13 +15,15 @@ class GraphicsAcceptanceTests(unittest.TestCase):
     sha = "a" * 40
 
     def setUp(self):
-        layout = {"hwc_layer_1_t.size": 96, **{"field" + str(i): i for i in range(96)}}
+        layout = dict.fromkeys(expressions(), 0)
+        layout["hwc_layer_1_t.size"] = 96
         self.abi = dict.fromkeys(ABI_HOLDS, False)
         self.abi.update(source_sha=self.sha, status="AOSP11_LEGACY_GRAPHICS_LAYOUT_ONLY",
                         aosp_libhardware_commit=LIBHARDWARE, aosp_system_core_commit=SYSTEM_CORE,
                         fields_per_abi=97,
-                        layouts={arch: {"aosp": layout.copy(), "local": layout.copy(), "differences": []}
-                                 for arch in ("arm", "arm64")})
+                        layouts={arch: {"aosp": dict(layout, pointer_bytes=pointer),
+                                        "local": dict(layout, pointer_bytes=pointer), "differences": {}}
+                                 for arch, pointer in (("arm", 4), ("arm64", 8))})
         self.fixture = dict.fromkeys(FIXTURE_HOLDS, False)
         self.fixture.update(source_sha=self.sha, status="SYNTHETIC_GRAPHICS_PIPELINE_ONLY",
                             schema="galwear-r800-graphics-fixture-summary-v1", errors=[],
@@ -68,7 +70,7 @@ class GraphicsAcceptanceTests(unittest.TestCase):
         self.audit()
 
     def test_layout_difference(self):
-        self.abi["layouts"]["arm64"]["local"]["field0"] = 100
+        self.abi["layouts"]["arm64"]["local"]["pointer_bytes"] = 100
         self.audit()
 
     def test_truncated_layout(self):
@@ -85,6 +87,21 @@ class GraphicsAcceptanceTests(unittest.TestCase):
 
     def test_wrong_fixture_schema(self):
         self.fixture["schema"] = "other"
+        self.audit()
+
+    def test_wrong_difference_container(self):
+        self.abi["layouts"]["arm"]["differences"] = []
+        self.audit()
+
+    def test_equal_but_wrong_architecture(self):
+        for section in ("aosp", "local"):
+            self.abi["layouts"]["arm64"][section]["pointer_bytes"] = 4
+        self.audit()
+
+    def test_equal_but_wrong_field_names(self):
+        for section in ("aosp", "local"):
+            layout = self.abi["layouts"]["arm"][section]
+            layout["not_an_abi_field"] = layout.pop("pointer_bytes")
         self.audit()
 
     def test_invalid_sha(self):
