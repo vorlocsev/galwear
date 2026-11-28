@@ -86,12 +86,16 @@ def load(root,manifest,pin,source_sha):
     environment=None
     if "environment" in data:
         env=data["environment"]
-        require(isinstance(env,dict) and set(env)=={"lock","lock_sha256","probe","probe_sha256"} and
+        require(isinstance(env,dict) and set(env) in ({"lock","lock_sha256","probe","probe_sha256"},
+                    {"lock","lock_sha256","probe","probe_sha256","elf","elf_sha256"}) and
                 valid_pin(env["lock_sha256"]) and valid_pin(env["probe_sha256"]),
                 "Invalid environment lock and probe pins")
         environment=(local_path(root,env["lock"]),env["lock_sha256"],
                      local_path(root,env["probe"]),env["probe_sha256"])
-        require(environment[0]!=environment[2],"Distinct environment evidence paths required")
+        if "elf" in env:
+            require(valid_pin(env["elf_sha256"]),"Invalid host ELF report pin")
+            environment+=(local_path(root,env["elf"]),env["elf_sha256"])
+        require(len(set(environment[::2]))==len(environment)//2,"Distinct environment evidence paths required")
     assets=data["assets"]
     asset_path=asset_pin=None
     if assets is not None:
@@ -125,6 +129,7 @@ def check(config,output,source_sha):
             "ndk_selected_tool_evidence":ndk,
             "ndk_selected_tool_status":"NOT_SUPPLIED" if ndk is None else ndk["status"],
             "base_vendor_identity":base,"base_vendor_origin_verified":False,
+            "host_elf_status":"LIVE_STATIC_CANDIDATES_ONLY" if config["environment"] is not None and len(config["environment"])==6 else "NOT_SUPPLIED",
             "host_environment":host,"host_environment_status":"NOT_SUPPLIED" if host is None else "SAVED_PROBE_AND_LIVE_SELECTED_TOOLS_ONLY","effects_origin_verified":False,
             "donor_authenticity_verified":False,"hardware_tested":False,"safe_to_flash":False}
 
@@ -146,7 +151,8 @@ def main():
         # The existing builder independently checks all pins and evidence
         # before and after assembly, and publishes only after readiness.
         require(cfg["ndk_pins"] is not None,"Managed build requires explicit selected NDK tool pins")
-        require(cfg["environment"] is not None,"Managed build requires environment lock and synthetic probe")
+        require(cfg["environment"] is not None and len(cfg["environment"])==6,
+                "Managed build requires environment lock, synthetic probe and static ELF report")
         result=build(cfg["paths"],cfg["pins"],a.output,a.source_sha,cfg["xtra_abi"],
                      assets=cfg["assets"],assets_sha=cfg["assets_sha"],
                      stock_evidence=cfg["stock_evidence"],pixel_evidence=cfg["pixel_evidence"],
