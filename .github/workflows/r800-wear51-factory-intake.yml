@@ -1,0 +1,128 @@
+name: SM-R800 Wear OS 5.1 factory donor intake (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-integration-20261127
+    paths:
+      - .github/workflows/r800-wear51-factory-intake.yml
+      - build/r800_extract_wear51_factory.py
+      - tests/test_r800_extract_wear51_factory.py
+      - build/r800_extract_pixel_factory.py
+      - build/r800_extract_super.py
+      - build/r800_partition_identity.py
+      - build/r800_pixel_runtime_layout.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  factory-intake:
+    if: github.repository == 'vorlocsev/galwear' && github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate exact build archive selection
+        run: python3 -m unittest discover -s tests -p 'test_r800_extract_wear51_factory.py' -v
+      - name: Obtain exact October 2025 factory image
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/wear51-intake" "$RUNNER_TEMP/wear51-evidence"
+          root="$RUNNER_TEMP/wear51-intake"
+          name=r11btwifi-bw1a.251005.003.w1-factory-29f1da6f.zip
+          pin=29f1da6fde448bd093160ed0cae0cc431b6647149f136b7bfbcd7fa0afe418e4
+          for base in https://dl.google.com/dl/android/aosp https://googledownloads.cn/dl/android/aosp; do
+            rm -f "$root/factory.part"
+            if curl --fail --location --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 600 --retry 1 --max-filesize 8589934592 "$base/$name" -o "$root/factory.part" &&
+              printf '%s  %s\n' "$pin" "$root/factory.part" | sha256sum -c -; then
+              mv "$root/factory.part" "$root/factory.zip"
+              echo "WEAR51_FACTORY_SHA256_MATCH $pin"
+              break
+            fi
+          done
+          test -s "$root/factory.zip"
+          python3 build/r800_extract_wear51_factory.py --archive "$root/factory.zip" --output "$root/extracted"
+          cp "$root/extracted/factory-evidence.json" "$RUNNER_TEMP/wear51-evidence/"
+          rm -f "$root/factory.zip"
+      - name: Observe actual Android 15 partition layout and identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends e2fsprogs
+          PYTHONPATH=build python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          from r800_extract_wear51_factory import FACTORY_SHA256
+          from r800_extract_super import normalize, extract
+          from r800_super_inventory import inventory
+          from r800_partition_identity import inspect_partition
+          from r800_pixel_runtime_layout import audit
+          from r800_graphics_donor_binding import checkout_sha
+          root=Path(os.environ["RUNNER_TEMP"])/"wear51-intake"
+          evidence=root.parent/"wear51-evidence"
+          source=os.environ["GITHUB_SHA"]
+          checkout_sha(source)
+          factory=json.loads((evidence/"factory-evidence.json").read_text())
+          assert factory["factory_sha256"]==FACTORY_SHA256
+          images=factory["images"]
+          report={"schema":"galwear-r800-wear51-partitions-v1","source_sha":source,
+                  "factory_sha256":FACTORY_SHA256,"partitions":{},
+                  "status":"WEAR51_SELECTED_PARTITION_OBSERVATIONS_ONLY",
+                  "hardware_tested":False,"safe_to_flash":False}
+          def inspect_one(name,path,pin):
+              identity=inspect_partition(path,pin,name,source)
+              report["partitions"][name]=identity
+              if name in ("system","system_a","system_b") and identity["filesystem"]["kind"]=="EXT4":
+                  runtime=audit(path,pin,source)
+                  (evidence/"runtime-layout.json").write_text(json.dumps(runtime,indent=2,sort_keys=True)+"\n")
+                  print("WEAR51_RUNTIME_MEMBERS",json.dumps(runtime["members"],sort_keys=True))
+          if "super.img" in images:
+              assert "system.img" not in images, "Ambiguous System source"
+              raw=root/"super.raw"
+              origin=normalize(root/"extracted/super.img",raw,images["super.img"]["sha256"])
+              meta=inventory(raw,origin["raw_sha256"],0,source)
+              (evidence/"super-inventory.json").write_text(json.dumps(meta,indent=2,sort_keys=True)+"\n")
+              raw.unlink()
+              names=[n for n in ("system","system_a","vendor","vendor_a","product","product_a","system_ext","system_ext_a")
+                     if n in meta["partitions"] and meta["partitions"][n]["bytes"]>0 and not meta["partitions"][n]["disabled"]]
+              assert len(set(names)&{"system","system_a"})==1
+              result=extract(root/"extracted/super.img",images["super.img"]["sha256"],0,names,root/"logical",source)
+              report["super_extraction"]=result
+              for name,row in result["partitions"].items():
+                  path=root/"logical"/row["file"]
+                  inspect_one(name,path,row["sha256"])
+                  path.unlink()
+          else:
+              assert "system.img" in images
+              for name in ("system","vendor","product","system_ext","odm"):
+                  filename=name+".img"
+                  if filename not in images:
+                      continue
+                  raw=root/(name+".raw")
+                  origin=normalize(root/"extracted"/filename,raw,images[filename]["sha256"])
+                  inspect_one(name,raw,origin["raw_sha256"])
+                  report["partitions"][name]["normalization"]=origin
+                  raw.unlink()
+          checkout_sha(source)
+          (evidence/"partitions.json").write_text(json.dumps(report,indent=2,sort_keys=True)+"\n")
+          print("WEAR51_PARTITIONS",json.dumps({n:{"filesystem":v["filesystem"],"image_sha256":v["image_sha256"],"properties":v["properties"]["unique_values"]} for n,v in report["partitions"].items()},sort_keys=True))
+          PY
+      - name: Remove original and extracted binary images
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/wear51-intake"
+      - name: Upload JSON evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wear51-factory-evidence-only
+          path: |
+            ${{ runner.temp }}/wear51-evidence/factory-evidence.json
+            ${{ runner.temp }}/wear51-evidence/super-inventory.json
+            ${{ runner.temp }}/wear51-evidence/partitions.json
+            ${{ runner.temp }}/wear51-evidence/runtime-layout.json
+          if-no-files-found: warn
+          retention-days: 7
