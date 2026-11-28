@@ -180,6 +180,8 @@ jobs:
                   print("WEAR51_ART_DEPENDENCIES",json.dumps({k:v for k,v in graph.items() if k not in ("objects","edges")},sort_keys=True))
                   if graph["status"]=="SELECTED_ART_DEPENDENCY_CANDIDATES_ONLY":
                       for edge in graph["edges"]:
+                          if edge.get("kind")=="OBSERVED_DLOPEN":
+                              print("WEAR51_ART_OBSERVED_DLOPEN",json.dumps(edge,sort_keys=True))
                           if edge["status"]!="SINGLE_STATIC_CANDIDATE":
                               print("WEAR51_ART_DEPENDENCY_REVIEW",json.dumps(edge,sort_keys=True))
                   assert result["status"]=="WEAR51_MINIMAL_ARM32_RUNTIME_STATIC_ONLY", "Minimal Android 15 runtime requires review"
