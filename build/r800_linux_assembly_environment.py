@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import stat
 import sys
@@ -36,14 +37,26 @@ TOOLS=tuple(sorted(set("""
 """.split())))
 
 
+def approved_tool_target(name,target):
+    # Ubuntu packages expose llvm-readelf through versioned symlinks under
+    # /usr/lib/llvm-N/bin; llvm-readelf may resolve to its llvm-readobj binary.
+    # Do not generalize this exception to other PATH commands or libraries.
+    if any(target.is_relative_to(root) for root in SYSTEM_DIRS):
+        return True
+    return name=="llvm-readelf" and re.fullmatch(
+        r"/usr/lib/llvm-[0-9]{1,3}/bin/llvm-read(?:elf|obj)",str(target)) is not None
+
+
 def executable(name):
     found=shutil.which(name)
     require(found is not None,"Missing host tool: "+name)
     path=Path(found)
     require(path.is_absolute(),"Relative host tool on PATH: "+name)
-    target=path.resolve(strict=True)
-    require(any(target.is_relative_to(root) for root in SYSTEM_DIRS),
+    require(any(path.is_relative_to(root) for root in SYSTEM_DIRS) or
+            path.parent in (Path("/bin"),Path("/sbin")),
             "Host tool outside system directories: "+name)
+    target=path.resolve(strict=True)
+    require(approved_tool_target(name,target),"Host tool outside system directories: "+name)
     mode=target.lstat().st_mode
     require(stat.S_ISREG(mode) and mode&0o111,"Host tool is not executable: "+name)
     row=digest(target,TOOL_LIMIT)
@@ -130,13 +143,14 @@ def saved_environment(lock,probe,pin,source_sha):
             "Unexpected saved environment lock scope")
     tools=lock["tools"]
     require(isinstance(tools,dict) and set(tools)==set(TOOLS),"Host tool inventory mismatch")
-    for row in tools.values():
+    for name,row in tools.items():
         require(isinstance(row,dict) and set(row)=={"bytes","sha256","resolved"} and
                 type(row["bytes"]) is int and 0<row["bytes"]<=TOOL_LIMIT and valid_pin(row["sha256"]) and
                 isinstance(row["resolved"],str),"Invalid saved host executable identity")
         target=Path(row["resolved"])
         require(target.is_absolute() and ".." not in target.parts and
-                any(target.is_relative_to(root) for root in SYSTEM_DIRS),"Invalid saved host executable path")
+                str(target)==row["resolved"] and approved_tool_target(name,target),
+                "Invalid saved host executable path")
     require(isinstance(probe,dict) and probe.get("schema")=="galwear-r800-synthetic-mount-probe-v1" and
             probe.get("source_sha")==source_sha and probe.get("environment_lock_sha256")==pin and
             probe.get("status")=="SYNTHETIC_EXT4_MOUNT_XATTR_PASS_ONLY" and
