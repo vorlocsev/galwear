@@ -28,6 +28,22 @@ class ArtDependenciesTests(unittest.TestCase):
         self.assertEqual(r["edges"][0]["status"],"MULTIPLE_CANDIDATES")
         self.assertEqual(r["edges"][0]["eligible_candidates"],["a","b"])
 
+    def test_identical_candidates_not_namespace_proof(self):
+        infos={"root":elf(None,["a.so"]),"shared":elf("a.so")}
+        with patch.object(graph,"inspect",side_effect=lambda raw:infos[raw.decode()]):
+            r=graph.walk(lambda p: b"root" if p=="root" else b"shared",
+                         lambda name:["art/a","statsd/a"],("root",))
+        self.assertEqual(r["edges"][0]["status"],"MULTIPLE_CANDIDATES")
+        self.assertTrue(r["edges"][0]["candidate_bytes_identical"])
+        self.assertTrue(r["ambiguous_names"]["a.so"]["candidate_bytes_identical"])
+        self.assertFalse(r["namespace_resolution_verified"])
+
+    def test_different_candidates_remain_ambiguous(self):
+        r=self.run_graph({"root":elf(None,["a.so"]),"a":elf("a.so"),"b":elf("a.so")},
+                         {"a.so":["a","b"]})
+        self.assertFalse(r["ambiguous_names"]["a.so"]["candidate_bytes_identical"])
+        self.assertEqual(len(set(r["ambiguous_names"]["a.so"]["candidate_sha256"].values())),2)
+
     def test_missing_and_wrong_abi(self):
         r=self.run_graph({"root":elf(None,["a.so","b.so"]),"b":elf("b.so",abi="arm64")},
                          {"b.so":["b"]})
