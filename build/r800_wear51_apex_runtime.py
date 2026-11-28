@@ -37,7 +37,9 @@ REQUIRED_RUNTIME=("/bin/linker","/lib/bionic/libc.so","/lib/bionic/libm.so","/li
 ERRORS=(OSError,ValueError,RuntimeError,KeyError,zipfile.BadZipFile,subprocess.SubprocessError)
 
 
-def audit(image,pin,source,output,*,probe_art=False):
+def audit(image,pin,source,output,*,probe_art=False,qemu_compare=None):
+    if qemu_compare is not None and not probe_art:
+        raise ValueError("Comparator requires explicit ART probe")
     if pin != SYSTEM_PIN:
         raise ValueError("Expected observed Wear OS 5.1 System SHA-256")
     checkout_sha(source)
@@ -112,7 +114,7 @@ def audit(image,pin,source,output,*,probe_art=False):
         if probe_art:
             try:
                 from r800_wear51_art_probe import probe
-                art_startup=probe(sources,art_dependencies,scratch,source,pin)
+                art_startup=probe(sources,art_dependencies,scratch,source,pin,qemu_compare=qemu_compare)
                 for reader in readers:
                     reader.verify_unchanged()
             except (OverflowError,) + ERRORS as exc:
