@@ -96,3 +96,34 @@ SYNTHETIC_EXT4_MOUNT_XATTR_PASS_ONLY относится только к данн
 Реальные mount/xattr проверки ещё не выполнены в рамках разработки;
 модульные тесты используют заглушки. Проба не проверяет сборку vendor,
 изоляцию от враждебного root, оригинальные доноры или железо.
+
+
+## Статический ELF lock системных зависимостей
+
+Из той же VM и чистого exact-head checkout, с ранее закреплённым lock:
+
+```sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+/usr/bin/python3 build/r800_linux_host_elf_lock.py \
+  --mode capture --lock /local/galwear-inputs/linux-assembly-lock.json \
+  --lock-sha256 "$LOCK_SHA256" --source-sha "$HEAD_SHA" \
+  > /local/galwear-inputs/linux-host-elf-lock.json
+sha256sum /local/galwear-inputs/linux-host-elf-lock.json
+/usr/bin/python3 build/r800_linux_host_elf_lock.py \
+  --mode check --lock /local/galwear-inputs/linux-assembly-lock.json \
+  --lock-sha256 "$LOCK_SHA256" --source-sha "$HEAD_SHA" \
+  --report /local/galwear-inputs/linux-host-elf-lock.json \
+  --report-sha256 "$ELF_REPORT_SHA256"
+```
+
+SELECTED_HOST_ELF_CANDIDATES_ONLY означает наличие единственных статических
+кандидатов DT_NEEDED и PT_INTERP в стандартных каталогах, совпадение
+исполняемых файлов с Linux lock и повторную проверку хешей объектов.
+Неоднозначные, отсутствующие, нестандартные и неподдержанные ELF-кандидаты
+требуют HOST_ELF_REVIEW_REQUIRED (exit 2). Не использовать ldd.
+Отчёт не моделирует ld.so.cache, glibc-hwcaps, RPATH/RUNPATH, dlopen,
+Python extension imports и фактическую загрузку библиотек. Скриптовые
+обёртки и нестандартные пути пока требуют отдельного анализа.
+Отдельный NDK lock сохраняется. Этот ELF lock пока диагностический,
+не является обязательным gate Donor Manager и не доказывает
+воспроизводимость. Проверка на реальной Ubuntu VM ещё не выполнена.
