@@ -10,6 +10,8 @@ on:
       - build/r800_super_inventory.py
       - build/r800_partition_identity.py
       - build/r800_pixel_runtime_layout.py
+      - build/r800_pixel_vintf_contract.py
+      - tests/test_r800_pixel_vintf_contract.py
       - build/r800_pixel_hal_fixture_summary.py
       - tests/test_r800_pixel_hal_fixture_summary.py
       - build/r800_hal_dlopen_probe.py
@@ -505,6 +507,29 @@ jobs:
               "legacy_profile_identity":report.get("legacy_profile_identity"),
               "legacy_profile_review":report.get("legacy_profile_review"),"safe_to_flash":False},sort_keys=True))
           PY
+      - name: Observe Pixel VINTF manifest fragments and System matrices
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_r800_pixel_vintf_contract.py' -v
+          PYTHONPATH=build python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          from r800_pixel_vintf_contract import audit
+          root=Path(os.environ["RUNNER_TEMP"])/"pixel-intake"
+          evidence=root.parent/"pixel-evidence"
+          source=os.environ["GITHUB_SHA"]
+          system=json.loads((evidence/"pixel-raw-donor.json").read_text())
+          vendor=json.loads((evidence/"pixel-vendor-reference.json").read_text())
+          assert system["source_sha"]==vendor["source_sha"]==source
+          name,row=next(iter(system["partitions"].items()))
+          assert vendor["system_sha256"]==row["sha256"]
+          image=root/row["file"] if system["mode"]=="direct" else root/"logical"/row["file"]
+          result=audit(image,row["sha256"],root/"vendor.raw",vendor["vendor_normalization"]["raw_sha256"],source)
+          (evidence/"pixel-vintf-contract.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
+          print("PIXEL_VINTF_CONTRACT",json.dumps(result["groups"],sort_keys=True))
+          print("PIXEL_VINTF_DOCUMENTS",json.dumps({key:{p:{k:v for k,v in row.items() if k!="hals"} for p,row in result[key].items()} for key in ("vendor_manifests","system_matrices")},sort_keys=True))
+          PY
       - name: Remove factory archive and all extracted image bytes
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/pixel-intake"
@@ -537,5 +562,6 @@ jobs:
             ${{ runner.temp }}/pixel-evidence/pixel-hal-namespace-fixture.json
             ${{ runner.temp }}/pixel-evidence/pixel-hal-fixtures-summary.json
             ${{ runner.temp }}/pixel-evidence/pixel-vendor-reference.json
+            ${{ runner.temp }}/pixel-evidence/pixel-vintf-contract.json
           if-no-files-found: warn
           retention-days: 7
