@@ -26,17 +26,26 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == "vorlocsev/galwear" ]]
           [[ "$GITHUB_REF" == "refs/heads/development/r800-integration-20261127" || "$GITHUB_REF" == "refs/heads/development/r800-integration-linker-20261127" ]]
+          # GitHub can enqueue sibling push workflows after this index starts.
+          # Collect multiple bounded snapshots before publishing the pointer.
           for sha in "$CURRENT_SHA" "$PREVIOUS_SHA"; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
             [[ "$sha" != "0000000000000000000000000000000000000000" ]] || continue
             raw="$RUNNER_TEMP/ci-index-$sha.jsonl"
             out="$RUNNER_TEMP/ci-index-$sha.json"
-            gh api --method GET --paginate "repos/$GITHUB_REPOSITORY/actions/runs" \
-              -f head_sha="$sha" -f event=push -F per_page=100 \
-              --jq '.workflow_runs[] | {id,workflow_id,name,head_sha,status,conclusion,run_attempt,html_url}' > "$raw"
+            : > "$raw"
+            attempts=1
+            if [[ "$sha" == "$CURRENT_SHA" ]]; then attempts=4; fi
+            for ((attempt=1; attempt<=attempts; attempt++)); do
+              gh api --method GET --paginate "repos/$GITHUB_REPOSITORY/actions/runs" \
+                -f head_sha="$sha" -f event=push -F per_page=100 \
+                --jq '.workflow_runs[] | {id,workflow_id,name,head_sha,status,conclusion,run_attempt,html_url}' >> "$raw"
+              if ((attempt<attempts)); then sleep 12; fi
+            done
             jq -s --arg sha "$sha" '
               map(select(.head_sha == $sha and .name != "GalWear CI run discovery (metadata only)"))
-              | sort_by(.id) | reverse
+              | reduce .[] as $row ({}; .[($row.id|tostring)] = $row)
+              | [.[]] | sort_by(.id) | reverse
             ' "$raw" > "$out"
             echo "CI_RUN_INDEX_SHA=$sha"
             cat "$out"
