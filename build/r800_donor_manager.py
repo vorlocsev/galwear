@@ -13,6 +13,7 @@ from r800_android_userspace_preflight import read_regular
 from r800_build_local_development import build, preflight, stock_bindings, sha
 from r800_bind_pixel_system import verify as verify_pixel
 from r800_ndk_pins import verify as verify_ndk, KEYS as NDK_KEYS
+from r800_base_vendor_identity import audit as audit_base
 from r800_display_asset_layer import load_assets
 from r800_extract_super import require
 from r800_graphics_donor_binding import checkout_sha
@@ -101,15 +102,17 @@ def check(config,output,source_sha):
     ndk=None if config["ndk_pins"] is None else verify_ndk(paths["ndk"],config["ndk_pins"])
     pixel=verify_pixel(paths["system"],pins["system"],*config["pixel_evidence"],source_sha)
     stock=stock_bindings(paths,pins,config["stock_evidence"],source_sha)
+    base=audit_base(paths["base"],pins["base"],source_sha,
+                    effects=paths["effects"],effects_pin=pins["effects"])
     if config["assets"] is not None:
         require(not Path(output).resolve().is_relative_to(config["assets"]),"Output inside asset input")
         load_assets(config["assets"],config["assets_sha"])
-    return {"schema":"galwear-r800-managed-donor-check-v1","status":"MANAGED_INPUT_PINS_MATCH_ONLY",
+    return {"schema":"galwear-r800-managed-donor-check-v1","status":"MANAGED_INPUT_PINS_MATCH_ONLY" if not base["identity_blockers"] else "MANAGED_BASE_IDENTITY_REVIEW_REQUIRED",
             "source_sha":source_sha,"input_sha256":pins,"stock_donor_bindings":stock,
             "pixel_system_binding":pixel,"ndk_identity_verified":False,
             "ndk_selected_tool_evidence":ndk,
             "ndk_selected_tool_status":"NOT_SUPPLIED" if ndk is None else ndk["status"],
-            "base_vendor_origin_verified":False,"effects_origin_verified":False,
+            "base_vendor_identity":base,"base_vendor_origin_verified":False,"effects_origin_verified":False,
             "donor_authenticity_verified":False,"hardware_tested":False,"safe_to_flash":False}
 
 
@@ -136,7 +139,8 @@ def main():
                      ndk_pins=cfg["ndk_pins"],
                      managed_manifest=(a.workspace,a.manifest,a.manifest_sha256))
     print(json.dumps(result,indent=2,sort_keys=True))
+    return 2 if result["status"]=="MANAGED_BASE_IDENTITY_REVIEW_REQUIRED" else 0
 
 
 if __name__=="__main__":
-    main()
+    raise SystemExit(main())
