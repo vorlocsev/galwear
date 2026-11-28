@@ -118,6 +118,7 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
     require((environment is not None)==(managed_raw is not None),
             "Managed build requires environment lock and synthetic probe")
     if environment is not None:
+        require(len(environment)==6,"Managed build requires static host ELF report")
         host=verify_bundle(environment,source_sha)
     base_identity=None
     if managed_raw is not None:
@@ -180,7 +181,8 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
         copied={}
         if host is not None:
             require(verify_bundle(environment,source_sha)==host,"Host environment changed during assembly")
-            for name,data in (("linux-assembly-lock.json",host[0]),("synthetic-mount-probe.json",host[1])):
+            for name,data in (("linux-assembly-lock.json",host[0]),("synthetic-mount-probe.json",host[1]),
+                              ("linux-host-elf-lock.json",host[3])):
                 (evidence/name).write_bytes(data)
                 copied[name]=sha(data)
         if base_identity is not None:
@@ -246,6 +248,7 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  "managed_manifest_sha256":None if managed_raw is None else sha(managed_raw),
                  "base_vendor_identity_sha256":copied.get("base-vendor-identity.json"),
                  "environment_lock_sha256":copied.get("linux-assembly-lock.json"),
+                 "host_elf_lock_sha256":copied.get("linux-host-elf-lock.json"),
                  "synthetic_mount_probe_sha256":copied.get("synthetic-mount-probe.json"),
                  "stage_evidence_sha256":copied,"integrated_evidence_sha256":ip,
                  "missing_inputs_and_gates":i["missing_inputs_and_gates"],
