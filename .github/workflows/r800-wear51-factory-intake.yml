@@ -13,6 +13,7 @@ on:
       - build/r800_pixel_runtime_layout.py
       - build/r800_android_linker_audit.py
       - build/r800_wear51_apex_runtime.py
+      - build/r800_wear51_startup_diagnostics.py
       - build/r800_art_apex_mapping.py
       - build/r800_apex_inventory.py
       - build/r800_arm32_runtime_extract.py
@@ -208,6 +209,7 @@ jobs:
           cp "$root/hal/hal-compile.json" "$evidence/hal-compile.json"
           python3 build/r800_hal_dlopen_probe.py compile --ndk "$root/android-ndk-r27c" --hals "$root/hal" --source-sha "$GITHUB_SHA" --output "$root/hal-probe"
       - name: Test five HAL HMI exports with original Wear OS 5.1 Bionic
+        id: wear51_hmi
         shell: bash
         run: |
           set -euo pipefail
@@ -243,6 +245,15 @@ jobs:
           assert report["hal_open_called"] is False and report["hardware_tested"] is False and report["safe_to_flash"] is False
           print("WEAR51_ORIGINAL_BIONIC_HAL_HMI_PASS",json.dumps({"source_sha":source,"system_sha256":runtime["system_sha256"],"modules":sorted(hals),"safe_to_flash":False},sort_keys=True))
           PY
+      - name: Diagnose failed Android 15 startup without changing acceptance
+        if: failure() && steps.wear51_hmi.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/wear51-intake"
+          evidence="$RUNNER_TEMP/wear51-evidence"
+          python3 build/r800_wear51_startup_diagnostics.py --root "$root" --evidence "$evidence" \
+            --source-sha "$GITHUB_SHA" --output "$evidence/startup-diagnostics.json"
       - name: Remove original and extracted binary images
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/wear51-intake"
@@ -260,5 +271,6 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/apex-runtime.json
             ${{ runner.temp }}/wear51-evidence/hal-compile.json
             ${{ runner.temp }}/wear51-evidence/hal-runtime.json
+            ${{ runner.temp }}/wear51-evidence/startup-diagnostics.json
           if-no-files-found: warn
           retention-days: 7
