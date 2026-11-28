@@ -14,6 +14,7 @@ from r800_build_local_development import build, preflight, stock_bindings, sha
 from r800_bind_pixel_system import verify as verify_pixel
 from r800_ndk_pins import verify as verify_ndk, KEYS as NDK_KEYS
 from r800_base_vendor_identity import audit as audit_base
+from r800_linux_assembly_environment import verify_bundle
 from r800_display_asset_layer import load_assets
 from r800_extract_super import require
 from r800_graphics_donor_binding import checkout_sha
@@ -48,7 +49,8 @@ def load(root,manifest,pin,source_sha):
     raw=read_regular(manifest,LIMIT)
     require(valid_pin(pin) and sha(raw)==pin,"Donor manifest SHA-256 mismatch")
     data=json.loads(raw,object_pairs_hook=unique_keys)
-    require(isinstance(data,dict) and set(data)=={"schema","source_sha","inputs","evidence","xtra_abi","assets"} and
+    require(isinstance(data,dict) and set(data) in ({"schema","source_sha","inputs","evidence","xtra_abi","assets"},
+                          {"schema","source_sha","inputs","evidence","xtra_abi","assets","environment"}) and
             data["schema"]==SCHEMA and data["source_sha"]==source_sha,
             "Unexpected manifest schema or source SHA")
     rows=data["inputs"]
@@ -81,6 +83,15 @@ def load(root,manifest,pin,source_sha):
         if name!="system":
             reports[name]+= (row["archive_sha256"],)
     require(len({v[0] for v in reports.values()})==3,"Distinct donor reports required")
+    environment=None
+    if "environment" in data:
+        env=data["environment"]
+        require(isinstance(env,dict) and set(env)=={"lock","lock_sha256","probe","probe_sha256"} and
+                valid_pin(env["lock_sha256"]) and valid_pin(env["probe_sha256"]),
+                "Invalid environment lock and probe pins")
+        environment=(local_path(root,env["lock"]),env["lock_sha256"],
+                     local_path(root,env["probe"]),env["probe_sha256"])
+        require(environment[0]!=environment[2],"Distinct environment evidence paths required")
     assets=data["assets"]
     asset_path=asset_pin=None
     if assets is not None:
@@ -93,12 +104,13 @@ def load(root,manifest,pin,source_sha):
     checkout_sha(source_sha)
     return {"paths":paths,"pins":pins,"stock_evidence":{n:reports[n] for n in ("j4","tizen")},
             "pixel_evidence":reports["system"],"xtra_abi":data["xtra_abi"],
-            "assets":asset_path,"assets_sha":asset_pin,"ndk_pins":ndk_pins}
+            "assets":asset_path,"assets_sha":asset_pin,"ndk_pins":ndk_pins,"environment":environment}
 
 
 def check(config,output,source_sha):
     paths,pins=config["paths"],config["pins"]
     preflight(paths,pins,output,source_sha)
+    host=None if config["environment"] is None else verify_bundle(config["environment"],source_sha)[2]
     ndk=None if config["ndk_pins"] is None else verify_ndk(paths["ndk"],config["ndk_pins"])
     pixel=verify_pixel(paths["system"],pins["system"],*config["pixel_evidence"],source_sha)
     stock=stock_bindings(paths,pins,config["stock_evidence"],source_sha)
@@ -112,7 +124,8 @@ def check(config,output,source_sha):
             "pixel_system_binding":pixel,"ndk_identity_verified":False,
             "ndk_selected_tool_evidence":ndk,
             "ndk_selected_tool_status":"NOT_SUPPLIED" if ndk is None else ndk["status"],
-            "base_vendor_identity":base,"base_vendor_origin_verified":False,"effects_origin_verified":False,
+            "base_vendor_identity":base,"base_vendor_origin_verified":False,
+            "host_environment":host,"host_environment_status":"NOT_SUPPLIED" if host is None else "SAVED_PROBE_AND_LIVE_SELECTED_TOOLS_ONLY","effects_origin_verified":False,
             "donor_authenticity_verified":False,"hardware_tested":False,"safe_to_flash":False}
 
 
@@ -133,10 +146,11 @@ def main():
         # The existing builder independently checks all pins and evidence
         # before and after assembly, and publishes only after readiness.
         require(cfg["ndk_pins"] is not None,"Managed build requires explicit selected NDK tool pins")
+        require(cfg["environment"] is not None,"Managed build requires environment lock and synthetic probe")
         result=build(cfg["paths"],cfg["pins"],a.output,a.source_sha,cfg["xtra_abi"],
                      assets=cfg["assets"],assets_sha=cfg["assets_sha"],
                      stock_evidence=cfg["stock_evidence"],pixel_evidence=cfg["pixel_evidence"],
-                     ndk_pins=cfg["ndk_pins"],
+                     ndk_pins=cfg["ndk_pins"],environment=cfg["environment"],
                      managed_manifest=(a.workspace,a.manifest,a.manifest_sha256))
     print(json.dumps(result,indent=2,sort_keys=True))
     return 2 if result["status"]=="MANAGED_BASE_IDENTITY_REVIEW_REQUIRED" else 0
