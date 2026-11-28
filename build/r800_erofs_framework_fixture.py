@@ -7,12 +7,28 @@ from pathlib import Path
 import subprocess
 import tempfile
 import zipfile
+import struct
+import zlib
 
 from r800_framework_inventory import audit, require
 from r800_graphics_donor_binding import checkout_sha
 from r800_donor_preflight import digest
 
 EROFSPIN = "7bc147fafd53a2a9ff7c22399491079e5bfffafc"
+
+
+def header_only_dex(version):
+    raw = bytearray(140)
+    raw[:8] = b"dex\n"+version+b"\0"
+    struct.pack_into("<III", raw, 32, len(raw), 112, 0x12345678)
+    struct.pack_into("<I", raw, 52, 112)
+    struct.pack_into("<II", raw, 104, 28, 112)
+    struct.pack_into("<I", raw, 112, 2)
+    struct.pack_into("<HHII", raw, 116, 0, 0, 1, 0)
+    struct.pack_into("<HHII", raw, 128, 0x1000, 0, 1, 112)
+    raw[12:32] = hashlib.sha1(raw[32:]).digest()
+    struct.pack_into("<I", raw, 8, zlib.adler32(raw[12:]) & 0xffffffff)
+    return bytes(raw)
 
 
 def run(tool_root, output, source_sha):
@@ -32,8 +48,9 @@ def run(tool_root, output, source_sha):
                  "ro.build.characteristics=watch\n").encode()
         (tree/"build.prop").write_bytes(props)
         with zipfile.ZipFile(tree/"framework/framework.jar", "w", compression=zipfile.ZIP_STORED) as z:
-            z.writestr("classes.dex", b"synthetic-dex-not-executed\n"*4096)
-            z.writestr("classes2.dex", b"another-synthetic-member")
+            z.writestr("classes.dex", header_only_dex(b"039"))
+            z.writestr("classes2.dex", header_only_dex(b"035"))
+            z.writestr("fixture-resource.txt", b"synthetic-resource\n"*4096)
         (tree/"framework/services.jar").symlink_to("framework.jar")
         expected_members = {
             "/build.prop": hashlib.sha256(props).hexdigest(),
@@ -45,7 +62,8 @@ def run(tool_root, output, source_sha):
                            check=True, timeout=120)
             pin = digest(image)["sha256"]
             report = audit(image, pin, "system_a", source_sha, "",
-                           ["build.prop", "framework/framework.jar"], dump, pins[dump.name])
+                           ["build.prop", "framework/framework.jar"], dump, pins[dump.name],
+                           validate_dex=True)
             require(report["status"] == "SELECTED_FRAMEWORK_FILES_STATIC_ONLY",
                     label+": actual EROFS inventory rejected: "+json.dumps(report["members"]))
             require(report["filesystem"]["kind"] == "EROFS", "Wrong filesystem")
@@ -55,6 +73,11 @@ def run(tool_root, output, source_sha):
                 require(report["properties"][flag] is True, "Missing literal hint: "+flag)
             require(report["members"]["/framework/framework.jar"]["dex_entries"] ==
                     ["classes.dex", "classes2.dex"], "Unexpected JAR entries")
+            dex = report["members"]["/framework/framework.jar"]["dex_inventory"]["dex"]
+            require({name: row["version"] for name, row in dex.items()} ==
+                    {"classes.dex": "039", "classes2.dex": "035"} and
+                    all(row["checksum_matches"] is True and row["bytecode_verified"] is False
+                        for row in dex.values()), "DEX header evidence mismatch")
             negative = audit(image, pin, "system_a", source_sha, "",
                              ["framework/services.jar", "framework/android.test.base.jar"],
                              dump, pins[dump.name])
