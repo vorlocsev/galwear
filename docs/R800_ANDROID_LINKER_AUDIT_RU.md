@@ -108,3 +108,14 @@ combined, неполный экспорт glUseProgram, отказ загруз�
 warmup. Библиотеки синтетические, с NDK EGL/GLES prototypes, но функции
 не вызываются. Никаких реальных EGL init, GPU, SurfaceFlinger или donor
 библиотек. CI публикует только JSON evidence, safe_to_flash=false.
+
+## ARM32 synthetic EGL lifecycle
+
+Отдельный test-only EGL provider с одно-поточной моделью Display/Config/
+Context/Pbuffer Surface. Bionic probe разрешает функции через dlsym с NDK
+типами; 5 циклов, 15 synthetic swap, 35 ожидаемых ошибок с проверкой
+сброса eglGetError, откат частично созданного context, unbind/destroy/
+terminate, reinitialize/reload и проверка FD. Это не полноценная EGL
+реализация, не проверка EGL conformance или реального рендеринга.
+Не моделируются deferred destruction, concurrency или настоящие native
+windows. Реальные EGL, GPU и SurfaceFlinger не инициализируются.
