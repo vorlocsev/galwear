@@ -24,6 +24,7 @@ from r800_graphics_donor_binding import checkout_sha
 from r800_extract_super import require
 from r800_verify_tizen_stage import MANIFEST, unique_keys
 from r800_display_asset_layer import load_assets
+from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, verify as verify_stock
 
 MAX_REPORT=16*1024**2
 MAX_FILE=64*1024**2
@@ -70,9 +71,21 @@ def preflight(paths, pins, output, source_sha):
     return paths,output
 
 
-def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None):
+def stock_bindings(paths,pins,stock_evidence,source_sha):
+    if stock_evidence is None:
+        return {}
+    require(set(stock_evidence)==set(STOCK_INPUTS),"Supply both stock donor reports together")
+    results={}
+    for name in sorted(STOCK_INPUTS):
+        report,report_pin,archive_pin=stock_evidence[name]
+        results[name]=verify_stock(paths[name],pins[name],report,report_pin,archive_pin,name,source_sha)
+    return results
+
+
+def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None):
     require(type(xtra_abi) is int and xtra_abi in (0,1,2),"Explicit supported XTRA ABI required")
     p,output=preflight(paths,pins,output,source_sha)
+    stock=stock_bindings(p,pins,stock_evidence,source_sha)
     require((assets is None)==(assets_sha is None),"Asset directory and manifest pin must be supplied together")
     if assets is not None:
         assets=Path(assets).absolute()
@@ -128,6 +141,13 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None)
                  (android,"android-build-evidence.json",bp),
                  (android/"android","android-layer-evidence.json",android_pin)]
         copied={}
+        require(stock_bindings(p,pins,stock_evidence,source_sha)==stock,"Stock donor evidence changed")
+        for name,row in stock.items():
+            report_name="stock-"+name+"-evidence.json"
+            data=read_regular(Path(stock_evidence[name][0]),MAX_REPORT)
+            require(sha(data)==row["report_sha256"],"Stock donor report changed")
+            (evidence/report_name).write_bytes(data)
+            copied[report_name]=row["report_sha256"]
         for root,name,pin in reports:
             data=read_regular(root/name,MAX_REPORT)
             require(sha(data)==pin,"Stage evidence changed: "+name)
@@ -161,6 +181,7 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None)
                  "status":"LOCAL_GALWEAR_DEVELOPMENT_TREE_BUILT_STATIC_ONLY",
                  "source_sha":source_sha,"input_sha256":pins,"xtra_abi":xtra_abi,
                  "assets_manifest_sha256":assets_sha,
+                 "stock_donor_bindings":stock,
                  "stage_evidence_sha256":copied,"integrated_evidence_sha256":ip,
                  "missing_inputs_and_gates":i["missing_inputs_and_gates"],
                  "kernel_and_components_compiled_by_this_command":False,
@@ -201,10 +222,18 @@ def main():
     parser.add_argument("--xtra-abi",type=int,choices=(0,1,2),default=0)
     parser.add_argument("--assets",type=Path)
     parser.add_argument("--assets-sha256")
+    parser.add_argument("--stock-evidence",nargs=4,action="append",
+                        metavar=("INPUT","REPORT","REPORT_SHA256","ARCHIVE_SHA256"))
     args=parser.parse_args()
+    stock=None
+    if args.stock_evidence is not None:
+        require(len(args.stock_evidence)==len(STOCK_INPUTS) and
+                {n for n,_,_,_ in args.stock_evidence}==set(STOCK_INPUTS),
+                "Exactly one tizen and one j4 stock evidence required")
+        stock={n:(Path(p),h,a) for n,p,h,a in args.stock_evidence}
     paths={n:getattr(args,n) for n in names}
     pins={n:getattr(args,n+"_sha256") for n in names if n!="ndk"}
-    print(build(paths,pins,args.output,args.source_sha,args.xtra_abi,assets=args.assets,assets_sha=args.assets_sha256)["status"],"safe_to_flash=false")
+    print(build(paths,pins,args.output,args.source_sha,args.xtra_abi,assets=args.assets,assets_sha=args.assets_sha256,stock_evidence=stock)["status"],"safe_to_flash=false")
 
 
 if __name__=="__main__":
