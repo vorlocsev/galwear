@@ -15,6 +15,7 @@ from r800_graphics_donor_binding import checkout_sha
 from r800_extract_super import require
 from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, describe as describe_stock
 from r800_bind_pixel_system import STATUS as PIXEL_STATUS, describe as describe_pixel
+from r800_base_vendor_identity import review_saved as review_base
 from r800_ndk_pins import REVISION as NDK_REVISION, KEYS as NDK_KEYS, BIN as NDK_BIN, LIMIT as NDK_LIMIT
 
 STAGES={
@@ -206,6 +207,23 @@ def managed_chain(summary,evidence,source_sha):
     return "SAVED_MANIFEST_CHAIN_ONLY","SAVED_SELECTED_TOOL_PINS_MATCH_MANIFEST"
 
 
+def base_chain(summary,evidence,source_sha):
+    pin=summary.get("base_vendor_identity_sha256")
+    managed=summary.get("managed_manifest_sha256") is not None
+    if pin is None:
+        require(not managed,"Managed build missing base vendor identity evidence")
+        return "NOT_SUPPLIED",None
+    require(managed,"Unexpected base vendor evidence in unmanaged build")
+    name="base-vendor-identity.json"
+    require(valid_pin(pin) and summary["stage_evidence_sha256"][name]==pin,
+            "Base vendor evidence pin mismatch")
+    report=read_report(evidence/name,pin,source_sha,"BASE_VENDOR_IDENTITY_FIELDS_OBSERVED_ONLY")
+    status=review_base(report,summary["input_sha256"]["base"],
+                       summary["input_sha256"]["effects"],source_sha)
+    require(status=="BASE_VENDOR_IDENTITY_FIELDS_OBSERVED_ONLY","Base vendor identity review required")
+    return "SAVED_LITERAL_IDENTITY_CHAIN_ONLY",report
+
+
 def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
               pit_path=None,pit_pin=None,artifacts=None,artifact_pins=None):
     checkout_sha(source_sha)
@@ -227,6 +245,8 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
     expected=set(STAGES)|RECIPE|stock_inventory(summary)
     if summary.get("managed_manifest_sha256") is not None:
         expected.add("managed-donor-manifest.json")
+    if summary.get("base_vendor_identity_sha256") is not None:
+        expected.add("base-vendor-identity.json")
     if summary.get("pixel_system_binding") is not None:
         expected.add("pixel-system-evidence.json")
     if summary.get("assets_manifest_sha256") is not None:
@@ -248,6 +268,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
     stock_status=stock_chain(summary,evidence,source_sha)
     pixel_status=pixel_chain(summary,evidence,source_sha)
     managed_status,ndk_status=managed_chain(summary,evidence,source_sha)
+    base_status,base_identity=base_chain(summary,evidence,source_sha)
     baseline=review(tree,tree_pin,source_sha)
     require(baseline==reports["handover-review.json"],"Saved handover differs from recomputed review")
     layout=prepare(tree,tree_pin,source_sha,capacity_path=capacity_path,capacity_pin=capacity_pin)
@@ -271,6 +292,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
             "checks":{"stage_chain":"STATIC_PASS","handover":"STATIC_PASS",
                       "stock_donor_evidence":stock_status,"pixel_system_evidence":pixel_status,
                       "managed_manifest":managed_status,"ndk_selected_tools":ndk_status,
+                      "base_vendor_identity":base_status,
                       "installation_layout":"STATIC_PLAN_ONLY",
                       "recovery_inputs":"OFFLINE_REVIEW_ONLY" if recovery else "NOT_SUPPLIED",
                       "hardware_boot":"NOT_TESTED","wear_os_boot":"NOT_TESTED"},
@@ -278,6 +300,8 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
             "stock_donor_bindings":summary.get("stock_donor_bindings",{}),
             "pixel_system_binding":summary.get("pixel_system_binding"),
             "managed_manifest_sha256":summary.get("managed_manifest_sha256"),
+            "base_vendor_identity_sha256":summary.get("base_vendor_identity_sha256"),
+            "base_vendor_identity":base_identity,
             "ndk_selected_tool_evidence":summary.get("ndk_selected_tool_evidence"),
             "original_donor_authenticity_verified":False,"hardware_tested":False,
             "installation_authorized":False,"safe_to_flash":False}
