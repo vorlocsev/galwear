@@ -28,6 +28,7 @@ from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, verify as verify_stock
 from r800_bind_pixel_system import verify as verify_pixel
 from r800_ndk_pins import verify as verify_ndk
 from r800_base_vendor_identity import audit as audit_base, review_saved as review_base
+from r800_linux_assembly_environment import verify_bundle
 
 MAX_REPORT=16*1024**2
 MAX_FILE=64*1024**2
@@ -98,7 +99,7 @@ def managed_snapshot(managed,source_sha,config):
     return raw
 
 
-def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None,pixel_evidence=None,ndk_pins=None,managed_manifest=None):
+def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None,pixel_evidence=None,ndk_pins=None,managed_manifest=None,environment=None):
     require(type(xtra_abi) is int and xtra_abi in (0,1,2),"Explicit supported XTRA ABI required")
     p,output=preflight(paths,pins,output,source_sha)
     ndk_evidence=None if ndk_pins is None else verify_ndk(p["ndk"],ndk_pins)
@@ -111,8 +112,13 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
         load_assets(assets,assets_sha)
     managed_config={"paths":p,"pins":pins,"stock_evidence":stock_evidence,
                     "pixel_evidence":pixel_evidence,"xtra_abi":xtra_abi,
-                    "assets":assets,"assets_sha":assets_sha,"ndk_pins":ndk_pins}
+                    "assets":assets,"assets_sha":assets_sha,"ndk_pins":ndk_pins,"environment":environment}
     managed_raw=managed_snapshot(managed_manifest,source_sha,managed_config)
+    host=None
+    require((environment is not None)==(managed_raw is not None),
+            "Managed build requires environment lock and synthetic probe")
+    if environment is not None:
+        host=verify_bundle(environment,source_sha)
     base_identity=None
     if managed_raw is not None:
         base_identity=audit_base(p["base"],pins["base"],source_sha,
@@ -172,6 +178,11 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  (android,"android-build-evidence.json",bp),
                  (android/"android","android-layer-evidence.json",android_pin)]
         copied={}
+        if host is not None:
+            require(verify_bundle(environment,source_sha)==host,"Host environment changed during assembly")
+            for name,data in (("linux-assembly-lock.json",host[0]),("synthetic-mount-probe.json",host[1])):
+                (evidence/name).write_bytes(data)
+                copied[name]=sha(data)
         if base_identity is not None:
             base_raw=(json.dumps(base_identity,indent=2,sort_keys=True)+"\n").encode()
             require(len(base_raw)<=MAX_REPORT,"Base vendor evidence exceeds report budget")
@@ -234,6 +245,8 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  "ndk_selected_tool_evidence":ndk_evidence,
                  "managed_manifest_sha256":None if managed_raw is None else sha(managed_raw),
                  "base_vendor_identity_sha256":copied.get("base-vendor-identity.json"),
+                 "environment_lock_sha256":copied.get("linux-assembly-lock.json"),
+                 "synthetic_mount_probe_sha256":copied.get("synthetic-mount-probe.json"),
                  "stage_evidence_sha256":copied,"integrated_evidence_sha256":ip,
                  "missing_inputs_and_gates":i["missing_inputs_and_gates"],
                  "kernel_and_components_compiled_by_this_command":False,
