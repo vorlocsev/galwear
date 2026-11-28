@@ -71,6 +71,31 @@ def describe(report,pin,effects_pin=None):
             "hardware_tested":False,"safe_to_flash":False}
 
 
+def compact_evidence(report):
+    """Retain the subset needed to recompute the literal identity summary."""
+    fields=("status","profile","image_sha256","snapshot_verified",
+            "donor_compatibility_verified","safe_to_flash","missing_or_ambiguous")
+    inv=report["vendor_identity"]
+    selected={k:inv[k] for k in ("properties","property_conflicts","identity_inventory","vintf")}
+    selected["hidl_groups"]={n:{k:row[k] for k in ("inventory_complete","missing","elf_review")}
+                             for n,row in inv["hidl_groups"].items()}
+    name="vendor/lib/libeffectsconfig.so"
+    return {**{k:report[k] for k in fields},
+            "files":{name:report["files"][name]} if name in report["files"] else {},
+            "vendor_identity":selected}
+
+
+def review_saved(report,pin,effects_pin,source_sha):
+    require(isinstance(report,dict) and report.get("source_sha")==source_sha,
+            "Base vendor source SHA mismatch")
+    evidence=report["extraction_evidence"]
+    require(evidence==compact_evidence(evidence),"Unexpected base vendor evidence inventory")
+    expected={**describe(evidence,pin,effects_pin),"source_sha":source_sha,
+              "extraction_evidence":evidence}
+    require(expected==report,"Saved base vendor identity differs from extraction evidence")
+    return expected["status"]
+
+
 def audit(image,pin,source_sha,*,effects=None,effects_pin=None):
     checkout_sha(source_sha)
     require((effects is None)==(effects_pin is None),"Effects file and SHA-256 must be paired")
@@ -84,12 +109,13 @@ def audit(image,pin,source_sha,*,effects=None,effects_pin=None):
                 "Effects pin mismatch")
     with tempfile.TemporaryDirectory(prefix="r800-base-vendor-identity-") as tmp:
         report=extract(image,Path(tmp)/"candidate","vendor-identity",pin)
-        result=describe(report,pin,effects_pin)
+        evidence=compact_evidence(report)
+        result=describe(evidence,pin,effects_pin)
     require(digest(image,MAX_DONOR)==before,"Base vendor changed during audit")
     if effects is not None:
         require(digest(effects,MAX_FILE)["sha256"]==effects_pin,"Effects changed during audit")
     checkout_sha(source_sha)
-    return {**result,"source_sha":source_sha}
+    return {**result,"source_sha":source_sha,"extraction_evidence":evidence}
 
 
 def main():
