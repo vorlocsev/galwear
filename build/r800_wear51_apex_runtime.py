@@ -52,6 +52,7 @@ def audit(image,pin,source,output,*,probe_art=False,qemu_compare=None):
     modules={}
     art_dependencies={"status":"NOT_TESTED"}
     art_startup={"status":"NOT_TESTED"}
+    vm={"status":"NOT_TESTED"}
     with tempfile.TemporaryDirectory(prefix="wear51-apex-",dir=output.parent) as tmp:
         scratch=Path(tmp)
         private=scratch/"system.img"
@@ -111,6 +112,14 @@ def audit(image,pin,source,output,*,probe_art=False,qemu_compare=None):
                     reader.verify_unchanged()
             except (OverflowError,) + ERRORS as exc:
                 art_dependencies={"status":"REVIEW_REQUIRED","reason":str(exc)}
+        if set(sources)=={"system","runtime","art","statsd"}:
+            try:
+                from r800_wear51_art_dependencies import audit_vm
+                vm=audit_vm(sources)
+                for reader in readers:
+                    reader.verify_unchanged()
+            except (OverflowError,) + ERRORS as exc:
+                vm={"status":"REVIEW_REQUIRED","reason":str(exc),"safe_to_flash":False}
         if probe_art:
             try:
                 from r800_wear51_art_probe import probe
@@ -123,7 +132,7 @@ def audit(image,pin,source,output,*,probe_art=False,qemu_compare=None):
             raise ValueError("System changed")
     result={"schema":"galwear-r800-wear51-apex-runtime-v1","source_sha":source,
             "system_sha256":pin,"modules":modules,"art_dependencies":art_dependencies,
-            "art_startup":art_startup,"status":"REVIEW_REQUIRED",
+            "art_startup":art_startup,"dalvikvm":vm,"status":"REVIEW_REQUIRED",
             "runtime_executed":False,"art_initialized":False,"apex_activation_verified":False,
             "hardware_tested":False,"safe_to_flash":False}
     runtime=modules["com.android.runtime"]
