@@ -33,7 +33,7 @@ TOOLS=tuple(sorted(set("""
     llvm-readelf setfattr getfattr mkfs.ext4 mke2fs e2fsck debugfs
     sha256sum realpath mkdir rm cp chmod sed grep du find wc truncate
     basename dirname mktemp stat ln cat sort head tail readlink ls cmp mv
-""".split()))))
+""".split())))
 
 
 def executable(name):
