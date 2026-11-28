@@ -208,6 +208,89 @@ jobs:
               "art_initialization_verified":False,"hardware_tested":False,
               "safe_to_flash":False},indent=2,sort_keys=True)+"\n")
           PY
+      - name: Inspect original ARM32 Bionic and ART APEX modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=build python3 - <<'PY'
+          import hashlib, json, os, shutil, tempfile, zipfile, subprocess
+          from pathlib import Path
+          from r800_extract_ext4 import snapshot_image
+          from r800_framework_inventory import ext4_member, classify, MAX_MEMBER
+          from r800_art_apex_mapping import ApexReader
+          from r800_android_runtime_extract import MAX_APEX
+          from r800_donor_preflight import digest
+          from r800_graphics_donor_binding import checkout_sha
+          root=Path(os.environ["RUNNER_TEMP"])/"pixel-intake"
+          evidence=root.parent/"pixel-evidence"
+          source=os.environ["GITHUB_SHA"]
+          checkout_sha(source)
+          report=json.loads((evidence/"pixel-raw-donor.json").read_text())
+          assert report["source_sha"]==source
+          assert len(report["partitions"])==1
+          name,row=next(iter(report["partitions"].items()))
+          image=root/row["file"] if report["mode"]=="direct" else root/"logical"/row["file"]
+          wanted={
+              "com.android.runtime":["/bin/linker","/lib/bionic/libc.so","/lib/bionic/libm.so","/lib/bionic/libdl.so"],
+              "com.android.art":["/lib/libart.so","/lib/libartbase.so","/bin/dex2oat","/javalib/core-oj.jar","/javalib/core-libart.jar"],
+              "com.android.vndk.v30":["/lib/libhidlbase.so","/lib/libutils.so","/lib/libcutils.so"]}
+          modules={}
+          with tempfile.TemporaryDirectory(dir=root) as tmp:
+              scratch=Path(tmp)
+              private=scratch/"system.img"
+              snapshot_image(image,private,row["sha256"])
+              tool=shutil.which("debugfs")
+              assert tool
+              prefixes=[p for p in ("","/system") if p+"/build.prop" in row["identity"]["property_members"]]
+              assert prefixes
+              for module,paths in wanted.items():
+                  item={"status":"NOT_FOUND_IN_SELECTED_PATHS","candidates":[],"members":{}}
+                  modules[module]=item
+                  try:
+                      for prefix in prefixes:
+                          for filename in (module+".apex",module.replace("com.android.","com.google.android.",1)+".apex"):
+                              path=prefix+"/apex/"+filename
+                              data=ext4_member(tool,private,path,MAX_APEX,scratch)
+                              if data is not None:
+                                  item["candidates"].append({"path":path,"bytes":len(data),"sha256":hashlib.sha256(data).hexdigest()})
+                              del data
+                      if not item["candidates"]:
+                          continue
+                      if len(item["candidates"])!=1:
+                          raise ValueError("Ambiguous selected APEX package")
+                      candidate=item["candidates"][0]
+                      guest="/system/apex/"+candidate["path"].split("/")[-1]
+                      directory=scratch/module
+                      directory.mkdir()
+                      def read_partition(path,limit):
+                          assert path==guest
+                          return ext4_member(tool,private,candidate["path"],limit,directory)
+                      reader=ApexReader([(module,guest,candidate["sha256"])],read_partition,directory)
+                      apex_tool,payload,workspace,*_=reader.open(module)
+                      for path in paths:
+                          try:
+                              raw=ext4_member(apex_tool,payload,path,MAX_MEMBER,workspace)
+                              if raw is None:
+                                  item["members"][path]={"status":"NOT_FOUND"}
+                              else:
+                                  item["members"][path]={"status":"OBSERVED",**classify(path,raw)}
+                          except (OSError,ValueError,RuntimeError,zipfile.BadZipFile,subprocess.SubprocessError) as exc:
+                              item["members"][path]={"status":"REVIEW_REQUIRED","reason":str(exc)}
+                      reader.verify_unchanged()
+                      item["package"]=reader.evidence[module]
+                      item["status"]="SELECTED_APEX_MEMBERS_STATIC_ONLY" if all(m["status"]=="OBSERVED" for m in item["members"].values()) else "REVIEW_REQUIRED"
+                  except (OSError,ValueError,RuntimeError,zipfile.BadZipFile,subprocess.SubprocessError) as exc:
+                      item.update(status="REVIEW_REQUIRED",reason=str(exc))
+              assert digest(private,4*1024**3)["sha256"]==digest(image,4*1024**3)["sha256"]==row["sha256"]
+          checkout_sha(source)
+          result={"schema":"galwear-r800-pixel-apex-observation-v1","source_sha":source,
+                  "image_sha256":row["sha256"],"status":"SELECTED_APEX_OBSERVATIONS_ONLY",
+                  "modules":modules,"apex_activation_verified":False,
+                  "bionic_runtime_verified":False,"art_initialization_verified":False,
+                  "hardware_tested":False,"safe_to_flash":False}
+          (evidence/"pixel-apex-observation.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
+          print("PIXEL_APEX_OBSERVATION",json.dumps(modules,sort_keys=True))
+          PY
       - name: Remove factory archive and all extracted image bytes
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/pixel-intake"
@@ -223,5 +306,6 @@ jobs:
             ${{ runner.temp }}/pixel-evidence/pixel-binding.json
             ${{ runner.temp }}/pixel-evidence/pixel-framework-inventory.json
             ${{ runner.temp }}/pixel-evidence/pixel-dex-diagnostics.json
+            ${{ runner.temp }}/pixel-evidence/pixel-apex-observation.json
           if-no-files-found: warn
           retention-days: 7
