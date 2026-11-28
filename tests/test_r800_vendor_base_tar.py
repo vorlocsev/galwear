@@ -63,12 +63,8 @@ class VendorBaseTarTests(unittest.TestCase):
     def test_elf_header_checks(self):
         text=SCRIPT.read_text()
         recipe="""header=$(llvm-readelf -h "$binary")
-grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*
-    unittest.main()
- <<< "$header"
-grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*
-    unittest.main()
- <<< "$header" """
+grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*$' <<< "$header"
+grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' <<< "$header" """
         recipe=recipe.rstrip()
         self.assertEqual(text.count(recipe.replace("\n","\n    ")),1)
         self.assertEqual(text.count(recipe.replace("\n","\n        ")),1)
