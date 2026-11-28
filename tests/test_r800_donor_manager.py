@@ -118,7 +118,27 @@ class DonorManagerTests(unittest.TestCase):
         self.assertEqual(report["status"],"MANAGED_INPUT_PINS_MATCH_ONLY")
         self.assertFalse(report["safe_to_flash"])
         self.assertFalse(report["ndk_identity_verified"])
+        self.assertEqual(report["ndk_selected_tool_status"],"NOT_SUPPLIED")
         self.assertFalse(self.output.exists())
+
+
+    def test_selected_ndk_pins(self):
+        pins={name:PIN for name in manager.NDK_KEYS}
+        self.data["inputs"]["ndk"]["tools_sha256"]=pins
+        cfg=self.load()
+        self.assertEqual(cfg["ndk_pins"],pins)
+        with patch.object(manager,"preflight"), \
+             patch.object(manager,"verify_pixel",return_value={}), \
+             patch.object(manager,"stock_bindings",return_value={}), \
+             patch.object(manager,"verify_ndk",return_value={"status":"SELECTED_NDK_TOOL_PINS_MATCH_ONLY"}) as verify:
+            result=manager.check(cfg,self.output,SOURCE)
+        verify.assert_called_once_with(self.root/"ndk",pins)
+        self.assertEqual(result["ndk_selected_tool_status"],"SELECTED_NDK_TOOL_PINS_MATCH_ONLY")
+
+    def test_invalid_selected_ndk_pins(self):
+        self.data["inputs"]["ndk"]["tools_sha256"]={"clang":PIN}
+        with self.assertRaisesRegex(ValueError,"Invalid NDK selected tool pins"):
+            self.load()
 
 
 if __name__=="__main__":
