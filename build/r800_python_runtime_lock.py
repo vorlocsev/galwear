@@ -34,8 +34,12 @@ def file_pin(path):
         return digest(path,LIMIT)
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
     try:
-        require(os.fstat(fd)==before and os.read(fd,1)==b"" and
-                os.fstat(fd)==before and path.lstat()==before,"Empty runtime file changed")
+        def stable(info):
+            return (info.st_dev,info.st_ino,info.st_mode,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+        expected=stable(before)
+        require(stable(os.fstat(fd))==expected and os.read(fd,1)==b"" and
+                stable(os.fstat(fd))==expected and stable(path.lstat())==expected,
+                "Empty runtime file changed")
         return {"bytes":0,"sha256":hashlib.sha256(b"").hexdigest()}
     finally:
         os.close(fd)
@@ -53,6 +57,7 @@ def tree(root):
         for path in sorted(parent.iterdir()):
             entries+=1
             require(entries<=MAX_ENTRIES,"Python runtime entry budget exceeded")
+            require(parent.resolve(strict=True)==parent,"Python runtime directory changed")
             rel=path.relative_to(root).as_posix()
             mode=path.lstat().st_mode
             if path.name in EXCLUDED:
