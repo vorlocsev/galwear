@@ -116,8 +116,8 @@ def walk(load, candidates, roots=ROOTS, runtime_loads=None, *, public_preloads=(
 
 def audit(sources,*,roots=ROOTS,public_preloads=()):
     """sources: fixed labels -> (debugfs, private image, private scratch)."""
-    if not {"system","runtime","art"} <= set(sources) <= {"system","runtime","art","statsd","i18n"}:
-        raise ValueError("Expected selected System, Runtime, ART and optional StatsD and i18n filesystems")
+    if not {"system","runtime","art"} <= set(sources) <= {"system","runtime","art","statsd","i18n","neuralnetworks"}:
+        raise ValueError("Expected selected System, Runtime, ART and optional StatsD, i18n and NNAPI filesystems")
     dirs={"system":("/system/lib",),
           "runtime":("/lib/bionic","/lib","/bin"),
           "art":("/lib",)}
@@ -125,6 +125,8 @@ def audit(sources,*,roots=ROOTS,public_preloads=()):
         dirs["statsd"]=("/lib",)
     if "i18n" in sources:
         dirs["i18n"]=("/lib",)
+    if "neuralnetworks" in sources:
+        dirs["neuralnetworks"]=("/lib",)
     listings={}
     for label,paths in dirs.items():
         tool,image,scratch=sources[label]

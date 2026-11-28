@@ -43,6 +43,18 @@ class ArtProbeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             probe.guest_path("i18n:/lib/../libicu.so")
 
+    def test_optional_nnapi_namespace(self):
+        data=objects()
+        self.assertNotIn("namespace.neuralnetworks.",probe.config(data))
+        data["neuralnetworks:/lib/libneuralnetworks.so"]={"soname":"libneuralnetworks.so"}
+        cfg=probe.config(data,vm_oat=True)
+        self.assertEqual(probe.guest_path("neuralnetworks:/lib/libneuralnetworks.so"),"/apex/com.android.neuralnetworks/lib/libneuralnetworks.so")
+        self.assertIn("namespace.default.link.neuralnetworks.shared_libs = libneuralnetworks.so\n",cfg)
+        self.assertIn("namespace.neuralnetworks.search.paths = /apex/com.android.neuralnetworks/lib\n",cfg)
+        self.assertNotIn("allow_all_shared_libs",cfg)
+        with self.assertRaises(ValueError):
+            probe.guest_path("neuralnetworks:/lib64/libneuralnetworks.so")
+
     def test_vm_oat_export_is_scoped_to_private_boot_directory(self):
         baseline=probe.config(objects())
         self.assertNotIn("namespace.system.visible",baseline)

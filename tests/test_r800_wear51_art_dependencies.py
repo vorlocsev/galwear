@@ -111,6 +111,21 @@ class ArtDependenciesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             graph.walk(lambda p:b"",lambda n:(),("root",),public_preloads=("../libbad.so",))
 
+    def test_nnapi_public_preload_candidate(self):
+        sources={n:("debugfs",n,"scratch") for n in ("system","runtime","art","statsd","neuralnetworks")}
+        name="libneuralnetworks.so"
+        def listing(tool,image,path):
+            return {"status":"OBSERVED","entries":{name:{"type":"regular"}} if image=="neuralnetworks" and path=="/lib" else {}}
+        def load(tool,image,path,limit,scratch):
+            return b"nnapi" if image=="neuralnetworks" and path=="/lib/"+name else b"root"
+        with patch.object(graph,"list_directory",side_effect=listing), patch.object(graph,"ext4_member",side_effect=load), patch.object(graph,"inspect",side_effect=lambda raw:elf(name) if raw==b"nnapi" else elf(None)):
+            r=graph.audit(sources,roots=("art:/bin/dalvikvm32",),public_preloads=(name,))
+            self.assertEqual(r["edges"][0]["eligible_candidates"],["neuralnetworks:/lib/"+name])
+            self.assertFalse(r["namespace_resolution_verified"])
+            del sources["neuralnetworks"]
+            r=graph.audit(sources,roots=("art:/bin/dalvikvm32",),public_preloads=(name,))
+            self.assertEqual(r["edges"][0]["status"],"NOT_FOUND_IN_SELECTED_DIRS")
+
     def test_budget(self):
         with patch.object(graph,"MAX_OBJECTS",1):
             with self.assertRaisesRegex(ValueError,"budget"):
