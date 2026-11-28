@@ -23,6 +23,7 @@ from r800_graphics_donor_binding import checkout_sha
 from r800_donor_preflight import digest
 from r800_art_apex_mapping import ApexReader
 from r800_art_vdex_binding import compare as compare_vdex, MAX_VDEX
+from r800_art_oat_binding import compare as compare_oat, MAX_OAT
 
 MAX_IMAGE = 4*1024**3
 MAX_IMAGES = 5
@@ -92,14 +93,20 @@ def literal_exports(sources):
 VDEX_PATH = re.compile(r"/(?:system|system_ext|product|vendor|odm)/framework/(?:oat/)?(?:arm|arm64)/[A-Za-z0-9_.-]+\.vdex")
 
 
-def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, apex_specs=(), vdex_specs=()):
+OAT_PATH = re.compile(r"/(?:system|system_ext|product|vendor|odm)/framework/(?:oat/)?(arm|arm64)/[A-Za-z0-9_.-]+\.(?:oat|odex)")
+
+
+def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, apex_specs=(), vdex_specs=(), oat_specs=()):
     checkout_sha(source_sha)
     rows = map_images(specs)
     require(1 <= len(rc_paths) <= MAX_RCS and len(set(rc_paths)) == len(rc_paths)
             and all(RC_PATH.fullmatch(p) for p in rc_paths), "Explicit allowed RC paths required")
     require((erofs_tool is None) == (erofs_tool_sha is None), "EROFS tool and SHA required together")
     artifacts, rc_evidence, sources, errors = {}, {}, [], []
-    inputs, vdex_evidence = {}, {}
+    inputs, vdex_evidence, oat_evidence = {}, {}, {}
+    require(len(oat_specs) <= 8 and all(len(s) >= 3 for s in oat_specs) and
+            len({s[0] for s in oat_specs}) == len(oat_specs),
+            "Invalid OAT mapping count, missing locations or duplicate path")
     require(len(vdex_specs) <= 8 and len({s[0] for s in vdex_specs}) == len(vdex_specs),
             "Invalid VDEX mapping count or duplicate path")
     total = 0
@@ -181,6 +188,33 @@ def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, ape
                 vdex_evidence[vdex_path] = {"status": "REVIEW_REQUIRED", "reason": str(exc)}
                 errors.append(vdex_path+": "+str(exc))
                 break
+        for oat_path, vdex_path, *locations in oat_specs:
+            try:
+                match = OAT_PATH.fullmatch(oat_path)
+                require(match and VDEX_PATH.fullmatch(vdex_path), "Unsupported OAT or VDEX path")
+                require(oat_path.rsplit(".", 1)[0]+".vdex" == vdex_path,
+                        "OAT and VDEX must be explicit same-stem companions")
+                require(all(p in paths for p in locations), "OAT location outside literal classpath")
+                # Require the supplied order to be an ordered subsequence of at
+                # least one literal export, not an arbitrary reordered set.
+                require(any([p for p in group if p in locations] == locations
+                            for group in resolved.values()), "OAT locations differ from literal classpath order")
+                oat_raw = read_mapped(rows, oat_path, min(MAX_OAT, MAX_TOTAL-total), scratch)
+                require(oat_raw is not None, "OAT member missing")
+                total += len(oat_raw)
+                require(total <= MAX_TOTAL, "ART byte budget exceeded")
+                vdex_raw = read_mapped(rows, vdex_path, min(MAX_VDEX, MAX_TOTAL-total), scratch)
+                require(vdex_raw is not None, "VDEX companion missing")
+                total += len(vdex_raw)
+                require(total <= MAX_TOTAL, "ART byte budget exceeded")
+                evidence = compare_oat(oat_raw, vdex_raw, match[1], locations, artifacts)
+                oat_evidence[oat_path] = {"vdex_path": vdex_path, **evidence}
+                if evidence["status"] != "OAT_VDEX_LITERAL_LOCATION_CHECKSUMS_MATCH_ONLY":
+                    errors.append(oat_path+": OAT/VDEX literal locations or checksums mismatch")
+            except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
+                oat_evidence[oat_path] = {"status": "REVIEW_REQUIRED", "reason": str(exc)}
+                errors.append(oat_path+": "+str(exc))
+                break
         apex.verify_unchanged()
         for row in rows.values():
             require(digest(row["snapshot"], MAX_IMAGE)["sha256"] == row["sha256"] and
@@ -196,6 +230,7 @@ def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, ape
             "resolved_literal_paths": resolved, "unexpanded_imports": imports,
             "artifacts": artifacts, "errors": errors,
             "apex_packages": apex.evidence, "vdex_bindings": vdex_evidence,
+            "oat_bindings": oat_evidence,
             "init_imports_resolved": False, "effective_classpath_verified": False,
             "apex_activation_verified": False, "oat_verified": False, "vdex_verified": False,
             "bytecode_verified": False, "art_initialization_verified": False,
@@ -212,11 +247,13 @@ def main():
                    metavar=("MODULE", "GUEST_PATH", "SHA256"))
     p.add_argument("--vdex", nargs="+", action="append", default=[],
                    metavar="PATH", help="VDEX path followed by explicitly ordered classpath locations")
+    p.add_argument("--oat", nargs="+", action="append", default=[], metavar="PATH",
+                   help="OAT path, same-stem VDEX path, then ordered literal classpath locations")
     p.add_argument("--erofs-tool", type=Path)
     p.add_argument("--erofs-tool-sha256")
     p.add_argument("--output", type=Path, required=True)
     a = p.parse_args()
-    report = audit(a.image, a.rc, a.source_sha, a.erofs_tool, a.erofs_tool_sha256, a.apex, a.vdex)
+    report = audit(a.image, a.rc, a.source_sha, a.erofs_tool, a.erofs_tool_sha256, a.apex, a.vdex, a.oat)
     with a.output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
         stream.write("\n")
