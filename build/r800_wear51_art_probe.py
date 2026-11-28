@@ -334,6 +334,21 @@ def probe(sources,graph,scratch,source,pin,*,qemu_compare=None):
                                             "verify_executable_file_bytes":verify_bytes,
                                             "speed_executable_file_bytes":speed_bytes,
                                             "result":speed_result,"machine_code_validated":False,"safe_to_flash":False}
+                        if comparison.get("speed_experiment",{}).get("status")=="SPEED_EXECUTABLE_SEGMENT_GROWTH_OBSERVED":
+                            from r800_wear51_art_boot_probe import compare_runs
+                            deterministic_args=arguments(jars["classpath"],compiler_filter="verify",force_determinism=True)
+                            repeats=[]
+                            for index in range(2):
+                                with tempfile.TemporaryDirectory(prefix="wear51-determinism-",dir=scratch) as tmp:
+                                    repeat=Path(tmp)
+                                    (repeat/"data").mkdir()
+                                    repeats.append(run_case(str(alternate),bwrap,guest,repeat,"boot-image",
+                                        deterministic_args,staged,boot_output=repeat/"data"))
+                            comparison["determinism"]={**compare_runs(*repeats),"arguments":deterministic_args,
+                                "compiler_filter":"verify","force_determinism":True,"runs":repeats,
+                                "qemu_sha256":meta["qemu_sha256"],"synthetic_config_sha256":sha(cfg.encode()),
+                                "jar_sha256":{n:v["sha256"] for n,v in jars["members"].items()},
+                                "staged_sha256":staged,"source_sha":source,"system_sha256":pin}
                         if sha(alternate.read_bytes())!=meta["qemu_sha256"]:
                             raise ValueError("Comparator binary changed")
                     except (OSError,ValueError,RuntimeError,KeyError,subprocess.SubprocessError) as exc:
