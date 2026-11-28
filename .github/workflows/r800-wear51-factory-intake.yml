@@ -13,6 +13,8 @@ on:
       - build/r800_pixel_runtime_layout.py
       - build/r800_android_linker_audit.py
       - build/r800_wear51_apex_runtime.py
+      - build/r800_wear51_apex_container.py
+      - tests/test_r800_wear51_apex_container.py
       - build/r800_wear51_startup_diagnostics.py
       - build/r800_art_apex_mapping.py
       - build/r800_apex_inventory.py
@@ -55,6 +57,8 @@ jobs:
             --clearenv --ro-bind "$scratch" / --ro-bind "$qemu" /qemu \
             --dev /dev --proc /proc --chdir / /qemu --version
           echo WEAR51_QEMU_ISOLATION_PREFLIGHT_PASS
+      - name: Verify nested APEX wrapper parsing
+        run: python3 -m unittest discover -s tests -p 'test_r800_wear51_apex_container.py' -v
       - name: Obtain exact October 2025 factory image
         shell: bash
         run: |
