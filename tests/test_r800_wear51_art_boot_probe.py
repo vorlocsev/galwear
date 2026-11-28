@@ -43,6 +43,37 @@ class BootProbeTests(unittest.TestCase):
             (root/"boot.oat").write_bytes(oat)
             self.assertEqual(probe.inspect_outputs(root)["boot.oat"]["status"],"REVIEW_REQUIRED")
 
+    def test_determinism_arguments(self):
+        paths=[probe.ART_ROOT+"/javalib/"+n for n in probe.BOOT_JARS]
+        self.assertEqual(probe.arguments(paths,force_determinism=True),
+                         probe.arguments(paths)+["--force-determinism"])
+
+    def test_compare_runs(self):
+        import copy
+        first={"status":"BOOT_OUTPUT_HEADERS_OBSERVED","exit_code":0,
+               "timeout":False,"output_capped":False,
+               "output_headers":{n:{"status":"HEADER_OBSERVED","bytes":128,
+                                   "sha256":"a"*64} for n in probe.OUTPUTS}}
+        second=copy.deepcopy(first)
+        self.assertEqual(probe.compare_runs(first,second)["status"],"TWO_RUN_SHA256_MATCH")
+        second["output_headers"]["boot.art"]["sha256"]="b"*64
+        result=probe.compare_runs(first,second)
+        self.assertEqual(result["status"],"TWO_RUN_SHA256_DIFFERENT")
+        self.assertEqual(result["files"]["boot.art"]["status"],"DIFFERENT")
+        self.assertEqual(result["files"]["boot.oat"]["status"],"IDENTICAL")
+        del second["output_headers"]["boot.vdex"]
+        self.assertEqual(probe.compare_runs(first,second)["status"],"REVIEW_REQUIRED")
+
+    def test_compare_rejects_failed_run_and_invalid_hash(self):
+        first={"status":"BOOT_OUTPUT_HEADERS_OBSERVED","exit_code":0,
+               "timeout":False,"output_capped":False,
+               "output_headers":{n:{"status":"HEADER_OBSERVED","bytes":128,
+                                   "sha256":"a"*64} for n in probe.OUTPUTS}}
+        second={**first,"exit_code":1}
+        self.assertEqual(probe.compare_runs(first,second)["status"],"REVIEW_REQUIRED")
+        first["output_headers"]["boot.art"]["sha256"]="not-a-digest"
+        self.assertEqual(probe.compare_runs(first,first)["status"],"REVIEW_REQUIRED")
+
     def test_reject_empty_and_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
