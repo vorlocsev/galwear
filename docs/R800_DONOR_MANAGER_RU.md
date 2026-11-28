@@ -1,0 +1,71 @@
+# Управляемая локальная сборка SM-R800
+
+`build/r800_donor_manager.py` принимает один закреплённый SHA-256 JSON
+манифест вместо длинного списка параметров сборщика. Это режим
+NON-RELEASE, без скачивания, прошивки и публикации бинарников.
+
+## Подготовка
+
+Разместить разрешённые локальные входы в отдельном каталоге, не внутри
+Git checkout и не в его родительском каталоге. Указать относительные
+пути, полные SHA-256, exact HEAD и XTRA ABI. Значения ниже обозначают
+места для реальных проверенных хешей; пример не является готовым манифестом.
+
+```json
+{
+  "schema": "galwear-r800-local-donor-manifest-v1",
+  "source_sha": "EXACT_HEAD_40_HEX",
+  "inputs": {
+    "kernel": {"path":"compiled/kernel","sha256":"KERNEL_EVIDENCE_SHA256"},
+    "components": {"path":"compiled/device","sha256":"COMPONENT_EVIDENCE_SHA256"},
+    "system": {"path":"pixel/system.img","sha256":"RAW_SYSTEM_SHA256"},
+    "base": {"path":"vendor/base.img","sha256":"BASE_VENDOR_SHA256"},
+    "j4": {"path":"j4/vendor.img","sha256":"RAW_J4_SHA256"},
+    "effects": {"path":"vendor/libeffectsconfig.so","sha256":"EFFECTS_SHA256"},
+    "tizen": {"path":"tizen/rootfs.img","sha256":"RAW_TIZEN_SHA256"},
+    "closure": {"path":"tizen/closure","sha256":"CLOSURE_MANIFEST_SHA256"},
+    "ndk": {"path":"tools/android-ndk-r27c"}
+  },
+  "evidence": {
+    "system": {"path":"pixel/raw-donor-evidence.json","sha256":"PIXEL_REPORT_SHA256"},
+    "j4": {"path":"j4/stock-donor-evidence.json","sha256":"J4_REPORT_SHA256","archive_sha256":"J4_ARCHIVE_SHA256"},
+    "tizen": {"path":"tizen/stock-donor-evidence.json","sha256":"TIZEN_REPORT_SHA256","archive_sha256":"TIZEN_ARCHIVE_SHA256"}
+  },
+  "xtra_abi": 0,
+  "assets": null
+}
+```
+
+Опциональные assets: объект path/sha256 для каталога и
+assets-evidence.json. Все три отчёта обязательны в managed mode;
+старый CLI сборщика остаётся доступен для диагностики.
+Путь NDK проверяется как каталог, но его содержимое не закреплено
+этим манифестом. Модель base vendor, источник effects, права обработки
+и подлинность доноров требуют отдельной проверки. XTRA ABI 0 здесь
+только пример, фактическое значение должно соответствовать входам.
+
+## Проверка без сборки
+
+```sh
+python3 build/r800_donor_manager.py \
+  --workspace /local/galwear-inputs \
+  --manifest /local/galwear-inputs/manifest.json \
+  --manifest-sha256 "$MANIFEST_SHA256" \
+  --source-sha "$(git rev-parse HEAD)" \
+  --output /local/new-development-output \
+  --mode check
+```
+
+Успешный результат MANAGED_INPUT_PINS_MATCH_ONLY означает совпадение
+локальных входов и отчётов, не готовность Android, kernel, recovery
+или HAL. Проверка не создаёт выходной каталог.
+Явный --mode build передаёт тот же набор входов существующему сборщику,
+который сам проверяет хеши и отчёты до/после сборки. Для сборки нужна
+подготовленная изолированная Linux-среда с зависимостями legacy vendor.
+Новый менеджер не обеспечивает готовность окружения и не проверяет
+полноту либо подлинность NDK. Сам исходный манифест пока не включается
+в итоговую цепочку readiness; сохраняются его выбранные входные pins
+и три донорских отчёта.
+
+Android 15 и EROFS не добавляются в текущий Android 11 сборщик.
+Не использовать результат для прошивки. safe_to_flash=false.
