@@ -197,7 +197,7 @@ jobs:
                           print("WEAR51_ART_BOOT_LOGDW",json.dumps(record,sort_keys=True))
                   if "comparison" in boot:
                       comparison=boot["comparison"]
-                      print("WEAR51_ART_QEMU_COMPARISON",json.dumps({k:v for k,v in comparison.items() if k not in ("result","linker_control","speed_experiment")},sort_keys=True))
+                      print("WEAR51_ART_QEMU_COMPARISON",json.dumps({k:v for k,v in comparison.items() if k not in ("result","linker_control","speed_experiment","determinism")},sort_keys=True))
                       for name in ("linker_control","result"):
                           if name in comparison:
                               case=comparison[name]
@@ -211,6 +211,11 @@ jobs:
                           print("WEAR51_ART_SPEED_CASE",json.dumps({k:v for k,v in case.items() if k!="logdw_records"},sort_keys=True))
                           for record in case.get("logdw_records",[])[:32]:
                               print("WEAR51_ART_SPEED_LOGDW",json.dumps(record,sort_keys=True))
+                      if "determinism" in comparison:
+                          det=comparison["determinism"]
+                          print("WEAR51_ART_DETERMINISM",json.dumps({k:v for k,v in det.items() if k not in ("runs","staged_sha256")},sort_keys=True))
+                          for index,case in enumerate(det["runs"]):
+                              print("WEAR51_ART_DETERMINISM_CASE",json.dumps({"run":index+1,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                   for name,case in startup.get("results",{}).items():
                       print("WEAR51_ART_STARTUP_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                       for record in case.get("logdw_records",[])[:32]:
@@ -421,6 +426,39 @@ jobs:
           assert all(v["status"]=="HEADER_OBSERVED" for v in result["output_headers"].values())
           assert startup["safe_to_flash"] is False
           print("WEAR51_ART_VERIFY_BOOT_OUTPUT_PASS")
+          PY
+      - name: Require independent speed compilation and report two-run determinism
+        if: always()
+        run: |
+          PYTHONPATH=build python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          from r800_wear51_art_boot_probe import compare_runs
+          evidence=Path(os.environ["RUNNER_TEMP"])/"wear51-evidence"
+          startup=json.loads((evidence/"art-startup.json").read_text())
+          boot=json.loads((evidence/"art-boot-probe.json").read_text())
+          assert startup["source_sha"]==os.environ["GITHUB_SHA"]
+          assert startup["boot_image_probe"]==boot
+          comparison=boot["comparison"]
+          speed=comparison["speed_experiment"]
+          assert speed["status"]=="SPEED_EXECUTABLE_SEGMENT_GROWTH_OBSERVED"
+          assert speed["result"]["exit_code"]==0 and not speed["result"]["timeout"] and not speed["result"]["output_capped"]
+          assert speed["speed_executable_file_bytes"]>speed["verify_executable_file_bytes"]
+          assert speed["machine_code_validated"] is False
+          print("WEAR51_ART_SPEED_OUTPUT_PASS")
+          det=comparison["determinism"]
+          assert det["source_sha"]==os.environ["GITHUB_SHA"]
+          assert det["system_sha256"]==startup["system_sha256"]
+          assert det["staged_sha256"]==startup["staged_sha256"]
+          assert det["synthetic_config_sha256"]==startup["synthetic_config_sha256"]
+          assert det["qemu_sha256"]==comparison["qemu"]["qemu_sha256"]
+          assert det["jar_sha256"]=={k:v["sha256"] for k,v in boot["boot_jars"]["members"].items()}
+          assert det["force_determinism"] is True and "--force-determinism" in det["arguments"]
+          assert len(det["runs"])==2
+          observed=compare_runs(*det["runs"])
+          assert all(det[k]==v for k,v in observed.items())
+          assert observed["status"] in ("TWO_RUN_SHA256_MATCH","TWO_RUN_SHA256_DIFFERENT")
+          print("WEAR51_ART_DETERMINISM_OBSERVATION",json.dumps(observed,sort_keys=True))
           PY
       - name: Remove original and extracted binary images
         if: always()
