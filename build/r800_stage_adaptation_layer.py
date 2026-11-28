@@ -17,6 +17,7 @@ from r800_stage_tizen_runtime import FIRMWARE, DONORS, TARGETS
 from r800_verify_tizen_stage import unique_keys, guest_name
 from r800_gps_link_gate import audit
 from r800_tizen_config_layout import layout, check_guest, materialize, verify_dir
+from r800_display_asset_layer import asset_modes
 
 MAX_FILE = 64*1024**2
 MAX_TOTAL = 1536*1024**2
@@ -59,7 +60,9 @@ def load(root, name, pin, source_sha, runtime):
             all(report.get(f) is False for f in flags), "Layer scope or source SHA mismatch")
     files = report["files"]
     require(isinstance(files, dict) and 0 < len(files) <= MAX_ENTRIES, "Invalid layer inventory")
+    device_modes={} if runtime else {**DEVICE,**asset_modes(report,files)}
     if runtime:
+        require(not report.get("assets_manifest_sha256"),"Runtime cannot declare display assets")
         require(RUNTIME_REQUIRED <= files.keys(), "Missing required runtime member")
         require(all(valid_pin(report.get(k)) for k in ("tizen_image_sha256", "closure_manifest_sha256", "gpsbridge_sha256")),
                 "Missing runtime provenance pin")
@@ -67,7 +70,7 @@ def load(root, name, pin, source_sha, runtime):
         require(set(pins) == set(DONORS) and all(valid_pin(p) for p in pins.values()),
                 "Missing runtime glibc pins")
     else:
-        require(files.keys() == DEVICE.keys(), "Unexpected device inventory")
+        require(files.keys() == device_modes.keys(), "Unexpected device inventory")
         require(valid_pin(report.get("component_manifest_sha256")), "Missing component manifest pin")
     mountpoints = layout(report, files) if runtime else {}
     require(runtime or not report.get("chroot_mountpoints"), "Device layer must not declare Tizen mountpoints")
@@ -85,7 +88,7 @@ def load(root, name, pin, source_sha, runtime):
                 valid_pin(row.get("sha256")) and row.get("mode") in ("0o644","0o755"),
                 "Invalid layer member metadata")
         if not runtime:
-            require(row["mode"] == DEVICE[path], "Unexpected device mode")
+            require(row["mode"] == device_modes[path], "Unexpected device mode")
         elif path.startswith("r800dev/fw/"):
             require(row["mode"] == "0o644", "Unexpected firmware mode")
         elif path == "r800dev/gpsbridge" or path == "r800dev/tzlite/lib/ld-linux.so.3" or path.startswith("r800dev/tzlite/usr/bin/"):
@@ -166,9 +169,10 @@ def assemble(device, device_sha, runtime, runtime_sha, output, source_sha):
                   "runtime_manifest_sha256":runtime_sha,"files":rows,
                   "total_bytes":sum(r["bytes"] for r in rows.values()),
                   "chroot_mountpoints":mountpoints,
+                  "assets_manifest_sha256":d.get("assets_manifest_sha256"),
                   "missing_inputs":["Wear OS system and complete Android vendor",
                                     "Additional Tizen configuration/plugins and ownership",
-                                    "Display assets and validated kernel handover",
+                                    "Validated kernel handover",
                                     "Independent hardware and recovery acceptance"],
                   "donor_authenticity_verified":False,"full_runtime_built":False,
                   "complete_vendor_built":False,"payload_complete":False,
