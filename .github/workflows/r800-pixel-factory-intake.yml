@@ -315,6 +315,82 @@ jobs:
           print("PIXEL_RUNTIME_MODULES",json.dumps(result["module_candidates"],sort_keys=True))
           print("PIXEL_RUNTIME_MEMBERS",json.dumps(result["members"],sort_keys=True))
           PY
+      - name: Extract original flattened ARM32 runtime and compile exact-head HALs
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/pixel-intake"
+          evidence="$RUNNER_TEMP/pixel-evidence"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          PYTHONPATH=build python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          from r800_arm32_runtime_extract import extract
+          from r800_bind_pixel_system import verify
+          import hashlib
+          root=Path(os.environ["RUNNER_TEMP"])/"pixel-intake"
+          evidence=root.parent/"pixel-evidence"
+          source=os.environ["GITHUB_SHA"]
+          report_path=evidence/"pixel-raw-donor.json"
+          raw=report_path.read_bytes()
+          report=json.loads(raw)
+          assert report["source_sha"]==source and len(report["partitions"])==1
+          name,row=next(iter(report["partitions"].items()))
+          image=root/row["file"] if report["mode"]=="direct" else root/"logical"/row["file"]
+          verify(image,row["sha256"],report_path,hashlib.sha256(raw).hexdigest(),source)
+          result=extract(image,row["sha256"],root/"pixel-bionic")
+          assert result["status"]=="ARM32_BIONIC_RUNTIME_EXTRACTED_STATIC_ONLY"
+          assert result["apex_layout"]=="FLATTENED_APEX"
+          assert result["raw_system_sha256"]==row["sha256"]
+          assert result["safe_to_flash"] is False
+          result["source_sha"]=source
+          (evidence/"pixel-bionic-extraction.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
+          print("PIXEL_BIONIC_EXTRACTED",json.dumps(result,sort_keys=True))
+          PY
+          archive="$root/android-ndk-r27c-linux.zip"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --connect-timeout 30 --max-time 600 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o "$archive"
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e "$archive" | sha1sum --check -
+          unzip -q "$archive" -d "$root"
+          rm -f "$archive"
+          git init "$root/tinyalsa"
+          git -C "$root/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
+          git -C "$root/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
+          git -C "$root/tinyalsa" checkout --detach FETCH_HEAD
+          sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$root/android-ndk-r27c" "$root/tinyalsa" "$root/hal"
+          cp "$root/hal/hal-compile.json" "$evidence/pixel-hal-compile.json"
+          python3 build/r800_hal_dlopen_probe.py compile --ndk "$root/android-ndk-r27c" --hals "$root/hal" --source-sha "$GITHUB_SHA" --output "$root/hal-probe"
+      - name: Test five HAL HMI exports with original Pixel Bionic in isolated QEMU
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 update -qq
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends qemu-user-static bubblewrap
+          root="$RUNNER_TEMP/pixel-intake"
+          evidence="$RUNNER_TEMP/pixel-evidence"
+          # The existing probe requires non-root execution and bubblewrap.
+          # Only dlopen and HMI metadata, no HAL open or device I/O.
+          rc=0
+          python3 build/r800_hal_dlopen_probe.py run --probe-dir "$root/hal-probe" --hals "$root/hal" \
+            --runtime "$root/pixel-bionic" --runtime-manifest "$root/pixel-bionic/runtime-manifest.json" \
+            --output "$root/pixel-hal-runtime" || rc=$?
+          if test -f "$root/pixel-hal-runtime/hal-runtime-evidence.json"; then
+            cp "$root/pixel-hal-runtime/hal-runtime-evidence.json" "$evidence/pixel-hal-runtime.json"
+          fi
+          test "$rc" -eq 0
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence=Path(os.environ["RUNNER_TEMP"])/"pixel-evidence"
+          runtime=json.loads((evidence/"pixel-bionic-extraction.json").read_text())
+          report=json.loads((evidence/"pixel-hal-runtime.json").read_text())
+          assert runtime["source_sha"]==report["source_sha"]==os.environ["GITHUB_SHA"]
+          assert report["runtime_sha256"]=={k:v["sha256"] for k,v in runtime["files"].items()}
+          assert report["status"]=="ARM32_HAL_HMI_QEMU_USER_ONLY"
+          assert len(report["results"])==5 and all(v["status"]=="HMI_ONLY_PASS" for v in report["results"].values())
+          assert report["hal_open_called"] is False and report["hardware_tested"] is False and report["safe_to_flash"] is False
+          print("PIXEL_ORIGINAL_BIONIC_HAL_HMI_PASS",json.dumps({"source_sha":report["source_sha"],"system_sha256":runtime["raw_system_sha256"],"modules":sorted(report["results"]),"safe_to_flash":False},sort_keys=True))
+          PY
       - name: Remove factory archive and all extracted image bytes
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/pixel-intake"
@@ -332,5 +408,8 @@ jobs:
             ${{ runner.temp }}/pixel-evidence/pixel-dex-diagnostics.json
             ${{ runner.temp }}/pixel-evidence/pixel-apex-observation.json
             ${{ runner.temp }}/pixel-evidence/pixel-runtime-layout.json
+            ${{ runner.temp }}/pixel-evidence/pixel-bionic-extraction.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-compile.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-runtime.json
           if-no-files-found: warn
           retention-days: 7
