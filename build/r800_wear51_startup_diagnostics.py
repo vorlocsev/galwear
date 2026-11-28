@@ -142,7 +142,7 @@ def audit(root,evidence,source,output):
         static.chmod(0o555)
         c=scratch/"start.c"
         c.write_text('#include <unistd.h>\nint main(void) { static const char s[]="WEAR51_BIONIC_START\\n";'
-                     ' return write(1,s,sizeof(s)-1)==sizeof(s)-1 ? 0 : 1; }\n')
+                     ' return write(1,s,sizeof(s)-1)==(ssize_t)(sizeof(s)-1) ? 0 : 1; }\n')
         dynamic=scratch/"dynamic-start"
         subprocess.run([str(cc),"-O2","-Wall","-Wextra","-Werror",str(c),"-o",str(dynamic)],
                        check=True,timeout=60)
@@ -158,14 +158,16 @@ def audit(root,evidence,source,output):
         result={"schema":"galwear-r800-wear51-startup-diagnostics-v1","source_sha":source,
                 "system_sha256":SYSTEM_PIN,"runtime_sha256":pins,"lights_sha256":lights_pin,
                 "qemu_version":subprocess.check_output([qemu,"--version"],text=True,timeout=10).splitlines()[0],
-                "qemu_cpu_models":subprocess.check_output([qemu,"-cpu","help"],text=True,timeout=10).splitlines(),
+                "qemu_cpu_models":subprocess.run([qemu,"-cpu","help"],capture_output=True,text=True,timeout=10).stdout.splitlines(),
                 "results":rows,"status":"STARTUP_DIAGNOSTICS_ONLY",
                 "hal_acceptance_verified":False,"hardware_tested":False,"safe_to_flash":False}
     checkout_sha(source)
     with output.open("x",encoding="utf-8") as stream:
         json.dump(result,stream,indent=2,sort_keys=True)
         stream.write("\n")
-    print("WEAR51_STARTUP_DIAGNOSTICS",json.dumps(result,sort_keys=True))
+    for name,row in rows.items():
+        print("WEAR51_STARTUP_CASE",json.dumps({"case":name,**row},sort_keys=True))
+    print("WEAR51_STARTUP_DIAGNOSTICS",json.dumps({k:v for k,v in result.items() if k!="results"},sort_keys=True))
 
 
 if __name__=="__main__":
