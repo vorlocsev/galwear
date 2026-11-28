@@ -35,8 +35,8 @@ jobs:
             -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
           sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources \
             -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends \
-            device-tree-compiler clang lld binutils e2fsprogs selinux-utils secilc libsepol-dev setools imagemagick fonts-dejavu-core
-          for tool in dtc fdtget clang ld.lld readelf mke2fs e2fsck debugfs matchpathcon; do
+            device-tree-compiler clang lld binutils e2fsprogs selinux-utils secilc libsepol-dev setools imagemagick fonts-dejavu-core lz4
+          for tool in dtc fdtget clang ld.lld readelf mke2fs e2fsck debugfs matchpathcon lz4; do
             command -v "$tool"
           done
           clang --version
