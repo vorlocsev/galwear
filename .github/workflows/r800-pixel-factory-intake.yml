@@ -23,12 +23,30 @@ permissions:
 jobs:
   factory-intake:
     if: github.repository == 'vorlocsev/galwear' && github.ref_name == 'development/r800-integration-20261127'
-    runs-on: ubuntu-24.04
+    # Match the already passing ARM32 HAL QEMU job; do not weaken isolation.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Verify isolated QEMU host prerequisites before donor download
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends qemu-user-static bubblewrap android-sdk-libsparse-utils e2fsprogs
+          qemu-arm-static --version
+          bwrap --version
+          scratch=$(mktemp -d "$RUNNER_TEMP/pixel-qemu-preflight.XXXXXX")
+          trap 'rm -rf -- "$scratch"' EXIT
+          mkdir "$scratch/dev" "$scratch/proc"
+          touch "$scratch/qemu"
+          qemu=$(realpath "$(command -v qemu-arm-static)")
+          timeout -k 5s 20s bwrap --unshare-all --die-with-parent --new-session \
+            --clearenv --ro-bind "$scratch" / --ro-bind "$qemu" /qemu \
+            --dev /dev --proc /proc --chdir / /qemu --version
+          echo PIXEL_QEMU_ISOLATION_PREFLIGHT_PASS
       - name: Obtain exact Android 11 Bluetooth/Wi-Fi factory archive
         shell: bash
         run: |
@@ -54,8 +72,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs
+          command -v debugfs
           python3 -m unittest discover -s tests -p 'test_r800_partition_identity.py' -v
           python3 -m unittest discover -s tests -p 'test_r800_dex_hiddenapi_observation.py' -v
           PYTHONPATH=build python3 - <<'PY'
@@ -364,8 +381,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get -o Acquire::Retries=3 update -qq
-          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends qemu-user-static bubblewrap
+          # QEMU and bubblewrap were checked before the factory download.
+          test "$(id -u)" -ne 0
           root="$RUNNER_TEMP/pixel-intake"
           evidence="$RUNNER_TEMP/pixel-evidence"
           # The existing probe requires non-root execution and bubblewrap.
