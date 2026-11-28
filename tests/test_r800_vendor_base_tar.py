@@ -60,5 +60,33 @@ class VendorBaseTarTests(unittest.TestCase):
                 self.assertEqual((out/name).read_text(),name)
 
 
+    def test_elf_header_checks(self):
+        text=SCRIPT.read_text()
+        recipe="""header=$(llvm-readelf -h "$binary")
+grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*
+    unittest.main()
+ <<< "$header"
+grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*
+    unittest.main()
+ <<< "$header" """
+        recipe=recipe.rstrip()
+        self.assertEqual(text.count(recipe.replace("\n","\n    ")),1)
+        self.assertEqual(text.count(recipe.replace("\n","\n        ")),1)
+        for machine,exitcode,expected in (("ARM",0,0),("AArch64",0,1),("ARM64",0,1),("ARM",7,7)):
+            with self.subTest(machine=machine,exitcode=exitcode):
+                # A fake readelf with a long stdout stream would expose early-pipe SIGPIPE.
+                stub="""llvm-readelf() {
+                    printf 'Class: ELF32\nMachine: %s\n' "$MACHINE"
+                    for ((i=0;i<30000;i++)); do printf 'fixture padding line\n'; done
+                    return "$EXIT_CODE"
+                }
+                binary=fixture
+                """
+                result=subprocess.run(["bash","-e","-o","pipefail","-c",stub+recipe],
+                                      env={**os.environ,"MACHINE":machine,"EXIT_CODE":str(exitcode)},
+                                      timeout=15)
+                self.assertEqual(result.returncode,expected)
+
+
 if __name__=="__main__":
     unittest.main()
