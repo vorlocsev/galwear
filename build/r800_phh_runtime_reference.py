@@ -11,6 +11,8 @@ import lzma
 from pathlib import Path
 import stat
 import tempfile
+import re
+import subprocess
 
 from r800_arm32_runtime_extract import extract
 
@@ -94,11 +96,17 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--archive", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--source-sha", help="Bind evidence to exact checkout HEAD")
     a = p.parse_args()
+    if a.source_sha is not None:
+        repo = Path(__file__).resolve().parents[1]
+        actual = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", a.source_sha) or a.source_sha != actual:
+            p.error("Source SHA does not match checkout")
     a.output.mkdir(exist_ok=False)
     report = {"status": "REFERENCE_ASSET_OBSERVATION_ONLY", "release_id": RELEASE_ID,
               "asset_id": ASSET_ID, "asset_name": ASSET_NAME, "asset_bytes": ASSET_SIZE,
-              "source": SOURCE, "independent_asset_sha256_verified": False,
+              "source": SOURCE, "source_sha": a.source_sha, "independent_asset_sha256_verified": False,
               "first_observation_run": 46025153522, "first_observation_pin_matched": False,
               "wear_os_donor": False, "runtime_executed": False, "safe_to_flash": False}
     rc = 0
