@@ -166,3 +166,16 @@ completion, ненулевые timeout, многопоточность или EG
 не производит пиксели: используется исходный regular-file Gralloc.
 Никаких реальных DMA-BUF, GPU, sync_file, Android native window или
 SurfaceFlinger. Provider компилируется только в probe output, не в overlay.
+
+## Two-slot producer/consumer queue fixture
+
+Двухслотовая модель перед реальным HWC CPU present: dequeue, FIFO queue,
+acquire, synchronous release и cancel. Два отдельных native_handle/FD
+ссылаются на один read-only pixel fixture, не на независимые allocations.
+Четыре цикла, 8 FIFO frames, backpressure, cancel с закрытием eventfd,
+rejected duplicate queue/cancel с сохранением caller ownership, повторное
+использование слота. Сохраняются EGL acquire и pixel/stride/pan проверки.
+Release без fence только для синхронного CPU пути. Не Android ANativeWindow
+ABI, не Binder BufferQueue, не GPU allocation, не asynchronous release.
+Evidence explicitly leaves android_native_window_verified and
+android_bufferqueue_verified false.

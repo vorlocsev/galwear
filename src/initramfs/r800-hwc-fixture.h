@@ -5,6 +5,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <poll.h>
+#include "r800-window-queue-fixture.h"
 static atomic_int hwc_ticks,hwc_bad;
 static atomic_llong hwc_last;
 static void hwc_fixture_vsync(const hwc_procs_t *procs,int disp,int64_t ts)
@@ -139,37 +140,65 @@ static int hwc_egl_acquire(void)
 static int hwc_cpu_present(hwc_composer_device_1_t *dev,int cycle)
 {
     int before=fd_count();
-    int fd=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
-    struct stat s;
-    if (before<0 || fd<0 || fstat(fd,&s) || !S_ISREG(s.st_mode) || s.st_size!=368*360*4) return 0;
-    native_handle_t *buf=calloc(1,sizeof(*buf)+5*sizeof(int));
+    struct window_queue queue={.slots={{.fence=-1},{.fence=-1}}};
+    for(int i=0;i<2;++i){
+        int fd=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        struct stat s;
+        if(before<0||fd<0||fstat(fd,&s)||!S_ISREG(s.st_mode)||s.st_size!=368*360*4)return 0;
+        native_handle_t *buf=calloc(1,sizeof(*buf)+5*sizeof(int));
+        if(!buf)return 0;
+        buf->version=sizeof(*buf);buf->numFds=1;buf->numInts=4;
+        buf->data[0]=fd;buf->data[1]=i?HAL_PIXEL_FORMAT_BGRA_8888:HAL_PIXEL_FORMAT_RGBA_8888;
+        buf->data[2]=360;buf->data[3]=360;buf->data[4]=368;
+        queue.slots[i].handle=buf;
+    }
     hwc_display_contents_1_t *c=calloc(1,sizeof(*c)+sizeof(hwc_layer_1_t));
-    if (!buf || !c) return 0;
-    buf->version=sizeof(*buf); buf->numFds=1; buf->numInts=4;
-    buf->data[0]=fd; buf->data[2]=360; buf->data[3]=360; buf->data[4]=368;
+    if(!c)return 0;
     c->numHwLayers=1;
     hwc_display_contents_1_t *displays[]={c};
     hwc_layer_1_t *l=&c->hwLayers[0];
     l->compositionType=HWC_FRAMEBUFFER_TARGET;
-    l->handle=buf;
     l->acquireFenceFd=l->releaseFenceFd=c->retireFenceFd=-1;
-    for (int i=0;i<2;++i) {
-        buf->data[1]=i?HAL_PIXEL_FORMAT_BGRA_8888:HAL_PIXEL_FORMAT_RGBA_8888;
-        /* First frame uses the original no-fence control; second transfers
-         * a live, caller-owned EGL export after its provider is unloaded. */
-        int acquire=-1;
-        if (i) {
-            acquire=hwc_egl_acquire();
-            if (acquire<0) return 0;
-            l->acquireFenceFd=acquire;
-        }
-        if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
-            l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
-            fcntl(fd,F_GETFD)<0 || !hwc_fb_matches(i||cycle?1:0,2)) return 0;
-        if (i && (fcntl(acquire,F_GETFD)!=-1 || errno!=EBADF)) return 0;
+    buffer_handle_t handle=NULL;
+    int acquire=-1;
+    if(window_acquire(&queue,&handle,&acquire)!=-EAGAIN||
+       window_dequeue(&queue)!=0||window_dequeue(&queue)!=1||
+       window_dequeue(&queue)!=-EAGAIN)return 0;
+    /* Cancel a producer-owned slot; the cancellation takes its fence. */
+    int cancelled=hwc_egl_acquire();
+    if(cancelled<0||window_cancel(&queue,0,cancelled)||
+       fcntl(cancelled,F_GETFD)!=-1||errno!=EBADF||
+       window_dequeue(&queue)!=0)return 0;
+    if(window_queue_buffer(&queue,0,-1))return 0;
+    int fence=hwc_egl_acquire();
+    if(fence<0||window_queue_buffer(&queue,1,fence))return 0;
+    /* Duplicate queue and cancel of an already queued slot must not consume
+     * the unrelated caller-owned FD or the pending queue fence. */
+    int rejected=fcntl(fence,F_DUPFD_CLOEXEC,0);
+    if(rejected<0||window_queue_buffer(&queue,1,rejected)!=-EINVAL||
+       window_cancel(&queue,1,rejected)!=-EINVAL||fcntl(rejected,F_GETFD)<0||
+       close(rejected)||fcntl(fence,F_GETFD)<0||window_dequeue(&queue)!=-EAGAIN)return 0;
+    for(int i=0;i<2;++i){
+        int slot=window_acquire(&queue,&handle,&acquire);
+        if(slot!=i||handle!=queue.slots[i].handle||
+           acquire!=(i?fence:-1)||window_dequeue(&queue)!=(i?0:-EAGAIN))return 0;
+        if(i&&window_cancel(&queue,0,-1))return 0;
+        l->handle=handle;l->acquireFenceFd=acquire;
+        if(dev->prepare(dev,1,displays)||dev->set(dev,1,displays)||
+           l->acquireFenceFd!=-1||l->releaseFenceFd!=-1||c->retireFenceFd!=-1||
+           fcntl(handle->data[0],F_GETFD)<0||!hwc_fb_matches(i||cycle?1:0,2))return 0;
+        if(i&&(fcntl(acquire,F_GETFD)!=-1||errno!=EBADF))return 0;
+        if(window_release_cpu(&queue,slot,l->releaseFenceFd)||
+           window_release_cpu(&queue,slot,-1)!=-EINVAL)return 0;
     }
-    free(c); free(buf);
-    return close(fd)==0 && fd_count()==before;
+    if(window_acquire(&queue,&handle,&acquire)!=-EAGAIN||queue.count||
+       queue.slots[0].state!=WINDOW_FREE||queue.slots[1].state!=WINDOW_FREE)return 0;
+    free(c);
+    for(int i=0;i<2;++i){
+        if(close(queue.slots[i].handle->data[0]))return 0;
+        free(queue.slots[i].handle);
+    }
+    return fd_count()==before;
 }
 
 /* Synthetic DECON accepts one client-target window. Eventfds stand in for
@@ -522,6 +551,7 @@ static int hwc_fixture(const hw_module_t *module)
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
     puts("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8");
     puts("HAL_HWC_EGL_ACQUIRE_FIXTURE_PASS frames=4 exported=4 consumed=4 provider_unloaded=4 pixel_match=4");
+    puts("HAL_HWC_WINDOW_QUEUE_FIXTURE_PASS cycles=4 slots=2 fifo_frames=8 cancel=4 rejected_transfer=8 backpressure=4 fd_stable=1");
     puts("HAL_HWC_FIXTURE_PASS geometry=360x360 cycles=4 invalid_bpp=1 power_recovery=4 timer_vsync=4");
     return 0;
 }
