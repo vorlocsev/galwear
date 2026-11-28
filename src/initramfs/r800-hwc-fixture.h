@@ -294,13 +294,28 @@ static int hwc_zero_copy(const hw_module_t *module,unsigned int (*get)(unsigned 
     mode(3);
     if (before<0 || module->methods->open(module,HWC_HARDWARE_COMPOSER,&base) || !base) return 0;
     hwc_composer_device_1_t *dev=(hwc_composer_device_1_t *)base;
-    int fd=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
-    native_handle_t *buf=calloc(1,sizeof(*buf)+5*sizeof(int));
+    int source=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    const size_t bytes=sizeof(native_handle_t)+5*sizeof(int);
+    native_handle_t *raw=calloc(1,bytes),*buf=NULL;
     hwc_display_contents_1_t *c=calloc(1,sizeof(*c)+sizeof(hwc_layer_1_t));
-    if (fd<0 || !buf || !c) return 0;
-    buf->version=sizeof(*buf); buf->numFds=1; buf->numInts=4;
-    buf->data[0]=fd; buf->data[1]=HAL_PIXEL_FORMAT_RGBA_8888;
-    buf->data[2]=360; buf->data[3]=360; buf->data[4]=368;
+    if(source<0||!raw||!c){
+        if(source>=0)close(source);
+        free(raw);free(c);base->close(base);return 0;
+    }
+    raw->version=sizeof(*raw);raw->numFds=1;raw->numInts=4;
+    raw->data[0]=source;raw->data[1]=HAL_PIXEL_FORMAT_RGBA_8888;
+    raw->data[2]=360;raw->data[3]=360;raw->data[4]=368;
+    int imported=import_model(raw,bytes,&buf);
+    int valid=!imported&&buf&&buf!=raw&&buf->data[0]!=source&&
+        fcntl(buf->data[0],F_GETFD)==FD_CLOEXEC&&
+        !memcmp(raw->data+1,buf->data+1,4*sizeof(int));
+    int closed=close(source);
+    free(raw);
+    if(!valid||closed||fcntl(source,F_GETFD)!=-1||errno!=EBADF){
+        if(buf)free_model(&buf);
+        free(c);base->close(base);return 0;
+    }
+    int fd=buf->data[0];
     c->numHwLayers=1;
     hwc_display_contents_1_t *displays[]={c};
     hwc_layer_1_t *l=&c->hwLayers[0];
@@ -315,7 +330,7 @@ static int hwc_zero_copy(const hw_module_t *module,unsigned int (*get)(unsigned 
         c->retireFenceFd<0 || c->retireFenceFd!=(int)get(12) ||
         c->retireFenceFd==(int)get(11) || fcntl(pair[0],F_GETFD)!=-1 || errno!=EBADF ||
         fcntl((int)get(11),F_GETFD)!=-1 || errno!=EBADF ||
-        fcntl(fd,F_GETFD)<0 || !hwc_fb_matches(1,2)) return 0;
+        fcntl(fd,F_GETFD)!=FD_CLOEXEC || !hwc_fb_matches(1,2)) return 0;
     uint64_t value=0;
     if (read(c->retireFenceFd,&value,sizeof(value))!=(ssize_t)sizeof(value) ||
         value!=13 || close(c->retireFenceFd) || close(pair[1])) return 0;
@@ -327,7 +342,8 @@ static int hwc_zero_copy(const hw_module_t *module,unsigned int (*get)(unsigned 
     if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
         l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
         fcntl(pair[0],F_GETFD)!=-1 || errno!=EBADF ||
-        get(9)!=2 || get(10)!=1 || get(8)!=8 || !hwc_fb_matches(1,2)) return 0;
+        get(9)!=2 || get(10)!=1 || get(8)!=8 ||
+        fcntl(fd,F_GETFD)!=FD_CLOEXEC || !hwc_fb_matches(1,2)) return 0;
     /* A subsequent ready RGBA target must use CPU copy, never retry WIN_CONFIG. */
     if (pipe(pair) || write(pair[1],"x",1)!=1) return 0;
     l->acquireFenceFd=pair[0];
@@ -335,8 +351,10 @@ static int hwc_zero_copy(const hw_module_t *module,unsigned int (*get)(unsigned 
         l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
         fcntl(pair[0],F_GETFD)!=-1 || errno!=EBADF ||
         get(9)!=2 || get(10)!=1 || get(8)!=9 || get(0) ||
-        !hwc_fb_matches(1,2) || close(pair[1]) || close(fd)) return 0;
-    free(c); free(buf);
+        !hwc_fb_matches(1,2) || close(pair[1]) ||
+        fcntl(fd,F_GETFD)!=FD_CLOEXEC) return 0;
+    free(c);
+    if(free_model(&buf)||buf||fcntl(fd,F_GETFD)!=-1||errno!=EBADF)return 0;
     mode(0);
     return base->close(base)==0 && fd_count()==before;
 }
@@ -653,6 +671,7 @@ static int hwc_fixture(const hw_module_t *module)
     puts("HAL_HWC_IMPORTED_QUARANTINE_FIXTURE_PASS cycles=4 retained=4 blocked_reuse=4 teardown=4 fd_stable=1");
     puts("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1");
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
+    puts("HAL_HWC_IMPORTED_ZERO_COPY_FIXTURE_PASS imports=1 source_closed=1 accepted=1 enotty=1 fallback=1 freed=1 fd_stable=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
     puts("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8");
     puts("HAL_HWC_IMPORTED_HANDLE_FIXTURE_PASS frames=8 imports=8 source_closed=8 freed=8 cloexec=8 fd_stable=1");
