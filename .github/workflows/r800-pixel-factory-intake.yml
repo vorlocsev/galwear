@@ -433,6 +433,78 @@ jobs:
           done
           python3 build/r800_pixel_hal_fixture_summary.py --evidence "$evidence" --source-sha "$GITHUB_SHA"
           test "$failed" -eq 0
+      - name: Inspect factory Pixel Vendor as a reference only
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=build python3 - <<'PY'
+          import json, os, shutil, tempfile, subprocess
+          from pathlib import Path
+          from r800_extract_pixel_factory import FACTORY_SHA256
+          from r800_extract_super import normalize
+          from r800_partition_identity import inspect_partition
+          from r800_pixel_runtime_layout import list_directory
+          from r800_extract_ext4 import extract
+          from r800_donor_preflight import digest
+          from r800_base_vendor_identity import describe
+          from r800_graphics_donor_binding import checkout_sha
+          root=Path(os.environ["RUNNER_TEMP"])/"pixel-intake"
+          evidence=root.parent/"pixel-evidence"
+          source=os.environ["GITHUB_SHA"]
+          checkout_sha(source)
+          factory=json.loads((evidence/"pixel-evidence.json").read_text())
+          system=json.loads((evidence/"pixel-raw-donor.json").read_text())
+          fixtures=json.loads((evidence/"pixel-hal-fixtures-summary.json").read_text())
+          assert factory["factory_sha256"]==system["factory_sha256"]==FACTORY_SHA256
+          assert system["source_sha"]==fixtures["source_sha"]==source
+          assert fixtures["status"]=="PIXEL_HAL_SYNTHETIC_FIXTURES_ONLY"
+          name,row=next(iter(system["partitions"].items()))
+          assert fixtures["system_sha256"]==row["sha256"]
+          assert "vendor.img" in factory["images"] and "super.img" not in factory["images"], "Direct factory Vendor required"
+          image=root/"extracted/vendor.img"
+          vendor=root/"vendor.raw"
+          origin=normalize(image,vendor,factory["images"]["vendor.img"]["sha256"])
+          pin=origin["raw_sha256"]
+          identity=inspect_partition(vendor,pin,"vendor",source)
+          report={"schema":"galwear-r800-pixel-vendor-reference-v1","source_sha":source,
+                  "factory_sha256":FACTORY_SHA256,"system_sha256":row["sha256"],
+                  "vendor_normalization":origin,"identity":identity,
+                  "status":"PIXEL_VENDOR_STATIC_REFERENCE_ONLY",
+                  "historical_base_donor_match_verified":False,
+                  "r800_vendor_compatibility_verified":False,"hardware_tested":False,"safe_to_flash":False}
+          if identity["filesystem"]["kind"]=="EXT4":
+              tool=shutil.which("debugfs")
+              assert tool
+              dirs={}
+              for path in ("/","/bin/hw","/lib/hw","/lib64/hw","/etc/vintf","/etc/vintf/manifest",
+                           "/etc/init","/etc/selinux","/firmware"):
+                  try:
+                      dirs[path]=list_directory(tool,vendor,path)
+                  except (ValueError,OSError,subprocess.SubprocessError) as exc:
+                      dirs[path]={"status":"REVIEW_REQUIRED","reason":str(exc),"entries":{}}
+              report["directories"]=dirs
+              target=root/"pixel-vendor-selected"
+              try:
+                  # Existing historical R800 recipe profile, for comparison only.
+                  # Do not assume a missing legacy 1.0 HAL is absent at other versions.
+                  selected=extract(vendor,target,"vendor-identity",pin)
+                  report["selected_legacy_profile"]=selected
+                  report["legacy_profile_identity"]=describe(selected,pin)
+              except (ValueError,OSError,KeyError,subprocess.SubprocessError) as exc:
+                  report["legacy_profile_review"]={"status":"REVIEW_REQUIRED","reason":str(exc)}
+              finally:
+                  if target.exists():
+                      shutil.rmtree(target)
+              print("PIXEL_VENDOR_DIRECTORIES",json.dumps({p:{"status":v["status"],"names":sorted(v["entries"]),"reason":v.get("reason")} for p,v in dirs.items()},sort_keys=True))
+          assert digest(vendor,4*1024**3)["sha256"]==pin
+          assert digest(image,4*1024**3)["sha256"]==origin["source_sha256"]
+          checkout_sha(source)
+          (evidence/"pixel-vendor-reference.json").write_text(json.dumps(report,indent=2,sort_keys=True)+"\n")
+          print("PIXEL_VENDOR_REFERENCE",json.dumps({"source_sha":source,"normalization":origin,
+              "properties":identity["properties"],"filesystem":identity["filesystem"],
+              "legacy_profile_identity":report.get("legacy_profile_identity"),
+              "legacy_profile_review":report.get("legacy_profile_review"),"safe_to_flash":False},sort_keys=True))
+          PY
       - name: Remove factory archive and all extracted image bytes
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/pixel-intake"
@@ -464,5 +536,6 @@ jobs:
             ${{ runner.temp }}/pixel-evidence/pixel-hal-hwc-fixture.json
             ${{ runner.temp }}/pixel-evidence/pixel-hal-namespace-fixture.json
             ${{ runner.temp }}/pixel-evidence/pixel-hal-fixtures-summary.json
+            ${{ runner.temp }}/pixel-evidence/pixel-vendor-reference.json
           if-no-files-found: warn
           retention-days: 7
