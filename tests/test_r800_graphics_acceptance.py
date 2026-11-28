@@ -8,6 +8,7 @@ if BUILD not in sys.path:
     sys.path.insert(0, BUILD)
 from r800_graphics_acceptance import (
     ABI_HOLDS, FIXTURE_HOLDS, HWC_FLAGS, EGL_FLAGS, LIBHARDWARE, SYSTEM_CORE, combine, expressions,
+    DONOR_CHECKS, BINDING_HOLDS,
 )
 
 
@@ -55,6 +56,84 @@ class GraphicsAcceptanceTests(unittest.TestCase):
 
     def test_donor_hardware_promotion_rejected(self):
         self.donor["donor_preflight"]["hardware_tested"] = True
+        self.audit(donor=self.donor)
+
+    def bind_donor(self):
+        tree = {"algorithm": "sha256-ordered-tree-records-v1", "sha256": "c"*64,
+                "entries": 300, "regular_bytes": 10000}
+        self.donor.update(source_sha=self.sha, status="STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY",
+                          donor_binding={"schema": "galwear-r800-extracted-donor-binding-v1",
+                                         "source_sha": self.sha, "tree_before": tree.copy(),
+                                         "tree_after": tree.copy(), "config_sha256": "d"*64,
+                                         "dtb_sha256": "e"*64, "tracked_checkout_clean": True,
+                                         "tree_unchanged_observed": True,
+                                         **dict.fromkeys(BINDING_HOLDS, False)})
+        self.donor["donor_preflight"].update(checks=dict.fromkeys(DONOR_CHECKS, True),
+                                             release_status="HOLD_HARDWARE_UNVERIFIED")
+        return self.donor["donor_binding"]
+
+    def test_bound_donor_static_only(self):
+        self.bind_donor()
+        result = self.audit("OFFLINE_GRAPHICS_EVIDENCE_ONLY", self.donor)
+        self.assertEqual(result["donor"]["status"], "BOUND_STATIC_PREREQUISITES_ONLY")
+        self.assertIs(result["donor"]["source_sha_bound"], True)
+        self.assertIs(result["donor"]["input_provenance_verified"], False)
+        self.assertIs(result["donor"]["static_prerequisites_complete"], True)
+
+    def test_bound_incomplete_donor(self):
+        self.bind_donor()
+        p = self.donor["donor_preflight"]
+        p["checks"]["mapper_factory_export"] = False
+        p["missing_static_prerequisites"] = ["mapper_factory_export"]
+        p["status"] = "REVIEW_REQUIRED"
+        result = self.audit("OFFLINE_GRAPHICS_EVIDENCE_ONLY", self.donor)
+        self.assertEqual(result["donor"]["status"], "BOUND_STATIC_REPORT_REVIEW_REQUIRED")
+        self.assertFalse(result["donor"]["static_prerequisites_complete"])
+
+    def test_bound_donor_stale_sha(self):
+        self.bind_donor()["source_sha"] = "b"*40
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_stale_report_sha(self):
+        self.bind_donor()
+        self.donor["source_sha"] = "b"*40
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_tree_changed(self):
+        self.bind_donor()["tree_after"]["sha256"] = "f"*64
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_malformed_tree(self):
+        b = self.bind_donor()
+        b["tree_before"]["entries"] = b["tree_after"]["entries"] = True
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_missing_kernel_digest(self):
+        self.bind_donor()["dtb_sha256"] = None
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_image_authenticity_not_inferred(self):
+        self.bind_donor()["original_image_authenticity_verified"] = True
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_missing_check(self):
+        self.bind_donor()
+        del self.donor["donor_preflight"]["checks"]["egl_candidates"]
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_inconsistent_failures(self):
+        self.bind_donor()
+        self.donor["donor_preflight"]["checks"]["mapper_factory_export"] = False
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_inconsistent_graph_status(self):
+        self.bind_donor()
+        self.donor["status"] = "REVIEW_REQUIRED"
+        self.audit(donor=self.donor)
+
+    def test_bound_donor_malformed_binding(self):
+        self.bind_donor()
+        self.donor["donor_binding"] = []
         self.audit(donor=self.donor)
 
     def test_stale_fixture(self):
