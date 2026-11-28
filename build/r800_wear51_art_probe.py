@@ -77,9 +77,9 @@ def config(objects):
     return "\n".join(lines)+"\n"
 
 
-def limit_child():
+def limit_child(file_limit=LIMIT):
     resource.setrlimit(resource.RLIMIT_CORE,(0,0))
-    resource.setrlimit(resource.RLIMIT_FSIZE,(LIMIT,LIMIT))
+    resource.setrlimit(resource.RLIMIT_FSIZE,(file_limit,file_limit))
 
 
 def decode_log_record(packet):
@@ -126,7 +126,9 @@ def evaluate_case(name,rc,out,err,records,timeout,capped,staged):
     return ("ARGUMENT_HANDLER_OBSERVED" if clean and marker else "REVIEW_REQUIRED"),marker,[]
 
 
-def run_case(qemu,bwrap,guest,scratch,name,args,staged):
+def run_case(qemu,bwrap,guest,scratch,name,args,staged,*,boot_output=None):
+    if (name=="boot-image") != (boot_output is not None):
+        raise ValueError("Explicit private output required only for boot image probe")
     stdout=scratch/(name+".stdout")
     stderr=scratch/(name+".stderr")
     rc=None
@@ -148,9 +150,17 @@ def run_case(qemu,bwrap,guest,scratch,name,args,staged):
                      "-E","ANDROID_ROOT=/system","-E","ANDROID_ART_ROOT=/apex/com.android.art",
                      "-E","ANDROID_RUNTIME_ROOT=/apex/com.android.runtime",
                      "-E","ANDROID_DATA=/data","-E","ANDROID_LOG_TAGS=*:v",*args]
+            if boot_output is not None:
+                from r800_wear51_art_boot_probe import MAX_OUTPUT
+                where=command.index("--chdir")
+                command[where:where]=["--bind",str(boot_output),"/data"]
+                file_limit=MAX_OUTPUT
+            else:
+                file_limit=LIMIT
             with stdout.open("xb") as out,stderr.open("xb") as err:
-                proc=subprocess.Popen(command,stdout=out,stderr=err,preexec_fn=limit_child)
-                deadline=time.monotonic()+30
+                proc=subprocess.Popen(command,stdout=out,stderr=err,
+                                      preexec_fn=lambda:limit_child(file_limit))
+                deadline=time.monotonic()+(120 if boot_output is not None else 30)
                 try:
                     while True:
                         if time.monotonic()>=deadline:
@@ -181,12 +191,24 @@ def run_case(qemu,bwrap,guest,scratch,name,args,staged):
             stream.seek(max(0,path.stat().st_size-TAIL))
             return stream.read(TAIL).decode("utf-8","replace")
     out,err=tail(stdout),tail(stderr)
-    status,marker,paths=evaluate_case(name,rc,out,err,records,timed_out,capped,staged)
+    if boot_output is not None:
+        from r800_wear51_art_boot_probe import inspect_outputs
+        artifacts=inspect_outputs(boot_output)
+        combined=out+"\n"+err+"\n"+"\n".join(r["message"] for r in records)
+        marker=(rc==0 and not timed_out and not capped and
+                not re.search(r"CANNOT LINK EXECUTABLE|uncaught target signal|Runtime aborting",combined,re.I)
+                and all(v["status"]=="HEADER_OBSERVED" for v in artifacts.values()))
+        status="BOOT_OUTPUT_HEADERS_OBSERVED" if marker else "REVIEW_REQUIRED"
+        paths=[]
+    else:
+        status,marker,paths=evaluate_case(name,rc,out,err,records,timed_out,capped,staged)
+        artifacts={}
     return {"status":status,"exit_code":rc,"timeout":timed_out,
             "output_capped":capped,"stdout_tail":out,"stderr_tail":err,
             "marker_observed":bool(marker),"resolved_paths":paths,
             "logdw_packets":packets,"logdw_bytes":received,
-            "logdw_records":records,"logd_service_emulated":False}
+            "logdw_records":records,"logd_service_emulated":False,
+            "output_headers":artifacts}
 
 
 def probe(sources,graph,scratch,source,pin):
@@ -241,10 +263,24 @@ def probe(sources,graph,scratch,source,pin):
     passed=(rows["linker-list"]["status"]=="MARKER_PASS" and all(
         rows[name]["status"]=="ARGUMENT_HANDLER_OBSERVED"
         for name in ("dex2oat-help","dex2oat-noargs","dex2oat-invalid")))
+    boot={"status":"NOT_TESTED"}
+    if passed:
+        try:
+            from r800_wear51_art_boot_probe import stage, arguments
+            jars=stage(sources,guest)
+            boot={"status":"REVIEW_REQUIRED","boot_jars":jars,"safe_to_flash":False}
+            if jars["status"]=="SELECTED_ART_BOOT_JARS_ONLY":
+                with tempfile.TemporaryDirectory(prefix="wear51-boot-",dir=scratch) as outdir:
+                    result=run_case(str(Path(qemu).resolve()),bwrap,guest,scratch,"boot-image",
+                                    arguments(jars["classpath"]),staged,boot_output=Path(outdir))
+                    boot.update(status=result["status"],result=result)
+        except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
+            boot.update(status="REVIEW_REQUIRED",reason=str(exc),safe_to_flash=False)
     return {"schema":"galwear-r800-wear51-art-startup-v2","source_sha":source,
             "system_sha256":pin,"qemu_cpu":"max","staged_sha256":staged,
             "excluded_system_ld_android_sha256":objects[STUB]["sha256"],
             "synthetic_config_sha256":sha(cfg.encode()),"synthetic_config":cfg,
-            "results":rows,"status":"DEX2OAT_ARGUMENT_HANDLER_PROBE_ONLY" if passed else "REVIEW_REQUIRED",
+            "results":rows,"boot_image_probe":boot,
+            "status":"DEX2OAT_ARGUMENT_HANDLER_PROBE_ONLY" if passed else "REVIEW_REQUIRED",
             "android_namespace_runtime_verified":False,"art_initialized":False,
             "dex_compilation_verified":False,"hardware_tested":False,"safe_to_flash":False}
