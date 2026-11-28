@@ -1,5 +1,6 @@
 """Stock archive intake tests using real small EXT4 images, not stock firmware."""
 import io
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
 import r800_extract_stock_donor as stock
+import r800_bind_stock_donor as binding
 import r800_partition_identity as identity
 
 
@@ -96,6 +98,74 @@ class StockDonorTests(unittest.TestCase):
         r=self.extract("j4-vendor")
         self.assertEqual(r["partition"]["sha256"],stock.digest(self.image)["sha256"])
         self.assertFalse(r["donor_authenticity_verified"])
+
+
+    def bind(self,build_input="tizen",archive_pin=None,source="a"*40):
+        image=self.output/"rootfs.img"
+        report=self.output/"stock-donor-evidence.json"
+        with patch.object(binding,"checkout_sha"):
+            return binding.verify(image,stock.digest(image)["sha256"],report,
+                                  stock.digest(report)["sha256"],
+                                  archive_pin or stock.digest(self.archive)["sha256"],
+                                  build_input,source)
+
+    def test_stock_build_binding(self):
+        self.pack([("rootfs.img",self.image.read_bytes())])
+        self.extract("r800-rootfs")
+        result=self.bind()
+        self.assertEqual(result["status"],"STOCK_REPORT_AND_RAW_INPUT_MATCH_ONLY")
+        self.assertFalse(result["archive_rehashed"])
+        self.assertFalse(result["safe_to_flash"])
+
+    def test_stock_build_binding_wrong_archive_pin(self):
+        self.pack([("rootfs.img",self.image.read_bytes())])
+        self.extract("r800-rootfs")
+        with self.assertRaisesRegex(ValueError,"Stock archive pin"):
+            self.bind(archive_pin="0"*64)
+
+    def test_stock_build_binding_wrong_role(self):
+        self.pack([("rootfs.img",self.image.read_bytes())])
+        self.extract("r800-rootfs")
+        with self.assertRaisesRegex(ValueError,"Unexpected stock extraction scope"):
+            self.bind(build_input="j4")
+
+    def test_stock_build_binding_stale_report(self):
+        self.pack([("rootfs.img",self.image.read_bytes())])
+        self.extract("r800-rootfs")
+        with self.assertRaisesRegex(ValueError,"Evidence scope mismatch"):
+            self.bind(source="b"*40)
+
+    def test_stock_build_binding_rehashed_report_with_wrong_chain(self):
+        self.pack([("rootfs.img",self.image.read_bytes())])
+        self.extract("r800-rootfs")
+        report=self.output/"stock-donor-evidence.json"
+        data=json.loads(report.read_bytes())
+        data["normalization"]["raw_bytes"]+=1
+        report.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError,"Stock normalization chain mismatch"):
+            self.bind()
+
+    def test_stock_build_binding_rehashed_wrong_image(self):
+        self.pack([("rootfs.img",self.image.read_bytes())])
+        self.extract("r800-rootfs")
+        image=self.output/"rootfs.img"
+        image.chmod(0o600)
+        with image.open("r+b") as stream:
+            stream.write(b"changed")
+        with self.assertRaisesRegex(ValueError,"Stock build input bytes mismatch"):
+            self.bind()
+
+    def test_stock_build_binding_j4(self):
+        self.pack([("vendor.img.ext4",self.image.read_bytes())])
+        self.extract("j4-vendor")
+        image=self.output/"vendor.img"
+        report=self.output/"stock-donor-evidence.json"
+        with patch.object(binding,"checkout_sha"):
+            result=binding.verify(image,stock.digest(image)["sha256"],report,
+                                  stock.digest(report)["sha256"],
+                                  stock.digest(self.archive)["sha256"],"j4","a"*40)
+        self.assertEqual(result["role"],"j4-vendor")
+        self.assertFalse(result["donor_authenticity_verified"])
 
 
 if __name__=="__main__":
