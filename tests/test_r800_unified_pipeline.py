@@ -125,6 +125,17 @@ class UnifiedPipelineTests(unittest.TestCase):
         self.assertFalse(final["safe_to_flash"])
         self.assertFalse((self.output/"development/r800dev/android/BOOT_ANDROID").exists())
 
+    def test_failed_final_readiness_does_not_publish(self):
+        with ExitStack() as stack:
+            self.context(stack)
+            check=stack.enter_context(patch.object(readiness,"readiness",
+                side_effect=ValueError("fixture readiness rejection")))
+            with self.assertRaisesRegex(ValueError,"fixture readiness rejection"):
+                pipeline.build(self.paths,self.pins,self.output,SOURCE)
+            check.assert_called_once()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob("r800-local-build-*")),[])
+
     def test_failed_runtime_does_not_publish(self):
         with ExitStack() as stack:
             self.context(stack)
