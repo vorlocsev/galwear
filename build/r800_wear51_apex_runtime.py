@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Read selected ARM32 Bionic/ART from pinned Wear OS 5.1 System.
 
-No guest execution, mounts, APEX activation, signature or boot claim.
+Static by default; optional isolated QEMU ART startup probe. No host mounts,
+APEX activation, trusted signature or boot claim.
 """
 import hashlib
 from pathlib import Path
@@ -36,7 +37,7 @@ REQUIRED_RUNTIME=("/bin/linker","/lib/bionic/libc.so","/lib/bionic/libm.so","/li
 ERRORS=(OSError,ValueError,RuntimeError,KeyError,zipfile.BadZipFile,subprocess.SubprocessError)
 
 
-def audit(image,pin,source,output):
+def audit(image,pin,source,output,*,probe_art=False):
     if pin != SYSTEM_PIN:
         raise ValueError("Expected observed Wear OS 5.1 System SHA-256")
     checkout_sha(source)
@@ -48,6 +49,7 @@ def audit(image,pin,source,output):
         raise ValueError("debugfs required")
     modules={}
     art_dependencies={"status":"NOT_TESTED"}
+    art_startup={"status":"NOT_TESTED"}
     with tempfile.TemporaryDirectory(prefix="wear51-apex-",dir=output.parent) as tmp:
         scratch=Path(tmp)
         private=scratch/"system.img"
@@ -107,10 +109,19 @@ def audit(image,pin,source,output):
                     reader.verify_unchanged()
             except (OverflowError,) + ERRORS as exc:
                 art_dependencies={"status":"REVIEW_REQUIRED","reason":str(exc)}
+        if probe_art:
+            try:
+                from r800_wear51_art_probe import probe
+                art_startup=probe(sources,art_dependencies,scratch,source,pin)
+                for reader in readers:
+                    reader.verify_unchanged()
+            except (OverflowError,) + ERRORS as exc:
+                art_startup={"status":"REVIEW_REQUIRED","reason":str(exc),"safe_to_flash":False}
         if digest(private,4*1024**3)["sha256"]!=pin or digest(image,4*1024**3)["sha256"]!=pin:
             raise ValueError("System changed")
     result={"schema":"galwear-r800-wear51-apex-runtime-v1","source_sha":source,
-            "system_sha256":pin,"modules":modules,"art_dependencies":art_dependencies,"status":"REVIEW_REQUIRED",
+            "system_sha256":pin,"modules":modules,"art_dependencies":art_dependencies,
+            "art_startup":art_startup,"status":"REVIEW_REQUIRED",
             "runtime_executed":False,"art_initialized":False,"apex_activation_verified":False,
             "hardware_tested":False,"safe_to_flash":False}
     runtime=modules["com.android.runtime"]
