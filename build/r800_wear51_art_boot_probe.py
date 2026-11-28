@@ -6,6 +6,7 @@ This is not a full device boot classpath or a releasable boot image.
 import hashlib
 from pathlib import Path
 import stat
+import re
 import struct
 
 from r800_framework_inventory import ext4_member, classify, MAX_MEMBER
@@ -54,13 +55,13 @@ def stage(sources,guest):
         "safe_to_flash":False}
 
 
-def arguments(classpath,*,compiler_filter="verify"):
+def arguments(classpath,*,compiler_filter="verify",force_determinism=False):
     if compiler_filter not in ("verify","speed"):
         raise ValueError("Unsupported experimental compiler filter")
     expected=[ART_ROOT+"/javalib/"+n for n in BOOT_JARS]
     if classpath!=expected:
         raise ValueError("Unexpected boot classpath")
-    return [ART_ROOT+"/bin/dex2oat32",
+    args=[ART_ROOT+"/bin/dex2oat32",
             *("--dex-file="+p for p in classpath),
             *("--dex-location="+p for p in classpath),
             "--image=/data/boot.art","--oat-file=/data/boot.oat",
@@ -68,6 +69,9 @@ def arguments(classpath,*,compiler_filter="verify"):
             "--instruction-set=arm","--instruction-set-variant=generic",
             "--compiler-filter="+compiler_filter,"--single-image","-j1",
             "--runtime-arg","-Xms64m","--runtime-arg","-Xmx512m"]
+    if force_determinism:
+        args.append("--force-determinism")
+    return args
 
 
 def oat_segments(raw):
@@ -127,3 +131,25 @@ def inspect_outputs(directory):
             except ValueError as exc:
                 rows[name].update(status="REVIEW_REQUIRED",reason=str(exc))
     return rows
+
+def compare_runs(first,second):
+    """Compare two successful independent runs, without retaining binary outputs."""
+    rows={}
+    complete=True
+    for name in OUTPUTS:
+        entries=[r.get("output_headers",{}).get(name,{}) for r in (first,second)]
+        valid=all(r.get("status")=="BOOT_OUTPUT_HEADERS_OBSERVED" and
+                  r.get("exit_code")==0 and r.get("timeout") is False and
+                  r.get("output_capped") is False for r in (first,second)) and all(
+            e.get("status")=="HEADER_OBSERVED" and
+            isinstance(e.get("sha256"),str) and re.fullmatch(r"[a-f0-9]{64}",e["sha256"]) and
+            type(e.get("bytes")) is int and 16<=e["bytes"]<=MAX_OUTPUT for e in entries)
+        same=bool(valid and entries[0]["bytes"]==entries[1]["bytes"] and
+                  entries[0]["sha256"]==entries[1]["sha256"])
+        rows[name]={"status":"IDENTICAL" if same else "DIFFERENT" if valid else "NOT_COMPARABLE",
+                    "runs":[{"sha256":e.get("sha256"),"bytes":e.get("bytes")} for e in entries]}
+        complete=complete and bool(valid)
+    identical=complete and all(row["status"]=="IDENTICAL" for row in rows.values())
+    return {"status":"TWO_RUN_SHA256_MATCH" if identical else "TWO_RUN_SHA256_DIFFERENT" if complete else "REVIEW_REQUIRED",
+            "files":rows,"same_runner_only":True,"cross_host_reproducibility_verified":False,
+            "safe_to_flash":False}
