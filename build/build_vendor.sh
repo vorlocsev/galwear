@@ -201,7 +201,8 @@ copy_hidl_group wifi \
 for binary in "$OUT/bin/hw/android.hardware.wifi@1.0-service" \
               "$OUT/bin/hw/wpa_supplicant"; do
     header=$(llvm-readelf -h "$binary")
-    grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*
+    grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*$' <<< "$header"
+    grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' <<< "$header"
     llvm-readelf -d "$binary" >> "$WORK/hidl-dependencies.txt"
 done
 copy_hidl_group sensors \
@@ -220,7 +221,8 @@ for group in sensors gnss; do
     for binary in "$OUT/bin/hw/android.hardware.$group@1.0-service" \
                   "$OUT/lib/hw/android.hardware.$group@1.0-impl.so"; do
         header=$(llvm-readelf -h "$binary")
-        grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*
+        grep -Eq 'Class:[[:space:]]*ELF32[[:space:]]*$' <<< "$header"
+        grep -Eq 'Machine:[[:space:]]*ARM[[:space:]]*$' <<< "$header"
         llvm-readelf -d "$binary" >> "$WORK/hidl-dependencies.txt"
     done
 done
