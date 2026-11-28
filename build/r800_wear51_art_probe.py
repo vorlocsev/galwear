@@ -317,6 +317,23 @@ def probe(sources,graph,scratch,source,pin,*,qemu_compare=None):
                                 alternate_result=run_case(str(alternate),bwrap,guest,comp,"boot-image",
                                     arguments(jars["classpath"]),staged,boot_output=comp/"data")
                                 comparison.update(status=alternate_result["status"],result=alternate_result)
+                                if alternate_result["status"]=="BOOT_OUTPUT_HEADERS_OBSERVED":
+                                    with tempfile.TemporaryDirectory(prefix="wear51-speed-",dir=scratch) as speed_dir:
+                                        speed=Path(speed_dir)
+                                        (speed/"data").mkdir()
+                                        speed_args=arguments(jars["classpath"],compiler_filter="speed")
+                                        speed_result=run_case(str(alternate),bwrap,guest,speed,"boot-image",
+                                            speed_args,staged,boot_output=speed/"data")
+                                        verify_bytes=alternate_result["output_headers"]["boot.oat"]["elf_segments"]["executable_file_bytes"]
+                                        speed_bytes=speed_result.get("output_headers",{}).get("boot.oat",{}).get(
+                                            "elf_segments",{}).get("executable_file_bytes")
+                                        comparison["speed_experiment"]={"status":"SPEED_EXECUTABLE_SEGMENT_GROWTH_OBSERVED" if
+                                            speed_result["status"]=="BOOT_OUTPUT_HEADERS_OBSERVED" and
+                                            speed_bytes is not None and speed_bytes>verify_bytes else "REVIEW_REQUIRED",
+                                            "compiler_filter":"speed","arguments":speed_args,
+                                            "verify_executable_file_bytes":verify_bytes,
+                                            "speed_executable_file_bytes":speed_bytes,
+                                            "result":speed_result,"machine_code_validated":False,"safe_to_flash":False}
                         if sha(alternate.read_bytes())!=meta["qemu_sha256"]:
                             raise ValueError("Comparator binary changed")
                     except (OSError,ValueError,RuntimeError,KeyError,subprocess.SubprocessError) as exc:
