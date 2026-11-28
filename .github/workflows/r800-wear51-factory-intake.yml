@@ -173,7 +173,9 @@ jobs:
                   (evidence/"art-startup.json").write_text(json.dumps(startup,indent=2,sort_keys=True)+"\n")
                   print("WEAR51_ART_STARTUP",json.dumps({k:v for k,v in startup.items() if k not in ("staged_sha256","results","synthetic_config")},sort_keys=True))
                   for name,case in startup.get("results",{}).items():
-                      print("WEAR51_ART_STARTUP_CASE",json.dumps({"case":name,**case},sort_keys=True))
+                      print("WEAR51_ART_STARTUP_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
+                      for record in case.get("logdw_records",[])[:32]:
+                          print("WEAR51_ART_LOGDW",json.dumps({"case":name,**record},sort_keys=True))
                   print("WEAR51_APEX_RUNTIME",json.dumps({k:v for k,v in result.items() if k not in ("art_dependencies","art_startup")},sort_keys=True))
                   print("WEAR51_ART_DEPENDENCIES",json.dumps({k:v for k,v in graph.items() if k not in ("objects","edges")},sort_keys=True))
                   if graph["status"]=="SELECTED_ART_DEPENDENCY_CANDIDATES_ONLY":
@@ -348,7 +350,11 @@ jobs:
           p=Path(os.environ["RUNNER_TEMP"])/"wear51-evidence/art-startup.json"
           assert p.is_file(), "ART startup not tested"
           r=json.loads(p.read_text())
-          assert r["status"]=="DEX2OAT_STARTUP_PROBE_ONLY", r.get("reason","ART startup requires review")
+          assert r["status"]=="DEX2OAT_ARGUMENT_HANDLER_PROBE_ONLY", r.get("reason","ART argument-handler probe requires review")
+          assert r["results"]["linker-list"]["status"]=="MARKER_PASS"
+          for name in ("dex2oat-help","dex2oat-noargs","dex2oat-invalid"):
+              assert r["results"][name]["status"]=="ARGUMENT_HANDLER_OBSERVED"
+          assert r["dex_compilation_verified"] is False
           assert r["source_sha"]==os.environ["GITHUB_SHA"] and r["qemu_cpu"]=="max"
           assert r["art_initialized"] is False and r["safe_to_flash"] is False
           PY
