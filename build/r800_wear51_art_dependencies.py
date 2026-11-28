@@ -64,6 +64,8 @@ def walk(load, candidates, roots=ROOTS):
         eligible=[p for p in edge["candidates"] if p in objects and
                   objects[p]["soname"]==edge["needed"]]
         edge["eligible_candidates"]=eligible
+        edge["candidate_sha256"]={p:objects[p]["sha256"] for p in eligible}
+        edge["candidate_bytes_identical"]=len(eligible)>1 and len(set(edge["candidate_sha256"].values()))==1
         edge["status"]=("NOT_FOUND_IN_SELECTED_DIRS" if not edge["candidates"] else
                         "NO_ELIGIBLE_CANDIDATE" if not eligible else
                         "MULTIPLE_CANDIDATES" if len(eligible)>1 else
@@ -71,7 +73,17 @@ def walk(load, candidates, roots=ROOTS):
     counts={}
     for e in edges:
         counts[e["status"]]=counts.get(e["status"],0)+1
+    duplicates={}
+    for edge in edges:
+        if edge["status"]=="MULTIPLE_CANDIDATES":
+            name=edge["needed"]
+            row=duplicates.setdefault(name,{"candidate_sha256":edge["candidate_sha256"],
+                "candidate_bytes_identical":edge["candidate_bytes_identical"],"consumers":[]})
+            if row["candidate_sha256"]!=edge["candidate_sha256"]:
+                raise ValueError("Inconsistent candidate inventory: "+name)
+            row["consumers"].append(edge["consumer"])
     return {"status":"SELECTED_ART_DEPENDENCY_CANDIDATES_ONLY",
+            "ambiguous_names":duplicates,
             "roots":list(roots),"objects":objects,"edges":edges,"review":reviews,
             "counts":counts,"inspected_bytes":total,"namespace_resolution_verified":False,
             "symbol_resolution_verified":False,"art_initialized":False,"safe_to_flash":False}
@@ -79,11 +91,13 @@ def walk(load, candidates, roots=ROOTS):
 
 def audit(sources):
     """sources: fixed labels -> (debugfs, private image, private scratch)."""
-    if set(sources)!={"system","runtime","art"}:
-        raise ValueError("Expected three selected filesystems")
+    if not {"system","runtime","art"} <= set(sources) <= {"system","runtime","art","statsd"}:
+        raise ValueError("Expected selected System, Runtime, ART and optional StatsD filesystems")
     dirs={"system":("/system/lib",),
           "runtime":("/lib/bionic","/lib","/bin"),
           "art":("/lib",)}
+    if "statsd" in sources:
+        dirs["statsd"]=("/lib",)
     listings={}
     for label,paths in dirs.items():
         tool,image,scratch=sources[label]
