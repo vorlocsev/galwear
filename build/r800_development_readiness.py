@@ -60,6 +60,18 @@ def chain(summary,reports,i,u):
     require(b["original_donor_sha256"]=={n:inputs[n] for n in ("system","base","j4","effects")} and
             v["donor_sha256"]=={**{n:inputs[n] for n in ("base","j4","effects")},
                                "system":s["system"]["sha256"]},"Android donor chain mismatch")
+    kernel_pins={"Image":k["components"]["kernel_sha256"],"r800.dtb":k["components"]["dtb_sha256"],
+                 "effective.config":k["config_sha256"],"init":k["init_sha256"],
+                 "initramfs.generated":k["generated_cpio"]["archive_sha256"]}
+    require({n:row["sha256"] for n,row in i["kernel_files"].items()}==
+            {"development-boot/"+n:h for n,h in kernel_pins.items()} and
+            i["kernel_files"]["development-boot/Image"]["bytes"]==k["components"]["kernel_bytes"] and
+            i["kernel_files"]["development-boot/r800.dtb"]["bytes"]==k["components"]["dtb_bytes"],
+            "Final kernel files differ from original evidence")
+    require(s["original"]["sha256"]==inputs["system"] and
+            al["files"]=={"r800dev/android/system.img":{**s["system"],"mode":"0o400"},
+                          "r800-android/vendor.img":{**v["vendor"],"mode":"0o400"}},
+            "Final Android images differ from original evidence")
     require(not set(d["files"])&set(t["files"]) and not set(a["files"])&set(al["files"]) and
             set(a["files"])==set(d["files"])|set(t["files"]) and
             set(u["files"])==set(a["files"])|set(al["files"]),"Stage inventory mismatch")
