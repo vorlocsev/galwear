@@ -161,7 +161,9 @@ def read_pinned(path,pin):
 
 
 def verify_bundle(bundle,source_sha):
-    lock_path,lock_pin,probe_path,probe_pin=bundle
+    require(len(bundle) in (4,6),"Expected host lock/probe and optional ELF report")
+    lock_path,lock_pin,probe_path,probe_pin=bundle[:4]
+    require(len({Path(p) for p in bundle[::2]})==len(bundle)//2,"Distinct host evidence files required")
     require(Path(lock_path)!=Path(probe_path),"Distinct host evidence files required")
     require(os.environ.get("PATH")=="/usr/sbin:/usr/bin:/sbin:/bin","Set documented system PATH")
     lock_raw,lock=read_pinned(lock_path,lock_pin)
@@ -171,6 +173,18 @@ def verify_bundle(bundle,source_sha):
     require(not live["prerequisites"]["blockers"],"Live host prerequisites review required")
     require(read_pinned(lock_path,lock_pin)[0]==lock_raw and
             read_pinned(probe_path,probe_pin)[0]==probe_raw,"Host evidence changed")
+    if len(bundle)==6:
+        # Lazy import: host ELF capture uses the environment lock module.
+        from r800_linux_host_elf_lock import verify as verify_elf, review_saved
+        elf_path,elf_pin=bundle[4:]
+        elf_raw,elf=read_pinned(elf_path,elf_pin)
+        review_saved(lock,elf,lock_pin,source_sha)
+        require(verify_elf(lock_path,lock_pin,elf_path,elf_pin,source_sha)==elf,
+                "Live selected host ELF evidence mismatch")
+        require(read_pinned(elf_path,elf_pin)[0]==elf_raw and
+                read_pinned(lock_path,lock_pin)[0]==lock_raw and
+                read_pinned(probe_path,probe_pin)[0]==probe_raw,"Host evidence changed")
+        return lock_raw,probe_raw,live,elf_raw
     return lock_raw,probe_raw,live
 
 
