@@ -329,6 +329,14 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           ref="$RUNNER_TEMP/r800-phh-reference/runtime"
           python3 build/r800_egl_link_probe.py --ndk "$RUNNER_TEMP/android-ndk-r27c" --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/r800-egl-link"
+      - name: Gate same-head synthetic graphics pipeline evidence
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_graphics_fixture_summary.py \
+            --hwc "$RUNNER_TEMP/r800-hwc-fixture/hal-runtime-evidence.json" \
+            --egl "$RUNNER_TEMP/r800-egl-link/egl-link-evidence.json" \
+            --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/graphics-fixture-summary.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -348,6 +356,7 @@ jobs:
             ${{ runner.temp }}/r800-hwc-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-namespace-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-egl-link/egl-link-evidence.json
+            ${{ runner.temp }}/graphics-fixture-summary.json
           if-no-files-found: warn
           retention-days: 7
   overlay-independent:
