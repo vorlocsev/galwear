@@ -26,6 +26,7 @@ import r800_stage_android_layer as android_stage
 import r800_review_handover as handover
 import r800_installation_layout as installation
 import r800_development_readiness as readiness
+import r800_bind_stock_donor as stock_binding
 import test_r800_build_local_android as android_fixture
 import test_r800_stage_integrated_development as kernel_fixture
 import test_r800_stage_adaptation_layer as runtime_fixture
@@ -118,6 +119,7 @@ class UnifiedPipelineTests(unittest.TestCase):
         self.assertEqual(result["status"],"LOCAL_GALWEAR_DEVELOPMENT_TREE_BUILT_STATIC_ONLY")
         self.assertEqual(final["checks"]["stage_chain"],"STATIC_PASS")
         self.assertEqual(final["checks"]["recovery_inputs"],"NOT_SUPPLIED")
+        self.assertEqual(final["checks"]["stock_donor_evidence"],"NOT_SUPPLIED")
         self.assertEqual(final["handover"]["checks"]["display_assets"],"STATIC_PASS")
         self.assertEqual(final["handover"]["missing_display_assets"],[])
         self.assertEqual(final["installation"]["partition_layout"]["p15"]["files"].keys(),
@@ -144,6 +146,71 @@ class UnifiedPipelineTests(unittest.TestCase):
                 pipeline.build(self.paths,self.pins,self.output,SOURCE)
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.root.glob("r800-local-build-*")),[])
+
+
+    def stock_fixture(self):
+        # Synthetic reports match the fixture byte pins. The live image
+        # validator is mocked here; real EXT4 verification has its own tests.
+        result={}
+        for name,(role,filename) in stock_binding.INPUTS.items():
+            raw={"bytes":self.paths[name].stat().st_size,"sha256":self.pins[name]}
+            archive={"bytes":raw["bytes"]+1024,"sha256":"e"*64}
+            fs={"kind":"EXT4"}
+            data={"schema":"galwear-r800-stock-donor-v1",
+                  "status":"STOCK_PARTITION_CANDIDATE_ONLY","source_sha":SOURCE,
+                  "role":role,"member":filename,"archive":archive,
+                  "member_identity":raw,"decompressed_identity":raw,
+                  "normalization":{"source_sha256":raw["sha256"],"source_bytes":raw["bytes"],
+                                   "raw_sha256":raw["sha256"],"raw_bytes":raw["bytes"]},
+                  "partition":{"file":filename,**raw},"filesystem":fs,
+                  "android_identity":{"filesystem":fs} if name=="j4" else None,
+                  **{k:False for k in stock_binding.FALSE_FLAGS}}
+            path=self.root/(name+"-stock.json")
+            path.write_text(json.dumps(data))
+            result[name]=(path,pipeline.sha(path.read_bytes()),archive["sha256"])
+        return result
+
+    def fake_stock(self,image,image_pin,report,report_pin,archive_pin,name,source_sha):
+        self.assertEqual(image_pin,pipeline.sha(image.read_bytes()))
+        self.assertEqual(report_pin,pipeline.sha(report.read_bytes()))
+        return stock_binding.describe(json.loads(report.read_bytes()),image_pin,
+                                      report_pin,archive_pin,name,source_sha)
+
+    def test_build_with_stock_evidence(self):
+        stock=self.stock_fixture()
+        with ExitStack() as stack:
+            self.context(stack)
+            check=stack.enter_context(patch.object(pipeline,"verify_stock",side_effect=self.fake_stock))
+            result=pipeline.build(self.paths,self.pins,self.output,SOURCE,stock_evidence=stock)
+            summary=self.output/"local-build-evidence.json"
+            final=readiness.readiness(self.output,pipeline.sha(summary.read_bytes()),SOURCE)
+        self.assertEqual(check.call_count,4)
+        self.assertEqual(set(result["stock_donor_bindings"]),{"tizen","j4"})
+        self.assertEqual(final["checks"]["stock_donor_evidence"],"SAVED_REPORT_CHAIN_ONLY")
+        self.assertFalse(final["original_donor_authenticity_verified"])
+        self.assertFalse(final["safe_to_flash"])
+
+    def test_partial_stock_evidence_rejected(self):
+        stock=self.stock_fixture()
+        with ExitStack() as stack:
+            self.context(stack)
+            with self.assertRaisesRegex(ValueError,"Supply both stock donor reports"):
+                pipeline.build(self.paths,self.pins,self.output,SOURCE,
+                               stock_evidence={"tizen":stock["tizen"]})
+        self.assertFalse(self.output.exists())
+
+    def test_stock_evidence_rehashed_summary_rejected(self):
+        stock=self.stock_fixture()
+        with ExitStack() as stack:
+            self.context(stack)
+            stack.enter_context(patch.object(pipeline,"verify_stock",side_effect=self.fake_stock))
+            pipeline.build(self.paths,self.pins,self.output,SOURCE,stock_evidence=stock)
+            summary=self.output/"local-build-evidence.json"
+            data=json.loads(summary.read_bytes())
+            data["stock_donor_bindings"]["j4"]["image"]["bytes"]+=1
+            summary.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError,"Saved stock binding differs"):
+                readiness.readiness(self.output,pipeline.sha(summary.read_bytes()),SOURCE)
 
 
 if __name__=="__main__":
