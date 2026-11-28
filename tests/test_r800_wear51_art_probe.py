@@ -31,6 +31,40 @@ class ArtProbeTests(unittest.TestCase):
         self.assertIn("namespace.default.link.system.shared_libs = libbase.so\n",cfg)
         self.assertNotIn("allow_all_shared_libs",cfg)
 
+    def test_logdw_record(self):
+        packet=b"\0"*11+b"\x06dex2oat\0Usage: dex2oat [options]...\0"
+        self.assertEqual(probe.decode_log_record(packet),
+                         {"priority":6,"tag":"dex2oat","message":"Usage: dex2oat [options]..."})
+        self.assertIsNone(probe.decode_log_record(b"bad"))
+
+    def test_usage_error_requires_actual_log(self):
+        err=probe.USAGE_ERROR+"\n"
+        status,_,_=probe.evaluate_case("dex2oat-help",1,"",err,[],False,False,{})
+        self.assertEqual(status,"REVIEW_REQUIRED")
+        records=[{"message":"Usage: dex2oat [options]..."}]
+        status,_,_=probe.evaluate_case("dex2oat-help",1,"",err,records,False,False,{})
+        self.assertEqual(status,"ARGUMENT_HANDLER_OBSERVED")
+        status,_,_=probe.evaluate_case("dex2oat-invalid",1,"",err,records,False,False,{})
+        self.assertEqual(status,"REVIEW_REQUIRED")
+        records.append({"message":"Unknown argument "+probe.INVALID_OPTION})
+        status,_,_=probe.evaluate_case("dex2oat-invalid",1,"",err,records,False,False,{})
+        self.assertEqual(status,"ARGUMENT_HANDLER_OBSERVED")
+        status,_,_=probe.evaluate_case("dex2oat-invalid",132,"",err,records,False,False,{})
+        self.assertEqual(status,"REVIEW_REQUIRED")
+
+    def test_linker_list_requires_separate_providers(self):
+        paths=["/apex/com.android.art/lib/libart.so","/apex/com.android.art/lib/libc++.so",
+               "/system/lib/libc++.so","/apex/com.android.runtime/lib/bionic/libc.so",
+               "/apex/com.android.os.statsd/lib/libstatspull.so",
+               "/apex/com.android.os.statsd/lib/libstatssocket.so"]
+        out="".join(p.rsplit("/",1)[1]+" => "+p+" (0x1234)\n" for p in paths)
+        staged=dict.fromkeys(paths,"fixture")
+        status,_,_=probe.evaluate_case("linker-list",0,out,"",[],False,False,staged)
+        self.assertEqual(status,"MARKER_PASS")
+        del staged[paths[1]]
+        status,_,_=probe.evaluate_case("linker-list",0,out,"",[],False,False,staged)
+        self.assertEqual(status,"REVIEW_REQUIRED")
+
     def test_missing_statsd(self):
         data=objects()
         del data["statsd:/lib/libstatspull.so"]
