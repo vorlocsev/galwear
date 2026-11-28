@@ -20,6 +20,7 @@ PREFIX={"art":"/apex/com.android.art","runtime":"/apex/com.android.runtime",
         "statsd":"/apex/com.android.os.statsd","system":""}
 LINKER="runtime:/bin/linker"
 DEX="art:/bin/dex2oat32"
+VM="art:/bin/dalvikvm32"
 STUB="system:/system/lib/ld-android.so"
 LIMIT=2*1024**2
 TAIL=16384
@@ -37,7 +38,7 @@ def guest_path(key):
     label,path=key.split(":",1)
     if label not in PREFIX:
         raise ValueError("Unexpected provider label")
-    if key in (LINKER,DEX):
+    if key in (LINKER,DEX,VM):
         return PREFIX[label]+path
     directory,name=path.rsplit("/",1)
     allowed={"art":{"/lib"},"statsd":{"/lib"},"runtime":{"/lib","/lib/bionic"},
@@ -52,7 +53,7 @@ def config(objects):
     for key,row in objects.items():
         guest_path(key)
         name=row["soname"]
-        if key in (DEX,STUB):
+        if key in (DEX,VM,STUB):
             continue
         if not isinstance(name,str) or not NAME.fullmatch(name):
             raise ValueError("Unexpected provider SONAME")
@@ -114,6 +115,25 @@ def evaluate_case(name,rc,out,err,records,timeout,capped,staged):
             path.rsplit("/",1)[-1]==name for name,path in resolved))
         status="MARKER_PASS" if clean and marker else "REVIEW_REQUIRED"
         return status,marker,sorted(paths)
+    if name=="vm-linker-list":
+        resolved=re.findall(r"(?m)^\s*(\S+)\s+=>\s+(/\S+)\s+\(",out)
+        paths={path for _,path in resolved}
+        required={"libnativehelper.so","libsigchain.so","libc.so"}
+        marker=(rc==0 and bool(paths) and paths<=set(staged) and
+                required<={path.rsplit("/",1)[-1] for path in paths} and
+                all(path.rsplit("/",1)[-1]==soname for soname,path in resolved))
+        return ("MARKER_PASS" if clean and marker else "REVIEW_REQUIRED"),marker,sorted(paths)
+    if name in ("vm-java","vm-missing-class"):
+        from r800_wear51_java_fixture import MARKER, MISSING_CLASS
+        if name=="vm-java":
+            marker=rc==0 and out.splitlines()==[MARKER]
+            status="JAVA_MARKER_PASS"
+        else:
+            marker=(rc==1 and MARKER not in combined and MISSING_CLASS in combined and
+                    bool(re.search(r"ClassNotFoundException|Could not find class|NoClassDefFoundError",combined,re.I)))
+            status="MISSING_CLASS_CONTROL_PASS"
+        clean=clean and not re.search(r"Runtime aborting|SIGSEGV|SIGABRT|Assertion.*failed",combined,re.I)
+        return (status if clean and marker else "REVIEW_REQUIRED"),marker,[]
     usage=bool(re.search(r"(?im)^\s*Usage:\s*dex2oat(?:\s|$)",combined))
     rejected=(rc==1 and USAGE_ERROR in err.splitlines())
     if name=="dex2oat-invalid":
@@ -317,6 +337,9 @@ def probe(sources,graph,scratch,source,pin,*,qemu_compare=None):
                                 alternate_result=run_case(str(alternate),bwrap,guest,comp,"boot-image",
                                     arguments(jars["classpath"]),staged,boot_output=comp/"data")
                                 comparison.update(status=alternate_result["status"],result=alternate_result)
+                                if alternate_result["status"]=="BOOT_OUTPUT_HEADERS_OBSERVED":
+                                    from r800_wear51_vm_probe import experiment
+                                    comparison["java_vm"]=experiment(sources,guest,scratch,comp/"data",alternate_result,jars,str(alternate),bwrap)
                                 if alternate_result["status"]=="BOOT_OUTPUT_HEADERS_OBSERVED":
                                     with tempfile.TemporaryDirectory(prefix="wear51-speed-",dir=scratch) as speed_dir:
                                         speed=Path(speed_dir)
