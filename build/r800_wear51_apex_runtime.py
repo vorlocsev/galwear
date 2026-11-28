@@ -11,6 +11,8 @@ import tempfile
 import zipfile
 
 from r800_art_apex_mapping import ApexReader
+from r800_wear51_apex_container import inspect_container
+from r800_apex_inventory import package_inventory
 from r800_extract_ext4 import snapshot_image
 from r800_framework_inventory import ext4_member, classify, MAX_MEMBER
 from r800_android_runtime_extract import MAX_APEX
@@ -55,16 +57,30 @@ def audit(image,pin,source,output):
                     raise ValueError("Expected observed APEX package")
                 row["package_sha256"]=hashlib.sha256(raw).hexdigest()
                 row["package_bytes"]=len(raw)
+                row["container"],nested=inspect_container(raw,module)
                 del raw
                 directory=scratch/module
                 directory.mkdir()
+                if nested is not None and module!="com.android.art":
+                    raise ValueError("Nested wrapper only supported for selected ART")
+                actual_pin=row["container"].get("nested_sha256",row["package_sha256"])
                 def read_partition(requested,limit):
                     if requested!=path:
                         raise ValueError("Unexpected APEX path")
+                    if nested is not None:
+                        if len(nested)>limit:
+                            raise ValueError("Nested APEX exceeds reader budget")
+                        return nested
                     return ext4_member(tool,private,path,limit,directory)
-                reader=ApexReader([(module,path,row["package_sha256"])],read_partition,directory)
-                apex_tool,payload,workspace,*_=reader.open(module)
+                reader=ApexReader([(module,path,actual_pin)],read_partition,directory)
+                apex_tool,payload,workspace,package,*_=reader.open(module)
                 row["package"]=reader.evidence[module]
+                if nested is not None:
+                    if row["container"]["wrapper_identity"]!=row["package"]["identity"]:
+                        raise ValueError("Nested and wrapper APEX identities differ")
+                    key=row["container"].get("wrapper_pubkey_sha256")
+                    if key is not None and package_inventory(package)["pubkey_sha256"]!=key:
+                        raise ValueError("Nested and wrapper APEX keys differ")
                 for member in paths:
                     try:
                         data=ext4_member(apex_tool,payload,member,MAX_MEMBER,workspace)
