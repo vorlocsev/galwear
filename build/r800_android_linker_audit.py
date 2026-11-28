@@ -936,6 +936,48 @@ def audit(root: Path, targets=TARGETS, kernel_config=None, dtb=None) -> dict:
             "android_boot_tested": False, "safe_to_flash": False}
 
 
+def graphics_donor_preflight(report):
+    """Conservative static prerequisites; never certify donor execution."""
+    inventory = report.get("inventory") or {}
+    graph = report.get("graph") or {}
+    checks = {
+        "graphics_dependency_candidates": report.get("status") == "STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY",
+        "surfaceflinger_abi_known": inventory.get("surfaceflinger_abi") in ("arm", "arm64"),
+        "surfaceflinger_graph_root": any(
+            service.get("name") == "surfaceflinger" and service.get("elf") and
+            service.get("path") in report.get("roots", []) and
+            bool(graph.get("objects", {}).get(service.get("path")))
+            for service in inventory.get("services", [])),
+        "egl_candidates": inventory.get("egl_driver_groups", {}).get("status") == "STATIC_EGL_DRIVER_GROUP_ONLY",
+        "graphics_exports": inventory.get("entrypoint_evidence", {}).get("status") == "STATIC_GRAPHICS_MINIMUM_EXPORTS_ONLY",
+        "mapper_2_1_candidates": inventory.get("mapper_2_1_evidence", {}).get("status") == "STATIC_MAPPER_2_1_CANDIDATES_ONLY",
+        "mapper_factory_export": inventory.get("mapper_factory_evidence", {}).get("status") == "STATIC_MAPPER_FACTORY_EXPORT_ONLY",
+        "mali_recipe_candidates": inventory.get("mali_evidence", {}).get("status") == "STATIC_MALI_RECIPE_EVIDENCE_ONLY",
+        "hwc_explicit_stride_hint": (
+            inventory.get("hwc_stride_evidence", {}).get("observed_explicit_stride") in (96, 100)
+            and not inventory.get("hwc_stride_evidence", {}).get("errors")
+            and not inventory.get("hwc_stride_evidence", {}).get("conflicting_assignments")),
+        "vintf_literal_inventory": graph.get("vintf_inventory", {}).get("status") == "LITERAL_INVENTORY_ONLY",
+    }
+    missing = [key for key, value in checks.items() if not value]
+    return {
+        "status": "STATIC_DONOR_PREREQUISITES_ONLY" if not missing else "REVIEW_REQUIRED",
+        "checks": checks, "missing_static_prerequisites": missing,
+        "runtime_blockers": [
+            "Donor HWC caller layout and effective runtime stride unverified",
+            "Mapper interfaceChain, native_handle ABI and import/free unverified",
+            "VINTF merge and passthrough transport architecture unverified",
+            "Bionic runtime namespace and relocation resolution unverified",
+            "Mali KBASE userspace/kernel compatibility and real sync_file unverified",
+            "SurfaceFlinger start, Android boot and physical display unverified",
+        ],
+        "donor_surfaceflinger_verified": False, "donor_mapper_verified": False,
+        "donor_mali_verified": False, "hardware_tested": False,
+        "android_boot_tested": False, "safe_to_flash": False,
+        "release_status": "HOLD_HARDWARE_UNVERIFIED",
+    }
+
+
 def audit_graphics_dependencies(root, kernel_config=None, dtb=None):
     """Explicit dlopen roots discovered from graphics inventory, not just init.
     
@@ -954,6 +996,7 @@ def audit_graphics_dependencies(root, kernel_config=None, dtb=None):
               "hardware_tested": False, "safe_to_flash": False}
     if not roots or len(roots) > MAX_NODES:
         report["errors"].append("Empty or oversized graphics root set")
+        report["donor_preflight"] = graphics_donor_preflight(report)
         return report
     graph = audit(root, roots, kernel_config, dtb)
     report["graph"] = graph
@@ -978,6 +1021,7 @@ def audit_graphics_dependencies(root, kernel_config=None, dtb=None):
             inventory["entrypoint_evidence"]["status"] == "STATIC_GRAPHICS_MINIMUM_EXPORTS_ONLY" and
             graph["status"] == "CANDIDATES_FOUND_ONLY"):
         report["status"] = "STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY"
+    report["donor_preflight"] = graphics_donor_preflight(report)
     return report
 
 
