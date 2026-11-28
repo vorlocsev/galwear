@@ -9,6 +9,8 @@ on:
       - build/r800_extract_super.py
       - build/r800_super_inventory.py
       - build/r800_partition_identity.py
+      - build/r800_pixel_runtime_layout.py
+      - tests/test_r800_pixel_runtime_layout.py
       - build/r800_dex_hiddenapi_observation.py
       - tests/test_r800_dex_hiddenapi_observation.py
       - build/r800_bind_pixel_system.py
@@ -291,6 +293,28 @@ jobs:
           (evidence/"pixel-apex-observation.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
           print("PIXEL_APEX_OBSERVATION",json.dumps(modules,sort_keys=True))
           PY
+      - name: Locate actual runtime directories and flattened APEX members
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_r800_pixel_runtime_layout.py' -v
+          PYTHONPATH=build python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          from r800_pixel_runtime_layout import audit
+          root=Path(os.environ["RUNNER_TEMP"])/"pixel-intake"
+          evidence=root.parent/"pixel-evidence"
+          source=os.environ["GITHUB_SHA"]
+          report=json.loads((evidence/"pixel-raw-donor.json").read_text())
+          assert report["source_sha"]==source and len(report["partitions"])==1
+          name,row=next(iter(report["partitions"].items()))
+          image=root/row["file"] if report["mode"]=="direct" else root/"logical"/row["file"]
+          result=audit(image,row["sha256"],source)
+          (evidence/"pixel-runtime-layout.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
+          print("PIXEL_RUNTIME_DIRECTORIES",json.dumps({p:{"status":v["status"],"names":sorted(v["entries"]),"reason":v.get("reason")} for p,v in result["directories"].items()},sort_keys=True))
+          print("PIXEL_RUNTIME_MODULES",json.dumps(result["module_candidates"],sort_keys=True))
+          print("PIXEL_RUNTIME_MEMBERS",json.dumps(result["members"],sort_keys=True))
+          PY
       - name: Remove factory archive and all extracted image bytes
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/pixel-intake"
@@ -307,5 +331,6 @@ jobs:
             ${{ runner.temp }}/pixel-evidence/pixel-framework-inventory.json
             ${{ runner.temp }}/pixel-evidence/pixel-dex-diagnostics.json
             ${{ runner.temp }}/pixel-evidence/pixel-apex-observation.json
+            ${{ runner.temp }}/pixel-evidence/pixel-runtime-layout.json
           if-no-files-found: warn
           retention-days: 7
