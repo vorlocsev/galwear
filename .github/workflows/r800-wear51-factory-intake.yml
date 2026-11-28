@@ -12,6 +12,10 @@ on:
       - build/r800_partition_identity.py
       - build/r800_pixel_runtime_layout.py
       - build/r800_android_linker_audit.py
+      - build/r800_wear51_apex_runtime.py
+      - build/r800_art_apex_mapping.py
+      - build/r800_apex_inventory.py
+      - build/r800_arm32_runtime_extract.py
       - tests/test_r800_wear51_tls.py
   workflow_dispatch:
 permissions:
@@ -127,6 +131,11 @@ jobs:
                              runtime["members"][member].get("sha256")==row.get("sha256")
                              for member,row in diagnostics.items()), "Original Android 15 ELF TLS revalidation failed"
                   print("WEAR51_ORIGINAL_TLS_STATIC_PASS")
+                  from r800_wear51_apex_runtime import audit as apex_audit
+                  result=apex_audit(path,pin,source,root/"wear51-bionic")
+                  (evidence/"apex-runtime.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
+                  print("WEAR51_APEX_RUNTIME",json.dumps(result,sort_keys=True))
+                  assert result["status"]=="WEAR51_MINIMAL_ARM32_RUNTIME_STATIC_ONLY", "Minimal Android 15 runtime requires review"
           if "super.img" in images:
               assert "system.img" not in images, "Ambiguous System source"
               raw=root/"super.raw"
@@ -172,5 +181,6 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/partitions.json
             ${{ runner.temp }}/wear51-evidence/runtime-layout.json
             ${{ runner.temp }}/wear51-evidence/elf-tls-diagnostics.json
+            ${{ runner.temp }}/wear51-evidence/apex-runtime.json
           if-no-files-found: warn
           retention-days: 7
