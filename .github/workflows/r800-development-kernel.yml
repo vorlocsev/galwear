@@ -8,6 +8,12 @@ on:
       - build/r800_kernel_compile_development.sh
       - build/r800_development_kernel.py
       - build/r800_development_initramfs.py
+      - build/r800_cpio_audit.py
+      - build/r800_initramfs_spec.py
+      - build/r800_kernel_preflight.py
+      - build/r800_aosp_source_probe.sh
+      - build/r800_boot_candidate.py
+      - tests/test_r800_development_kernel.py
       - build/r800_stage_integrated_development.py
       - tests/test_r800_stage_integrated_development.py
       - src/initramfs/init.c
@@ -31,6 +37,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Check functional kernel build scripts and configuration contract
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh -n build/r800_kernel_compile_development.sh
+          sh -n src/initramfs/build.sh
+          python3 -m unittest discover -s tests -p 'test_r800_development_kernel.py' -v
       - name: Fetch exact public source in disposable checkout
         run: |
           set -eu
@@ -59,6 +72,36 @@ jobs:
               mkdir /scratch/r800-kernel-integration-check
               PYTHONPATH=/repo/build python3 -c "import os; from pathlib import Path; from r800_stage_integrated_development import kernel_inputs, sha, REPORT; root=Path(\"/scratch/r800-development-build\"); pin=sha((root/REPORT).read_bytes()); raw, report, inputs=kernel_inputs(root,pin,os.environ[\"GITHUB_SHA\"],Path(\"/scratch/r800-kernel-integration-check\")); assert len(inputs)==5; print(\"REAL_KERNEL_INTEGRATION_INPUT_PASS\")"
             '
+      - name: Summarize exact-head compiled functional kernel evidence
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          scratch=Path(os.environ["RUNNER_TEMP"])
+          root=scratch/"r800-development-build"
+          report=json.loads((root/"development-kernel-evidence.json").read_text())
+          preflight=json.loads((scratch/"r800-development-source-preflight.json").read_text())
+          assert preflight["status"]=="PATCH_APPLIES_TO_PINNED_SOURCE_ONLY"
+          assert preflight["expected_kernel_base"]=="50db73fc799f20a7120a8b5f653b16cc123d856f"
+          assert preflight["static_patch_audit"]["patch_sha256"]==hashlib.sha256(Path("src/kernel/r800-wearos.patch").read_bytes()).hexdigest()
+          assert report["source_sha"]==os.environ["GITHUB_SHA"]
+          assert report["status"]=="DEVELOPMENT_KERNEL_COMPONENTS_STATIC_ONLY"
+          assert report["boot_profile"]=="DEVELOPMENT_FUNCTIONAL_UNTESTED"
+          assert report["storage_write_capable"] is True
+          for flag in ("kernel_boot_tested","android_handover_tested","hardware_tested","safe_to_flash"):
+              assert report[flag] is False
+          print("FUNCTIONAL_KERNEL_STATIC_PASS", json.dumps({
+              "source_sha":report["source_sha"],
+              "kernel_base":preflight["expected_kernel_base"],
+              "patch_sha256":preflight["static_patch_audit"]["patch_sha256"],
+              "kernel_sha256":report["components"]["kernel_sha256"],
+              "kernel_bytes":report["components"]["kernel_bytes"],
+              "dtb_sha256":report["components"]["dtb_sha256"],
+              "embedded_init_sha256":report["init_sha256"],
+              "generated_cpio_sha256":report["generated_cpio"]["archive_sha256"],
+              "safe_to_flash":False},sort_keys=True))
+          PY
       - name: Upload only metadata, never kernel, DTB or initramfs
         if: always()
         uses: actions/upload-artifact@v4
