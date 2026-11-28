@@ -169,7 +169,9 @@ def compile_probe(ndk, hals, output, source_sha):
 
 
 def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=False,
-              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False, gps_fixture=False, audio_fixture=False, audio_pcm_fixture=False, hwc_fixture=False, namespace_fixture=False):
+              lights_fixture=False, sensors_fixture=False, sensors_context=False, sensors_evdev=False, gps_fixture=False, audio_fixture=False, audio_pcm_fixture=False, hwc_fixture=False, namespace_fixture=False, *, qemu_cpu="cortex-a15"):
+    if qemu_cpu not in ("cortex-a15", "max"):
+        raise ValueError("Unsupported explicit QEMU CPU model")
     if sum((lifecycle, lights_fixture, sensors_fixture, sensors_context, sensors_evdev, gps_fixture, audio_fixture, audio_pcm_fixture, hwc_fixture, namespace_fixture)) > 1:
         raise ValueError("Choose one probe mode")
     if os.geteuid() == 0:
@@ -341,7 +343,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
             cmd = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
                    "--clearenv", "--ro-bind", str(root), "/", "--ro-bind", qemu, "/qemu",
                    "--dev", "/dev", "--proc", "/proc", "--chdir", "/",
-                   "/qemu", "-cpu", "cortex-a15", "-L", "/",
+                   "/qemu", "-cpu", qemu_cpu, "-L", "/",
                    "-E", "LD_LIBRARY_PATH=/apex/com.android.runtime/lib/bionic:/system/lib", "/system/bin/hal-probe",
                    "/vendor/lib/hw/"+name, identity]
             if namespace_fixture:
@@ -518,6 +520,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                          else "ARM32_HAL_HMI_QEMU_USER_ONLY") if all(
         v["status"] == expected_status for v in results.values()) else "REVIEW_REQUIRED",
         "source_sha": evidence["source_sha"], "runtime_sha256": pins,
+        "qemu_cpu": qemu_cpu, "cpu_hardware_compatibility_verified": False,
         "hal_sha256": evidence["hal_sha256"], "results": results,
         "namespace_fixture_requested": namespace_fixture,
         "synthetic_namespace_link_verified": namespace_fixture and all(v["status"] == expected_status for v in results.values()),
@@ -584,6 +587,8 @@ def main():
     q = sub.add_parser("run")
     for name in ("probe-dir", "hals", "runtime", "runtime-manifest", "output"):
         q.add_argument("--"+name, type=Path, required=True)
+    q.add_argument("--qemu-cpu", choices=("cortex-a15", "max"), default="cortex-a15",
+                   help="Explicit emulated CPU; max does not establish hardware compatibility")
     modes = q.add_mutually_exclusive_group()
     modes.add_argument("--lifecycle", action="store_true")
     modes.add_argument("--lights-fixture", action="store_true")
@@ -598,7 +603,8 @@ def main():
     a = p.parse_args()
     result = (compile_probe(a.ndk, a.hals, a.output, a.source_sha) if a.action == "compile"
               else run_probe(a.probe_dir, a.hals, a.runtime, a.runtime_manifest, a.output,
-                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev, a.gps_fixture, a.audio_fixture, a.audio_pcm_fixture, a.hwc_fixture, a.namespace_fixture))
+                             a.lifecycle, a.lights_fixture, a.sensors_fixture, a.sensors_context, a.sensors_evdev, a.gps_fixture, a.audio_fixture, a.audio_pcm_fixture, a.hwc_fixture, a.namespace_fixture,
+                             qemu_cpu=a.qemu_cpu))
     print(json.dumps(result, sort_keys=True))
     return 2 if result["status"] == "REVIEW_REQUIRED" else 0
 
