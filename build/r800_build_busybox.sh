@@ -12,9 +12,32 @@ mkdir -- "$OUT"
 OUT=$(CDPATH= cd -- "$OUT" && pwd)
 VERSION=1.38.0
 SHA=34f9ea6ff8636f2c9241153b9114eefa9e65674a45318ae1ef95bb5f31c53bb2
-curl --fail --location --retry 3 --max-time 180 \
-    "https://www.busybox.net/downloads/busybox-$VERSION.tar.bz2" -o "$OUT/source.tar.bz2"
-printf '%s  %s\n' "$SHA" "$OUT/source.tar.bz2" | sha256sum -c -
+# Mirrors are candidates only; an exact archive digest is mandatory.
+# Bound connection delays so an unavailable host does not exhaust the CI job.
+fetched=false
+for url in \
+    "https://busybox.net/downloads/busybox-$VERSION.tar.bz2" \
+    "https://sources.buildroot.net/busybox/busybox-$VERSION.tar.bz2" \
+    "https://www.busybox.net/downloads/busybox-$VERSION.tar.bz2"
+do
+    rm -f -- "$OUT/source.tar.bz2.part"
+    if curl --fail --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 120 --retry 1 \
+        "$url" -o "$OUT/source.tar.bz2.part" &&
+        printf '%s  %s\n' "$SHA" "$OUT/source.tar.bz2.part" | sha256sum -c -
+    then
+        mv -- "$OUT/source.tar.bz2.part" "$OUT/source.tar.bz2"
+        printf '%s\n' "$url" > "$OUT/source-url.txt"
+        fetched=true
+        break
+    fi
+    echo "BusyBox source unavailable or digest mismatch: $url" >&2
+done
+if [ "$fetched" != true ]; then
+    rm -f -- "$OUT/source.tar.bz2.part"
+    echo "BusyBox source unavailable with exact required SHA-256" >&2
+    exit 2
+fi
 tar -xjf "$OUT/source.tar.bz2" -C "$OUT"
 cd "$OUT/busybox-$VERSION"
 make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- defconfig > "$OUT/configure.log"
