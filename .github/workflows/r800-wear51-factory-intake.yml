@@ -16,6 +16,8 @@ on:
       - build/r800_wear51_apex_container.py
       - build/r800_wear51_art_dependencies.py
       - build/r800_wear51_art_probe.py
+      - build/r800_wear51_art_boot_probe.py
+      - tests/test_r800_wear51_art_boot_probe.py
       - tests/test_r800_wear51_art_probe.py
       - tests/test_r800_wear51_art_dependencies.py
       - tests/test_r800_wear51_apex_container.py
@@ -67,6 +69,8 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_r800_wear51_art_dependencies.py' -v
       - name: Test ART startup probe namespace and path validation
         run: python3 -m unittest discover -s tests -p 'test_r800_wear51_art_probe.py' -v
+      - name: Verify experimental ART boot image probe
+        run: python3 -m unittest discover -s tests -p 'test_r800_wear51_art_boot_probe.py' -v
       - name: Obtain exact October 2025 factory image
         shell: bash
         run: |
@@ -171,7 +175,17 @@ jobs:
                   graph=result["art_dependencies"]
                   startup=result["art_startup"]
                   (evidence/"art-startup.json").write_text(json.dumps(startup,indent=2,sort_keys=True)+"\n")
-                  print("WEAR51_ART_STARTUP",json.dumps({k:v for k,v in startup.items() if k not in ("staged_sha256","results","synthetic_config")},sort_keys=True))
+                  print("WEAR51_ART_STARTUP",json.dumps({k:v for k,v in startup.items() if k not in ("staged_sha256","results","synthetic_config","boot_image_probe")},sort_keys=True))
+                  boot=startup.get("boot_image_probe",{"status":"NOT_TESTED"})
+                  (evidence/"art-boot-probe.json").write_text(json.dumps(boot,indent=2,sort_keys=True)+"\n")
+                  print("WEAR51_ART_BOOT_PROBE",json.dumps({k:v for k,v in boot.items() if k not in ("boot_jars","result")},sort_keys=True))
+                  if "boot_jars" in boot:
+                      print("WEAR51_ART_BOOT_JARS",json.dumps({k:{"status":v["status"],"sha256":v.get("sha256"),"dex_entries":v.get("dex_entries")} for k,v in boot["boot_jars"]["members"].items()},sort_keys=True))
+                  if "result" in boot:
+                      case=boot["result"]
+                      print("WEAR51_ART_BOOT_CASE",json.dumps({k:v for k,v in case.items() if k!="logdw_records"},sort_keys=True))
+                      for record in case.get("logdw_records",[])[:32]:
+                          print("WEAR51_ART_BOOT_LOGDW",json.dumps(record,sort_keys=True))
                   for name,case in startup.get("results",{}).items():
                       print("WEAR51_ART_STARTUP_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                       for record in case.get("logdw_records",[])[:32]:
@@ -376,6 +390,7 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/elf-tls-diagnostics.json
             ${{ runner.temp }}/wear51-evidence/apex-runtime.json
             ${{ runner.temp }}/wear51-evidence/art-startup.json
+            ${{ runner.temp }}/wear51-evidence/art-boot-probe.json
             ${{ runner.temp }}/wear51-evidence/hal-compile.json
             ${{ runner.temp }}/wear51-evidence/hal-runtime.json
             ${{ runner.temp }}/wear51-evidence/hal-lifecycle.json
