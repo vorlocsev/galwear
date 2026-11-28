@@ -65,5 +65,48 @@ class HostElfLockTests(unittest.TestCase):
             self.inventory()
 
 
+    def saved(self):
+        return {"schema":"galwear-r800-linux-host-elf-lock-v1",
+                "environment_lock_sha256":PIN,**self.inventory()}
+
+    def review(self,report):
+        with patch.object(host,"TOOLS",("fixture",)):
+            return host.review_saved(self.lock,report,PIN,SOURCE)
+
+    def test_saved_exact_graph(self):
+        self.assertEqual(self.review(self.saved()),"SAVED_STATIC_HOST_ELF_CHAIN_ONLY")
+
+    def test_saved_missing_provider(self):
+        report=self.saved()
+        del report["bindings"]["libfixture.so"]
+        with self.assertRaisesRegex(ValueError,"Missing saved host ELF provider"):
+            self.review(report)
+
+    def test_saved_unreachable_object(self):
+        report=self.saved()
+        report["objects"]["/usr/lib/unused.so"]={"bytes":1,"sha256":PIN,
+                                                   "needed":[],"interpreter":None}
+        with self.assertRaisesRegex(ValueError,"unreachable"):
+            self.review(report)
+
+    def test_saved_changed_root(self):
+        report=self.saved()
+        report["objects"][TOOL]["sha256"]="c"*64
+        with self.assertRaisesRegex(ValueError,"root differs"):
+            self.review(report)
+
+    def test_saved_wrong_lock(self):
+        report=self.saved()
+        report["environment_lock_sha256"]="0"*64
+        with self.assertRaisesRegex(ValueError,"scope or lock binding"):
+            self.review(report)
+
+    def test_saved_claimed_runtime(self):
+        report=self.saved()
+        report["runtime_verified"]=True
+        with self.assertRaisesRegex(ValueError,"scope or lock binding"):
+            self.review(report)
+
+
 if __name__=="__main__":
     unittest.main()
