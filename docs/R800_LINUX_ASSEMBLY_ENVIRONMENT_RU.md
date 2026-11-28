@@ -127,3 +127,34 @@ Python extension imports и фактическую загрузку библио
 Отдельный NDK lock сохраняется. Этот ELF lock обязателен для managed build; диагностический режим
 может работать без него. Readiness проверяет сохранённый статический граф,
 но это не доказывает воспроизводимость. Проверка на реальной Ubuntu VM ещё не выполнена.
+
+
+## Наблюдение разрешения библиотек glibc
+
+Только в доверенной отдельной VM, от непривилегированного пользователя.
+Сначала получить Linux lock и статический ELF lock для того же exact HEAD.
+Не передавать донорские или гостевые бинарники; загрузчик может отображать
+системные библиотеки в память, поэтому этот режим не является sandbox.
+
+```sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+/usr/bin/python3 build/r800_linux_loader_observation.py \
+  --lock /local/galwear-inputs/linux-assembly-lock.json \
+  --lock-sha256 "$LOCK_SHA256" \
+  --elf /local/galwear-inputs/linux-host-elf-lock.json \
+  --elf-sha256 "$ELF_REPORT_SHA256" --source-sha "$HEAD_SHA" \
+  --confirm-trusted-vm \
+  > /local/galwear-inputs/linux-loader-observation.json
+```
+
+Проверяются хеши выбранных ELF-объектов и загрузчика, состояние
+ld.so.cache и отсутствие непустого ld.so.preload. В очищенном окружении
+glibc --list сопоставляет наблюдаемые пути с закреплёнными статическими
+кандидатами каждого инструмента. Адреса ASLR не входят в идентичность.
+Непривязанные, отсутствующие или неоднозначные объекты отклоняются.
+Статические ELF без PT_INTERP и DT_NEEDED отмечаются отдельно.
+
+GLIBC_LIST_SELECTED_PROVIDERS_MATCH_ONLY не означает проверку нормального
+запуска, secure-execution, dlopen, Python extensions или воспроизводимости.
+Этот отчёт пока диагностический, не является обязательным gate.
+Реальная VM и её glibc не проверены в рамках текущей разработки.
