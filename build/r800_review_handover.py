@@ -22,6 +22,7 @@ from r800_stage_development_tree import ANDROID, inspect_pair, verify_overlay
 from r800_tizen_config_layout import layout, verify_dir, MOUNTPOINTS
 from r800_payload_candidate import ASSET_SIZES
 from r800_display_asset_layer import asset_modes
+from r800_storage_estimate import estimate
 from r800_runtime_loader_qemu import LOCAL
 from r800_runtime_entry_qemu import LOCAL_COMMANDS
 from r800_verify_tizen_stage import unique_keys
@@ -108,7 +109,7 @@ def runtime_observations(loader,entry,runtime_pin,source_sha):
 
 
 def review(root,pin,source_sha,*,runtime_path=None,runtime_pin=None,loader_path=None,loader_pin=None,
-           entry_path=None,entry_pin=None):
+           entry_path=None,entry_pin=None,capacity_path=None,capacity_pin=None):
     checkout_sha(source_sha)
     root=Path(root).absolute()
     require(root.resolve(strict=True)==root and root.is_dir(),"Canonical integrated tree required")
@@ -154,6 +155,15 @@ def review(root,pin,source_sha,*,runtime_path=None,runtime_pin=None,loader_path=
         e=read_report(Path(entry_path),entry_pin,source_sha,"LOCAL_STARTUP_OBSERVATIONS_ONLY")
         require(e.get("loader_evidence_sha256")==loader_pin,"Entry/loader binding mismatch")
         observations=runtime_observations(l,e,runtime_pin,source_sha)
+    require((capacity_path is None)==(capacity_pin is None),"Capacity observation and pin must be supplied together")
+    capacity=None
+    if capacity_path is not None:
+        raw=read_regular(Path(capacity_path),1024*1024)
+        require(valid_pin(capacity_pin) and sha(raw)==capacity_pin,"Capacity observation pin mismatch")
+        capacity=json.loads(raw,object_pairs_hook=unique_keys)
+    storage=estimate(files,dirs,k,capacity)
+    if capacity_path is not None:
+        require(sha(read_regular(Path(capacity_path),1024*1024))==capacity_pin,"Capacity observation changed")
     missing_assets=[name for name in sorted(ASSET_SIZES)
                     if "r800dev/"+name not in files]
     # The current development assembler does not include installation state.
@@ -170,6 +180,7 @@ def review(root,pin,source_sha,*,runtime_path=None,runtime_pin=None,loader_path=
                       "android_framework_boot":"NOT_TESTED","gnss":"NOT_TESTED"},
             "missing_display_assets":missing_assets,
             "display_rendering_verified":False,
+            "storage_estimate":storage,"capacity_observation_sha256":capacity_pin,
             "blockers":["Original donor provenance and complete Tizen plugin/configuration review",
                         "Partition capacity, installation/recovery contract and persistent-state policy",
                         "Actual kernel boot, switch_root and Android framework startup",
@@ -185,13 +196,14 @@ def main():
     p.add_argument("--tree-sha256",required=True)
     p.add_argument("--source-sha",required=True)
     p.add_argument("--output",type=Path,required=True)
-    for name in ("runtime","loader","entry"):
+    for name in ("runtime","loader","entry","capacity"):
         p.add_argument("--"+name,type=Path)
         p.add_argument("--"+name+"-sha256")
     a=p.parse_args()
     require(not a.output.resolve().is_relative_to(a.tree.resolve()),"Report must be outside tree")
     report=review(a.tree,a.tree_sha256,a.source_sha,runtime_path=a.runtime,runtime_pin=a.runtime_sha256,
-                  loader_path=a.loader,loader_pin=a.loader_sha256,entry_path=a.entry,entry_pin=a.entry_sha256)
+                  loader_path=a.loader,loader_pin=a.loader_sha256,entry_path=a.entry,entry_pin=a.entry_sha256,
+                  capacity_path=a.capacity,capacity_pin=a.capacity_sha256)
     with a.output.open("x",encoding="utf-8") as stream:
         json.dump(report,stream,indent=2,sort_keys=True)
         stream.write("\n")
