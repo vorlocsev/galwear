@@ -65,6 +65,27 @@ class ArtProbeTests(unittest.TestCase):
         status,_,_=probe.evaluate_case("linker-list",0,out,"",[],False,False,staged)
         self.assertEqual(status,"REVIEW_REQUIRED")
 
+    def test_proc_tmpfs_stays_private(self):
+        cmd=probe.sandbox_command("/host/qemu","bwrap",Path("/private/guest"),
+                                  "/private/log",["/apex/com.android.art/bin/dex2oat32"])
+        self.assertIn("--unshare-all",cmd)
+        self.assertIn("--clearenv",cmd)
+        self.assertEqual(cmd[cmd.index("--proc")+1],"/proc")
+        self.assertEqual(cmd[cmd.index("--tmpfs")+1],"/tmp")
+        self.assertEqual(cmd[cmd.index("--setenv")+1:cmd.index("--setenv")+3],["TMPDIR","/tmp"])
+        self.assertNotIn("--bind",cmd)
+        self.assertNotIn("--share-net",cmd)
+        self.assertEqual(cmd.count("--ro-bind"),3)
+
+    def test_boot_output_only_writable_host_bind(self):
+        cmd=probe.sandbox_command("/host/qemu","bwrap",Path("/private/guest"),
+                                  "/private/log",["/apex/com.android.art/bin/dex2oat32"],
+                                  Path("/private/output"))
+        self.assertEqual(cmd.count("--bind"),1)
+        i=cmd.index("--bind")
+        self.assertEqual(cmd[i+1:i+3],["/private/output","/data"])
+        self.assertEqual(cmd[cmd.index("--tmpfs")+1],"/tmp")
+
     def test_missing_statsd(self):
         data=objects()
         del data["statsd:/lib/libstatspull.so"]
