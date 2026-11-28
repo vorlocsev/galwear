@@ -89,7 +89,8 @@ Loader Observation, Python Runtime Lock, Python Import Observation,
 Host Runtime Diagnostic Chain. Отдельно выполнить регрессионные тесты:
 
 ```sh
-/usr/bin/python3 -B build/r800_integrated_regression.py
+/usr/bin/python3 -B build/r800_integrated_regression.py \
+  --repo "$PWD" --output /local/galwear-evidence/integrated-regression.json
 ```
 
 Сохранить stdout, exit codes, exact HEAD и pins отчётов. После завершения
