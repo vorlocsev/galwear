@@ -24,6 +24,7 @@ from r800_stage_adaptation_layer import DEVICE, RUNTIME_REQUIRED, MAX_ENTRIES, M
 from r800_stage_android_layer import inspect_pair, metadata
 from r800_verify_tizen_stage import unique_keys, guest_name
 from r800_tizen_config_layout import layout, check_guest, materialize, verify_dir
+from r800_display_asset_layer import asset_modes
 
 ANDROID = {"r800dev/android/system.img", "r800-android/vendor.img"}
 MANIFEST_LIMIT = 4*1024**2
@@ -51,7 +52,9 @@ def load(root, name, pin, source_sha, android):
             "Layer scope or source SHA mismatch")
     files = report["files"]
     require(isinstance(files, dict) and 0 < len(files) <= 2*MAX_ENTRIES, "Invalid layer inventory")
+    device_modes={} if android else {**DEVICE,**asset_modes(report,files)}
     if android:
+        require(not report.get("assets_manifest_sha256"),"Android layer cannot declare display assets")
         require(set(files) == ANDROID, "Unexpected Android image inventory")
     else:
         require(set(DEVICE)|RUNTIME_REQUIRED <= set(files), "Missing adaptation files")
@@ -69,8 +72,8 @@ def load(root, name, pin, source_sha, android):
                 valid_pin(row.get("sha256")), "Invalid layer member metadata")
         if android:
             require(row.get("mode")=="0o400", "Unexpected Android image mode")
-        elif path in DEVICE:
-            require(row.get("layer")=="device" and row.get("mode")==DEVICE[path], "Unexpected device metadata")
+        elif path in device_modes:
+            require(row.get("layer")=="device" and row.get("mode")==device_modes[path], "Unexpected device metadata")
         else:
             require(row.get("layer")=="tizen-runtime" and row.get("mode") in ("0o644","0o755"),
                     "Unexpected runtime metadata")
@@ -189,10 +192,12 @@ def assemble(adaptation, adaptation_sha, android, android_sha, output, source_sh
                 "android_manifest_sha256":android_sha,"files":rows,
                 "total_bytes":sum(r["bytes"] for r in rows.values()),
                 "chroot_mountpoints":mountpoints,
+                "assets_manifest_sha256":a.get("assets_manifest_sha256"),
                 "android_inspection":inspection,"vendor_overlay_matches":overlay,
                 "vendor_tree_role":"BUILD_PROVENANCE_ONLY",
                 "missing_inputs_and_gates":["Additional Tizen configuration/plugins and ownership",
-                    "Display assets, kernel/DTB handover and partition capacity",
+                    "Kernel/DTB handover and partition capacity",
+                    *([] if a.get("assets_manifest_sha256") else ["Display assets"]),
                     "Wear OS provenance, VINTF/SELinux/APEX/ART compatibility",
                     "Hardware boot, recovery and installation acceptance"],
                 "wear_os_verified":False,"donor_authenticity_verified":False,
