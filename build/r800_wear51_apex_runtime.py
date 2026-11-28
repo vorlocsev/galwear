@@ -26,6 +26,8 @@ MODULES={
     "com.android.runtime":("/system/apex/com.android.runtime.apex",
         ("/bin/linker","/bin/linker64","/lib/bionic/libc.so","/lib/bionic/libm.so",
          "/lib/bionic/libdl.so","/lib/bionic/libdl_android.so","/lib/bionic/ld-android.so")),
+    "com.android.os.statsd":("/system/apex/com.google.android.os.statsd.apex",
+        ("/lib/libstatspull.so","/lib/libstatssocket.so")),
     "com.android.art":("/system/apex/com.google.android.art.apex",
         ("/bin/dex2oat32","/bin/dex2oat64","/bin/dex2oat","/lib/libart.so",
          "/lib/libartbase.so","/javalib/core-oj.jar","/javalib/core-libart.jar")),
@@ -65,8 +67,8 @@ def audit(image,pin,source,output):
                 del raw
                 directory=scratch/module
                 directory.mkdir()
-                if nested is not None and module!="com.android.art":
-                    raise ValueError("Nested wrapper only supported for selected ART")
+                if nested is not None and module not in ("com.android.art","com.android.os.statsd"):
+                    raise ValueError("Nested wrapper only supported for selected ART and StatsD")
                 actual_pin=row["container"].get("nested_sha256",row["package_sha256"])
                 def read_partition(requested,limit):
                     if requested!=path:
@@ -98,12 +100,12 @@ def audit(image,pin,source,output):
                 readers.append(reader)
             except ERRORS as exc:
                 row["reason"]=str(exc)
-        if set(sources)=={"system","runtime","art"}:
+        if {"system","runtime","art"} <= set(sources):
             try:
                 art_dependencies=art_dependency_audit(sources)
                 for reader in readers:
                     reader.verify_unchanged()
-            except (OverflowError, *ERRORS) as exc:
+            except (OverflowError,) + ERRORS as exc:
                 art_dependencies={"status":"REVIEW_REQUIRED","reason":str(exc)}
         if digest(private,4*1024**3)["sha256"]!=pin or digest(image,4*1024**3)["sha256"]!=pin:
             raise ValueError("System changed")
