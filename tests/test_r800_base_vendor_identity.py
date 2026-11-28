@@ -83,5 +83,35 @@ class BaseVendorIdentityTests(unittest.TestCase):
             base.describe(self.report,PIN)
 
 
+    def saved_fixture(self):
+        evidence=base.compact_evidence(self.report)
+        return {**base.describe(evidence,PIN,EFFECTS),"source_sha":"a"*40,
+                "extraction_evidence":evidence}
+
+    def test_saved_identity_exact(self):
+        self.assertEqual(base.review_saved(self.saved_fixture(),PIN,EFFECTS,"a"*40),
+                         "BASE_VENDOR_IDENTITY_FIELDS_OBSERVED_ONLY")
+
+    def test_saved_identity_changed_model(self):
+        row=self.saved_fixture()
+        row["observed_identity"]["model"]="other"
+        with self.assertRaisesRegex(ValueError,"Saved base vendor identity differs"):
+            base.review_saved(row,PIN,EFFECTS,"a"*40)
+
+    def test_saved_identity_wrong_effects_pin(self):
+        with self.assertRaisesRegex(ValueError,"Saved base vendor identity differs"):
+            base.review_saved(self.saved_fixture(),PIN,"f"*64,"a"*40)
+
+    def test_saved_identity_wrong_source(self):
+        with self.assertRaisesRegex(ValueError,"Base vendor source SHA mismatch"):
+            base.review_saved(self.saved_fixture(),PIN,EFFECTS,"b"*40)
+
+    def test_saved_identity_claimed_authenticity(self):
+        row=self.saved_fixture()
+        row["historical_donor_match_verified"]=True
+        with self.assertRaisesRegex(ValueError,"Saved base vendor identity differs"):
+            base.review_saved(row,PIN,EFFECTS,"a"*40)
+
+
 if __name__=="__main__":
     unittest.main()
