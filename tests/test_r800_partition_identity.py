@@ -112,6 +112,27 @@ class PartitionIdentityTests(unittest.TestCase):
                                            b"ro.product.cpu.abi=arm64-v8a\n", "/build.prop")
         self.assertFalse(identity.property_inventory(rows)["literal_arm32_hint"])
 
+    def test_empty_abi64_in_real_ext4(self):
+        self.ext4("ro.product.cpu.abilist=armeabi-v7a,armeabi\n"
+                  "ro.product.cpu.abilist32=armeabi-v7a,armeabi\n"
+                  "ro.product.cpu.abilist64=\n")
+        report = self.inspect()
+        self.assertEqual(report["status"], "EXT4_LITERAL_PROPERTIES_ONLY")
+        props = report["properties"]
+        self.assertEqual(props["unique_values"]["ro.product.cpu.abilist64"], "")
+        self.assertTrue(props["literal_arm32_hint"])
+
+    def test_empty_abi_conflict_preserved(self):
+        rows = identity.literal_properties(
+            b"ro.product.cpu.abilist64=\nro.product.cpu.abilist64=arm64-v8a\n", "/build.prop")
+        self.assertIn("ro.product.cpu.abilist64", identity.property_inventory(rows)["conflicts"])
+
+    def test_other_empty_properties_rejected(self):
+        for key in ("ro.build.id", "ro.build.version.sdk", "ro.product.cpu.abilist"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ValueError, "Invalid literal property"):
+                    identity.literal_properties((key+"=\n").encode(), "/build.prop")
+
     def test_invalid_property_rejected(self):
         with self.assertRaisesRegex(ValueError, "Invalid literal property"):
             identity.literal_properties(b"ro.build.id=bad\x00value\n", "/build.prop")
