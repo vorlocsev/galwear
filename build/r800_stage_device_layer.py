@@ -21,6 +21,7 @@ from r800_payload_candidate import SCRIPTS, CHARGER_TOOLS
 from r800_vendor_inputs import OVERLAY
 from r800_compiled_overlay_ext4 import destination
 from r800_extract_super import require
+from r800_display_asset_layer import load_assets
 
 MAX_FILE = 64*1024**2
 MAX_TOTAL = 512*1024**2
@@ -44,7 +45,7 @@ def unique(pairs):
     return out
 
 
-def assemble(components, output, source_sha):
+def assemble(components, output, source_sha, *, assets=None, assets_sha=None):
     checkout_sha(source_sha)
     repo = Path(__file__).resolve().parents[1]
     components = Path(components).resolve(strict=True)
@@ -52,6 +53,11 @@ def assemble(components, output, source_sha):
     require(not output.exists() and not output.is_symlink() and
             not output.resolve().is_relative_to(components) and
             not output.resolve().is_relative_to(repo), "Fresh output outside input trees required")
+    require((assets is None)==(assets_sha is None), "Asset directory and manifest pin must be supplied together")
+    if assets is not None:
+        assets=Path(assets).absolute()
+        require(not output.resolve().is_relative_to(assets), "Output inside asset input")
+    display=load_assets(assets,assets_sha) if assets is not None else {}
     verify_components(components, source_sha)
     manifest_raw = read_regular(checked(components, "component-evidence.json"), 1024*1024)
     manifest = json.loads(manifest_raw, object_pairs_hook=unique)["files"]
@@ -87,6 +93,19 @@ def assemble(components, output, source_sha):
             path.chmod(mode)
             rows[name] = {"origin": origin, "source": source, "sha256": digest,
                           "bytes": len(raw), "mode": oct(mode)}
+        for name, raw in sorted(display.items()):
+            require(name not in rows,"Display asset collides with compiled device member")
+            total += len(raw)
+            require(total <= MAX_TOTAL,"Device layer aggregate budget exceeded")
+            path=stage/name
+            path.parent.mkdir(parents=True,exist_ok=True)
+            with path.open("xb") as stream:
+                stream.write(raw)
+            path.chmod(0o644)
+            rows[name]={"origin":"local_asset_conversion","source":name.removeprefix("r800dev/"),
+                        "sha256":hashlib.sha256(raw).hexdigest(),"bytes":len(raw),"mode":"0o644"}
+        if assets is not None:
+            require(load_assets(assets,assets_sha)==display,"Asset input changed")
         # The same HAL bytes must be installed in both legacy and vendor paths.
         for name in ("audio.primary.r800.so", "gps.r800.so", "hwcomposer.r800.so", "sensors.r800.so"):
             require(rows["vendor/lib/hw/"+name]["sha256"] == rows["r800dev/hwc/"+name]["sha256"],
@@ -105,7 +124,8 @@ def assemble(components, output, source_sha):
         report = {"schema": "galwear-r800-device-layer-v1",
                   "status": "COMPILED_DEVICE_LAYER_STAGED_ONLY", "source_sha": source_sha,
                   "component_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
-                  "files": rows, "total_bytes": total, "missing_inputs_and_gates": list(MISSING),
+                  "files": rows, "total_bytes": total, "assets_manifest_sha256":assets_sha,
+                  "missing_inputs_and_gates": [n for n in MISSING if not display or n!="r800dev/charger and splash: display assets"],
                   "donor_images_used": False, "complete_vendor_built": False,
                   "android_handover_tested": False, "payload_complete": False,
                   "hardware_tested": False, "safe_to_flash": False}
@@ -120,8 +140,10 @@ def main():
     p.add_argument("--components", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--source-sha", required=True)
+    p.add_argument("--assets",type=Path)
+    p.add_argument("--assets-sha256")
     a = p.parse_args()
-    report = assemble(a.components, a.output, a.source_sha)
+    report = assemble(a.components, a.output, a.source_sha, assets=a.assets,assets_sha=a.assets_sha256)
     print(report["status"], len(report["files"]), "files; safe_to_flash=false")
 
 
