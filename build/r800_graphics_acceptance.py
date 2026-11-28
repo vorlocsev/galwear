@@ -18,6 +18,72 @@ ABI_HOLDS = ("donor_layer_stride_100_verified", "mapper_2_1_verified",
              "donor_runtime_verified") + HOLDS
 
 
+DONOR_CHECKS = (
+    "graphics_dependency_candidates", "surfaceflinger_abi_known",
+    "surfaceflinger_graph_root", "egl_candidates", "graphics_exports",
+    "mapper_2_1_candidates", "mapper_factory_export", "mali_recipe_candidates",
+    "hwc_explicit_stride_hint", "vintf_literal_inventory",
+)
+BINDING_HOLDS = ("original_image_authenticity_verified",
+                 "extraction_provenance_verified", "runtime_verified", "safe_to_flash")
+
+
+def valid_digest(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def valid_tree(value):
+    return (isinstance(value, dict) and set(value) == {
+        "algorithm", "sha256", "entries", "regular_bytes"} and
+        value["algorithm"] == "sha256-ordered-tree-records-v1" and
+        valid_digest(value["sha256"]) and
+        type(value["entries"]) is int and 0 < value["entries"] <= 250000 and
+        type(value["regular_bytes"]) is int and 0 < value["regular_bytes"] <= 32*1024**3)
+
+
+def check_donor_binding(donor, source_sha, preflight):
+    """Check reported reproducibility fields, not independent authenticity."""
+    binding = donor.get("donor_binding")
+    errors = []
+    if not isinstance(binding, dict):
+        return ["Missing or malformed donor binding"]
+    if (binding.get("schema") != "galwear-r800-extracted-donor-binding-v1" or
+            binding.get("source_sha") != source_sha or donor.get("source_sha") != source_sha):
+        errors.append("Donor binding schema or source SHA mismatch")
+    before, after = binding.get("tree_before"), binding.get("tree_after")
+    if not valid_tree(before) or not valid_tree(after) or before != after:
+        errors.append("Donor tree fingerprint invalid or changed")
+    for key in ("tracked_checkout_clean", "tree_unchanged_observed"):
+        if binding.get(key) is not True:
+            errors.append("Missing donor binding flag: " + key)
+    for key in BINDING_HOLDS:
+        if binding.get(key) is not False:
+            errors.append("Invalid donor binding hold: " + key)
+    for key in ("config_sha256", "dtb_sha256"):
+        if key not in binding or (binding[key] is not None and not valid_digest(binding[key])):
+            errors.append("Invalid kernel input digest: " + key)
+    checks = preflight.get("checks")
+    if not isinstance(checks, dict) or set(checks) != set(DONOR_CHECKS) or any(
+            type(value) is not bool for value in checks.values()):
+        errors.append("Incomplete donor prerequisite check set")
+    else:
+        missing = [key for key in DONOR_CHECKS if not checks[key]]
+        if preflight.get("missing_static_prerequisites") != missing:
+            errors.append("Inconsistent donor prerequisite failures")
+        expected = "REVIEW_REQUIRED" if missing else "STATIC_DONOR_PREREQUISITES_ONLY"
+        if preflight.get("status") != expected:
+            errors.append("Inconsistent donor prerequisite status")
+        if not missing and (not valid_digest(binding.get("config_sha256")) or
+                            not valid_digest(binding.get("dtb_sha256"))):
+            errors.append("Complete donor prerequisites require config and DTB digests")
+        if checks["graphics_dependency_candidates"] != (
+                donor.get("status") == "STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY"):
+            errors.append("Inconsistent donor ELF graph status")
+    if preflight.get("release_status") != "HOLD_HARDWARE_UNVERIFIED":
+        errors.append("Invalid donor preflight release hold")
+    return errors
+
+
 def combine(abi, fixture, source_sha, donor=None):
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ValueError("Expected full source SHA")
@@ -64,8 +130,7 @@ def combine(abi, fixture, source_sha, donor=None):
                      "static_prerequisites_complete": False}
     if donor is not None:
         preflight = donor.get("donor_preflight", {})
-        # The legacy donor ELF report is not source-SHA bound. Preserve its
-        # observations but never merge them as exact-head acceptance evidence.
+        # Legacy reports remain unbound; bound reports are checked below.
         donor_summary.update(
             status="UNBOUND_STATIC_REPORT_REVIEW_REQUIRED",
             reported_status=preflight.get("status"),
@@ -78,6 +143,20 @@ def combine(abi, fixture, source_sha, donor=None):
                     "donor_surfaceflinger_verified", "donor_mapper_verified",
                     "donor_mali_verified", "hardware_tested", "safe_to_flash")):
             errors.append("Invalid donor report holds")
+        if "donor_binding" in donor:
+            binding_errors = check_donor_binding(donor, source_sha, preflight)
+            if binding_errors:
+                errors.extend(binding_errors)
+                donor_summary["status"] = "INVALID_BOUND_REPORT_REVIEW_REQUIRED"
+            else:
+                complete = preflight["status"] == "STATIC_DONOR_PREREQUISITES_ONLY"
+                donor_summary.update(
+                    status="BOUND_STATIC_PREREQUISITES_ONLY" if complete else "BOUND_STATIC_REPORT_REVIEW_REQUIRED",
+                    source_sha_bound=True,
+                    reported_tree_fingerprint=donor["donor_binding"]["tree_before"]["sha256"],
+                    reported_tree_unchanged=True,
+                    static_prerequisites_complete=complete,
+                )
     return {
         "schema": "galwear-r800-graphics-acceptance-v1",
         "source_sha": source_sha,
