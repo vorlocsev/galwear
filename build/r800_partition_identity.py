@@ -75,7 +75,12 @@ def literal_properties(raw, path):
         key, value = key.strip(), value.strip()
         if not sep or key not in KEYS:
             continue
-        require(0 < len(value) <= 512 and value.isprintable(),
+        # A platform without one bitness can advertise an empty ABI sub-list.
+        # Preserve the literal empty value (not a missing property); all
+        # other selected properties still require printable nonempty values.
+        empty_abi = value == "" and key in (
+            "ro.product.cpu.abilist32", "ro.product.cpu.abilist64")
+        require(empty_abi or (0 < len(value) <= 512 and value.isprintable()),
                 "Invalid literal property: " + key)
         records.append({"key": key, "value": value, "path": path, "line": number})
     return records
