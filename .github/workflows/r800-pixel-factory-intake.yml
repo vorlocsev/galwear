@@ -147,6 +147,50 @@ jobs:
               print("PIXEL_FRAMEWORK_MEMBERS",json.dumps(summary,sort_keys=True))
               print("PIXEL_DEX_REVIEW",json.dumps({p:{k:v for k,v in item.items()
                     if k in ("status","kind","reason","dex_entries")} for p,item in strict["members"].items()},sort_keys=True))
+          # Diagnose each DEX independently without relaxing strict validation
+          # or modifying original bytes, including ZIP CRC verified by read().
+          import io, struct, tempfile, shutil, zipfile, zlib
+          from r800_extract_ext4 import snapshot_image
+          from r800_framework_inventory import ext4_member
+          from r800_art_inventory import DEX_NAME, MAX_JAR, MAX_DEX, MAX_TOTAL, dex_inventory
+          diagnostics={}
+          with tempfile.TemporaryDirectory(dir=root) as tmp:
+              scratch=Path(tmp)
+              private=scratch/"system.img"
+              snapshot_image(image,private,row["sha256"])
+              tool=shutil.which("debugfs")
+              assert tool
+              for prefix in prefixes:
+                  for filename in ("framework.jar","services.jar"):
+                      path=prefix+"/framework/"+filename
+                      jar=ext4_member(tool,private,path,MAX_JAR,scratch)
+                      if jar is None:
+                          continue
+                      with zipfile.ZipFile(io.BytesIO(jar)) as z:
+                          entries=[e for e in z.infolist() if DEX_NAME.fullmatch(e.filename)]
+                          assert len(entries)<=64 and sum(e.file_size for e in entries)<=MAX_TOTAL
+                          assert len({e.filename for e in entries})==len(entries)
+                          rows={}
+                          for e in entries:
+                              assert 112<=e.file_size<=MAX_DEX
+                              data=z.read(e)
+                              item={"bytes":len(data),"sha256":hashlib.sha256(data).hexdigest(),
+                                    "header_magic_hex":data[:8].hex(),
+                                    "zip_crc32_matches":zlib.crc32(data)&0xffffffff==e.CRC,
+                                    "header_sha1_matches":hashlib.sha1(data[32:]).digest()==data[12:32],
+                                    "header_adler32_matches":zlib.adler32(data[12:])&0xffffffff==struct.unpack_from("<I",data,8)[0]}
+                              try:
+                                  dex_inventory(data)
+                                  item["status"]="STRICT_HEADER_PASS"
+                              except ValueError as exc:
+                                  item.update(status="REVIEW_REQUIRED",reason=str(exc))
+                              rows[e.filename]=item
+                          diagnostics[path]=rows
+          (evidence/"pixel-dex-diagnostics.json").write_text(json.dumps({
+              "source_sha":source,"image_sha256":row["sha256"],
+              "members":diagnostics,"bytecode_verified":False,
+              "safe_to_flash":False},indent=2,sort_keys=True)+"\n")
+          print("PIXEL_DEX_MEMBER_DIAGNOSTICS",json.dumps(diagnostics,sort_keys=True))
           (evidence/"pixel-framework-inventory.json").write_text(json.dumps({
               "schema":"galwear-r800-pixel-framework-observation-v1",
               "source_sha":source,"image_sha256":row["sha256"],
@@ -169,5 +213,6 @@ jobs:
             ${{ runner.temp }}/pixel-evidence/pixel-raw-donor.json
             ${{ runner.temp }}/pixel-evidence/pixel-binding.json
             ${{ runner.temp }}/pixel-evidence/pixel-framework-inventory.json
+            ${{ runner.temp }}/pixel-evidence/pixel-dex-diagnostics.json
           if-no-files-found: warn
           retention-days: 7
