@@ -26,6 +26,7 @@ from r800_verify_tizen_stage import MANIFEST, unique_keys
 from r800_display_asset_layer import load_assets
 from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, verify as verify_stock
 from r800_bind_pixel_system import verify as verify_pixel
+from r800_ndk_pins import verify as verify_ndk
 
 MAX_REPORT=16*1024**2
 MAX_FILE=64*1024**2
@@ -83,9 +84,10 @@ def stock_bindings(paths,pins,stock_evidence,source_sha):
     return results
 
 
-def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None,pixel_evidence=None):
+def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None,pixel_evidence=None,ndk_pins=None):
     require(type(xtra_abi) is int and xtra_abi in (0,1,2),"Explicit supported XTRA ABI required")
     p,output=preflight(paths,pins,output,source_sha)
+    ndk_evidence=None if ndk_pins is None else verify_ndk(p["ndk"],ndk_pins)
     stock=stock_bindings(p,pins,stock_evidence,source_sha)
     pixel=None if pixel_evidence is None else verify_pixel(p["system"],pins["system"],*pixel_evidence,source_sha)
     require((assets is None)==(assets_sha is None),"Asset directory and manifest pin must be supplied together")
@@ -134,6 +136,8 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
         require(i["kernel_evidence_sha256"]==pins["kernel"],"Integrated kernel pin mismatch")
         # No stage may silently change any of the original donor pins.
         preflight(p,pins,output,source_sha)
+        if ndk_evidence is not None:
+            require(verify_ndk(p["ndk"],ndk_pins)==ndk_evidence,"NDK selected tools changed during assembly")
         evidence=work/"evidence"
         evidence.mkdir()
         reports=[(p["kernel"],"development-kernel-evidence.json",pins["kernel"]),
@@ -192,6 +196,7 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  "assets_manifest_sha256":assets_sha,
                  "stock_donor_bindings":stock,
                  "pixel_system_binding":pixel,
+                 "ndk_selected_tool_evidence":ndk_evidence,
                  "stage_evidence_sha256":copied,"integrated_evidence_sha256":ip,
                  "missing_inputs_and_gates":i["missing_inputs_and_gates"],
                  "kernel_and_components_compiled_by_this_command":False,
