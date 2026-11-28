@@ -15,6 +15,8 @@ on:
       - build/r800_wear51_apex_runtime.py
       - build/r800_wear51_apex_container.py
       - build/r800_wear51_art_dependencies.py
+      - build/r800_wear51_art_probe.py
+      - tests/test_r800_wear51_art_probe.py
       - tests/test_r800_wear51_art_dependencies.py
       - tests/test_r800_wear51_apex_container.py
       - build/r800_wear51_startup_diagnostics.py
@@ -63,6 +65,8 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_r800_wear51_apex_container.py' -v
       - name: Test ART dependency candidate graph
         run: python3 -m unittest discover -s tests -p 'test_r800_wear51_art_dependencies.py' -v
+      - name: Test ART startup probe namespace and path validation
+        run: python3 -m unittest discover -s tests -p 'test_r800_wear51_art_probe.py' -v
       - name: Obtain exact October 2025 factory image
         shell: bash
         run: |
@@ -162,10 +166,15 @@ jobs:
                              for member,row in diagnostics.items()), "Original Android 15 ELF TLS revalidation failed"
                   print("WEAR51_ORIGINAL_TLS_STATIC_PASS")
                   from r800_wear51_apex_runtime import audit as apex_audit
-                  result=apex_audit(path,pin,source,root/"wear51-bionic")
+                  result=apex_audit(path,pin,source,root/"wear51-bionic",probe_art=True)
                   (evidence/"apex-runtime.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
                   graph=result["art_dependencies"]
-                  print("WEAR51_APEX_RUNTIME",json.dumps({k:v for k,v in result.items() if k!="art_dependencies"},sort_keys=True))
+                  startup=result["art_startup"]
+                  (evidence/"art-startup.json").write_text(json.dumps(startup,indent=2,sort_keys=True)+"\n")
+                  print("WEAR51_ART_STARTUP",json.dumps({k:v for k,v in startup.items() if k not in ("staged_sha256","results","synthetic_config")},sort_keys=True))
+                  for name,case in startup.get("results",{}).items():
+                      print("WEAR51_ART_STARTUP_CASE",json.dumps({"case":name,**case},sort_keys=True))
+                  print("WEAR51_APEX_RUNTIME",json.dumps({k:v for k,v in result.items() if k not in ("art_dependencies","art_startup")},sort_keys=True))
                   print("WEAR51_ART_DEPENDENCIES",json.dumps({k:v for k,v in graph.items() if k not in ("objects","edges")},sort_keys=True))
                   if graph["status"]=="SELECTED_ART_DEPENDENCY_CANDIDATES_ONLY":
                       for edge in graph["edges"]:
@@ -330,6 +339,19 @@ jobs:
           evidence="$RUNNER_TEMP/wear51-evidence"
           python3 build/r800_wear51_startup_diagnostics.py --root "$root" --evidence "$evidence" \
             --source-sha "$GITHUB_SHA" --output "$evidence/startup-diagnostics.json"
+      - name: Check experimental ART startup result separately from HAL gates
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path(os.environ["RUNNER_TEMP"])/"wear51-evidence/art-startup.json"
+          assert p.is_file(), "ART startup not tested"
+          r=json.loads(p.read_text())
+          assert r["status"]=="DEX2OAT_STARTUP_PROBE_ONLY", r.get("reason","ART startup requires review")
+          assert r["source_sha"]==os.environ["GITHUB_SHA"] and r["qemu_cpu"]=="max"
+          assert r["art_initialized"] is False and r["safe_to_flash"] is False
+          PY
       - name: Remove original and extracted binary images
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/wear51-intake"
@@ -345,6 +367,7 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/runtime-layout.json
             ${{ runner.temp }}/wear51-evidence/elf-tls-diagnostics.json
             ${{ runner.temp }}/wear51-evidence/apex-runtime.json
+            ${{ runner.temp }}/wear51-evidence/art-startup.json
             ${{ runner.temp }}/wear51-evidence/hal-compile.json
             ${{ runner.temp }}/wear51-evidence/hal-runtime.json
             ${{ runner.temp }}/wear51-evidence/hal-lifecycle.json
