@@ -48,7 +48,7 @@ def guest_path(key):
     return PREFIX[label]+path
 
 
-def config(objects):
+def config(objects, *, vm_oat=False):
     names={label:set() for label in PREFIX}
     for key,row in objects.items():
         guest_path(key)
@@ -78,6 +78,11 @@ def config(objects):
     for ns,path in paths.items():
         p="namespace."+ns
         lines.extend([p+".isolated = true",p+".search.paths = "+path])
+        if ns=="system" and vm_oat:
+            # Original ART uses android_get_exported_namespace("system")
+            # for boot OAT outside ART APEX (observed in run 46177117834).
+            # Only the sandbox private verified boot artifact directory is permitted.
+            lines.extend([p+".visible = true",p+".permitted.paths = /data/arm"])
         if links[ns]:
             lines.append(p+".links = "+",".join(links[ns]))
             for dst in links[ns]:

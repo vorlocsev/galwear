@@ -43,6 +43,16 @@ class ArtProbeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             probe.guest_path("i18n:/lib/../libicu.so")
 
+    def test_vm_oat_export_is_scoped_to_private_boot_directory(self):
+        baseline=probe.config(objects())
+        self.assertNotIn("namespace.system.visible",baseline)
+        self.assertNotIn("permitted.paths",baseline)
+        cfg=probe.config(objects(),vm_oat=True)
+        self.assertIn("namespace.system.visible = true\n",cfg)
+        self.assertIn("namespace.system.permitted.paths = /data/arm\n",cfg)
+        self.assertEqual(cfg.replace("namespace.system.visible = true\n","").replace("namespace.system.permitted.paths = /data/arm\n",""),baseline)
+        self.assertNotIn("allow_all_shared_libs",cfg)
+
     def test_logdw_record(self):
         packet=b"\0"*11+b"\x06dex2oat\0Usage: dex2oat [options]...\0"
         self.assertEqual(probe.decode_log_record(packet),

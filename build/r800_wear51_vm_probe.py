@@ -85,7 +85,7 @@ def experiment(sources,guest,scratch,boot_dir,boot_result,jars,qemu,bwrap):
                         stream.write(raw)
                     target.chmod(0o555 if key in (VM,LINKER,DEX) else 0o444)
                 staged[rel]=row["sha256"]
-            cfg=config(objects)
+            cfg=config(objects,vm_oat=True)
             (vm_guest/"linkerconfig/ld.config.txt").write_text(cfg)
             data=vm_guest/"data"
             arm=data/"arm"
