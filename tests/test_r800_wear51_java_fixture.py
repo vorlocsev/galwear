@@ -2,6 +2,8 @@
 import struct
 import sys
 import unittest
+from unittest.mock import patch
+import tempfile
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"build"))
 import r800_wear51_java_fixture as fixture
@@ -35,6 +37,27 @@ class JavaFixtureTests(unittest.TestCase):
         ops=struct.unpack_from("<8H",raw,code[3]+16)
         self.assertEqual((ops[0],ops[2],ops[4],ops[6],ops[7]),
                          (0x0062,0x011a,0x206e,0x0010,0x000e))
+
+    def test_original_public_libraries_staging(self):
+        raw=b"# original fixture\nlibc.so\nliblog.so\n"
+        sources={"system":("debugfs","image","scratch")}
+        with tempfile.TemporaryDirectory() as tmp:
+            guest=Path(tmp)
+            with patch.object(vm,"ext4_member",return_value=raw) as read:
+                report=vm.stage_public_libraries(sources,guest)
+                read.assert_called_once_with("debugfs","image",vm.PUBLIC_LIBRARIES,vm.MAX_PUBLIC_LIBRARIES,"scratch")
+            target=guest/vm.PUBLIC_LIBRARIES.lstrip("/")
+            self.assertEqual(target.read_bytes(),raw)
+            self.assertEqual(target.stat().st_mode & 0o777,0o444)
+            self.assertEqual(report["sha256"],vm.sha(raw))
+            self.assertEqual(report["bytes"],len(raw))
+            with patch.object(vm,"ext4_member",return_value=raw),self.assertRaises(FileExistsError):
+                vm.stage_public_libraries(sources,guest)
+            target.unlink()
+            for invalid in (None,b"",b"x\0y",b"x"*(vm.MAX_PUBLIC_LIBRARIES+1)):
+                with patch.object(vm,"ext4_member",return_value=invalid),self.assertRaises(ValueError):
+                    vm.stage_public_libraries(sources,guest)
+                self.assertFalse(target.exists())
 
     def test_vm_arguments_and_controls(self):
         cp=[ART_ROOT+"/javalib/"+n for n in BOOT_JARS]

@@ -18,11 +18,31 @@ from r800_wear51_java_fixture import build, CLASS, MISSING_CLASS
 from r800_android_userspace_preflight import read_regular
 
 VM="art:/bin/dalvikvm32"
+PUBLIC_LIBRARIES="/system/etc/public.libraries.txt"
+MAX_PUBLIC_LIBRARIES=64*1024
 NATIVE_CANDIDATES=("libjavacore.so","libopenjdk.so","libopenjdkjvm.so","libandroidio.so")
 
 
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def stage_public_libraries(sources,guest):
+    """Preserve the exact donor NativeLoader configuration, never synthesize it."""
+    tool,image,workspace=sources["system"]
+    raw=ext4_member(tool,image,PUBLIC_LIBRARIES,MAX_PUBLIC_LIBRARIES,workspace)
+    if not raw or len(raw)>MAX_PUBLIC_LIBRARIES or b"\0" in raw:
+        raise ValueError("Original public.libraries.txt missing or invalid")
+    raw.decode("utf-8")
+    target=guest/PUBLIC_LIBRARIES.lstrip("/")
+    target.parent.mkdir(parents=True,exist_ok=True)
+    with target.open("xb") as stream:
+        stream.write(raw)
+    target.chmod(0o444)
+    if read_regular(target,MAX_PUBLIC_LIBRARIES)!=raw:
+        raise ValueError("Public libraries staging mismatch")
+    return {"path":PUBLIC_LIBRARIES,"source":"system","sha256":sha(raw),"bytes":len(raw),
+            "status":"ORIGINAL_READ_ONLY_CONFIG"}
 
 
 def vm_arguments(classpath,cls):
@@ -85,6 +105,7 @@ def experiment(sources,guest,scratch,boot_dir,boot_result,jars,qemu,bwrap):
                         stream.write(raw)
                     target.chmod(0o555 if key in (VM,LINKER,DEX) else 0o444)
                 staged[rel]=row["sha256"]
+            result["public_libraries"]=stage_public_libraries(sources,vm_guest)
             cfg=config(objects,vm_oat=True)
             (vm_guest/"linkerconfig/ld.config.txt").write_text(cfg)
             data=vm_guest/"data"
