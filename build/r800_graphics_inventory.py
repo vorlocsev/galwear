@@ -116,6 +116,58 @@ def graphics_entrypoints(libraries, groups, abi):
             "egl_initialized": False, "safe_to_flash": False}
 
 
+def mapper_2_1_evidence(declared, libraries, abi):
+    """Literal mapper candidates for the SurfaceFlinger ABI, not HIDL execution."""
+    package = "android.hardware.graphics.mapper"
+    entries = [item for item in declared
+               if item.get("name") == package and item.get("format") == "hidl"
+               and item.get("interface") == "IMapper" and item.get("instance") == "default"]
+    exact = [item for item in entries if item.get("version") == [2, 1, 1]]
+    passthrough = [item for item in exact if item.get("transport") == "passthrough"]
+    interface_name = package + "@2.1.so"
+    implementation_name = package + "@2.1-impl.so"
+    interfaces, implementations, other_abi, invalid, legacy = [], [], [], [], []
+    for path, info in sorted(libraries.items()):
+        directory, name = path.rsplit("/", 1)
+        if name.startswith("gralloc.") and directory.endswith("/hw"):
+            if info and abi in ("arm", "arm64") and info.get("abi") == abi:
+                legacy.append(path)
+            continue
+        if name not in (interface_name, implementation_name):
+            continue
+        if not info or info.get("abi") not in ("arm", "arm64"):
+            invalid.append(path)
+        elif abi not in ("arm", "arm64") or info["abi"] != abi:
+            other_abi.append(path)
+        elif name == interface_name:
+            interfaces.append(path)
+        else:
+            implementations.append(path)
+    blockers = []
+    if abi not in ("arm", "arm64"):
+        blockers.append("SurfaceFlinger ABI unavailable")
+    if len(passthrough) != 1 or len(exact) != 1 or len(entries) != 1:
+        blockers.append("Missing or ambiguous literal IMapper 2.1 default passthrough declaration")
+    if len(interfaces) != 1:
+        blockers.append("Missing or ambiguous same-ABI mapper 2.1 interface library")
+    if len(implementations) != 1:
+        blockers.append("Missing or ambiguous same-ABI mapper 2.1 implementation library")
+    if invalid:
+        blockers.append("Uninspected or invalid mapper 2.1 ELF candidates")
+    # Do not infer inherited versions, VINTF merge, transport arch, namespace
+    # resolution, HIDL factory symbols, or private native_handle compatibility.
+    return {"status": "STATIC_MAPPER_2_1_CANDIDATES_ONLY" if not blockers else "REVIEW_REQUIRED",
+            "surfaceflinger_abi": abi, "literal_declarations": entries,
+            "exact_passthrough_declarations": passthrough,
+            "interface_candidates": interfaces, "implementation_candidates": implementations,
+            "other_abi_candidates": other_abi, "invalid_candidates": invalid,
+            "legacy_gralloc_candidates": legacy, "blockers": blockers,
+            "vintf_merge_verified": False, "transport_arch_verified": False,
+            "namespace_resolution_verified": False, "mapper_factory_verified": False,
+            "mapper_2_1_verified": False, "native_handle_abi_verified": False,
+            "buffer_import_verified": False, "hardware_tested": False, "safe_to_flash": False}
+
+
 def hwc_stride_evidence(root):
     """Inventory static property assignments, never infer the donor caller ABI."""
     key = "debug.r800.layer_stride"
@@ -417,6 +469,7 @@ def audit(root, init, vintf, inspect_elf, kernel_config=None, dtb=None):
             "missing_hal_declarations": missing, "libraries": libraries, "candidates": candidates,
             "egl_driver_groups": driver_groups,
             "hwc_stride_evidence": hwc_stride_evidence(root),
+            "mapper_2_1_evidence": mapper_2_1_evidence(declared["mapper"], libraries, sf_abi),
             "entrypoint_evidence": graphics_entrypoints(libraries, driver_groups, sf_abi),
             "mali_evidence": mali_evidence(libraries, sf_abi, kernel_config, dtb),
             "device_nodes": nodes, "kernel_config": None if kernel_config is None else
