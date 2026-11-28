@@ -191,3 +191,35 @@ SELECTED_OVF_VMDK_REFERENCES_MATCH_ONLY означает совпадение з
 гипервизора, содержимое гостевой ФС, отсутствие доноров или возможность
 загрузки VM. Это диагностический результат, не разрешение на импорт.
 Реальный экспорт ещё не получен; тесты используют синтетические файлы.
+
+
+## 8. Единая offline-проверка baseline
+
+После получения четырёх отчётов и их SHA-256:
+
+```sh
+/usr/bin/python3 -B build/r800_vm_baseline_review.py \
+  --export-dir /local/galwear-baseline-export --source-sha "$HEAD_SHA" \
+  --declaration /local/galwear-evidence/vm-export-declaration.json \
+  --declaration-sha256 "$DECLARATION_SHA256" \
+  --packages /local/galwear-evidence/vm-package-lock.json \
+  --packages-sha256 "$PACKAGE_LOCK_SHA256" \
+  --export /local/galwear-evidence/vm-export-lock.json \
+  --export-sha256 "$EXPORT_LOCK_SHA256" \
+  --structure /local/galwear-evidence/vm-export-structure.json \
+  --structure-sha256 "$STRUCTURE_SHA256" \
+  > /local/galwear-evidence/vm-baseline-review.json
+```
+
+Проверяются exact HEAD, профиль, операторская декларация, сохранённый
+список пакетов и все связи SHA-256. Структурный анализ экспорта
+выполняется повторно, включая два прохода хеширования файлов, и
+результат сопоставляется с сохранённым отчётом структуры. Все четыре
+отчёта должны находиться вне каталога экспорта.
+
+BASELINE_EXPORT_AND_SAVED_REPORTS_MATCH_ONLY — подтверждение
+согласованности локальных отчётов и фактически прочитанных файлов.
+Это не приёмка работающей VM. ready_to_build=false и safe_to_flash=false.
+Оставшиеся gates: загрузка реальной VM, живые пробы Linux/glibc/Python,
+проверка изоляции гипервизора и гостевой ФС, отсутствие доноров в baseline,
+приёмка локальных доноров и development build.
