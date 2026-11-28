@@ -226,3 +226,29 @@ ISOLATED_IMPORT_ORIGINS_MATCH_ONLY относится к этому import-only 
 Не подтверждает все динамические импорты во время сборки, обычный режим
 запуска Python, отсутствие сторонних пакетов в других процессах, dlopen,
 или полную воспроизводимость. Отчёт пока диагностический.
+
+
+## Единая диагностическая цепочка runtime
+
+Новая команда r800_host_runtime_diagnostic_chain.py проверяет пять
+закреплённых отчётов (Linux lock, Host ELF lock, Loader Observation,
+Python Runtime Lock, Python Import Observation) по exact HEAD, взаимным
+SHA-256, наблюдаемым провайдерам glibc и исходным файлам Python.
+Сводка SAVED_HOST_RUNTIME_DIAGNOSTIC_CHAIN_ONLY не повторяет пробы:
+сохранённые наблюдения не являются подписанной аттестацией.
+
+Для Donor Manager в режиме check доступен дополнительный аргумент:
+
+```sh
+--runtime-diagnostics \
+  /local/galwear-inputs/linux-loader-observation.json "$LOADER_SHA256" \
+  /local/galwear-inputs/python-runtime-lock.json "$PYTHON_REPORT_SHA256" \
+  /local/galwear-inputs/python-import-observation.json "$IMPORT_REPORT_SHA256"
+```
+
+Linux и ELF lock берутся из текущего манифеста Donor Manager.
+Аргумент не допускается в mode build: сначала требуется проверить
+пробы на реальной доверенной VM и определить контракт исполнения всех
+процессов сборщика. Никаких привилегированных повторных запусков loader
+или import observation не выполняется. Дополнительные отчёты пока
+не входят в обязательную цепочку Development Readiness.
