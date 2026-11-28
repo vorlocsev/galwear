@@ -15,6 +15,7 @@ from r800_graphics_donor_binding import checkout_sha
 from r800_extract_super import require
 from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, describe as describe_stock
 from r800_bind_pixel_system import STATUS as PIXEL_STATUS, describe as describe_pixel
+from r800_ndk_pins import REVISION as NDK_REVISION, KEYS as NDK_KEYS, BIN as NDK_BIN, LIMIT as NDK_LIMIT
 
 STAGES={
     "development-kernel-evidence.json":"DEVELOPMENT_KERNEL_COMPONENTS_STATIC_ONLY",
@@ -124,6 +125,87 @@ def pixel_chain(summary,evidence,source_sha):
     return "SAVED_REPORT_CHAIN_ONLY"
 
 
+def ndk_chain(summary):
+    ndk=summary.get("ndk_selected_tool_evidence")
+    if ndk is None:
+        return None
+    require(isinstance(ndk,dict) and
+            ndk.get("schema")=="galwear-r800-ndk-selected-tools-v1" and
+            ndk.get("status")=="SELECTED_NDK_TOOL_PINS_MATCH_ONLY" and
+            ndk.get("revision")==NDK_REVISION and
+            all(ndk.get(k) is False for k in ("complete_ndk_verified","host_libraries_verified",
+                  "upstream_authenticity_verified","safe_to_flash")),"Unexpected NDK evidence scope")
+    rows=ndk["files"]
+    require(isinstance(rows,dict) and set(rows)==NDK_KEYS,"Incomplete NDK selected file inventory")
+    for name,row in rows.items():
+        require(isinstance(row,dict) and set(row)=={"bytes","sha256","resolved"} and
+                type(row["bytes"]) is int and 0<row["bytes"]<=(65536 if name=="source.properties" else NDK_LIMIT)
+                and valid_pin(row["sha256"]),"Invalid selected NDK file identity")
+        target=row["resolved"]
+        require(isinstance(target,str) and all(p not in ("",".","..") for p in target.split("/"))
+                and "\\" not in target and ":" not in target and
+                (target=="source.properties" if name=="source.properties" else
+                 target.startswith(NDK_BIN.as_posix()+"/")),"Invalid NDK selected file path")
+    return {name:row["sha256"] for name,row in rows.items()}
+
+
+def managed_chain(summary,evidence,source_sha):
+    ndk=ndk_chain(summary)
+    pin=summary.get("managed_manifest_sha256")
+    if pin is None:
+        return "NOT_SUPPLIED", "SAVED_SELECTED_TOOL_RECORD_ONLY" if ndk else "NOT_SUPPLIED"
+    name="managed-donor-manifest.json"
+    require(valid_pin(pin) and summary["stage_evidence_sha256"][name]==pin,
+            "Managed manifest pin mismatch")
+    raw=read_regular(evidence/name,1024*1024)
+    require(sha(raw)==pin,"Managed manifest bytes changed")
+    data=json.loads(raw,object_pairs_hook=unique_keys)
+    require(isinstance(data,dict) and set(data)=={"schema","source_sha","inputs","evidence","xtra_abi","assets"}
+            and data["schema"]=="galwear-r800-local-donor-manifest-v1" and data["source_sha"]==source_sha,
+            "Managed manifest schema or source mismatch")
+    rows=data["inputs"]
+    require(isinstance(rows,dict) and set(rows)==set(summary["input_sha256"])|{"ndk"},
+            "Managed manifest input inventory mismatch")
+    for role,row in rows.items():
+        fields={"path","tools_sha256"} if role=="ndk" else {"path","sha256"}
+        require(isinstance(row,dict) and set(row)==fields,"Managed manifest input fields mismatch")
+        if role!="ndk":
+            require(row["sha256"]==summary["input_sha256"][role],"Managed manifest input pin mismatch: "+role)
+    require(ndk is not None and rows["ndk"]["tools_sha256"]==ndk,"Managed manifest NDK pin mismatch")
+    require(type(data["xtra_abi"]) is int and data["xtra_abi"] in (0,1,2) and
+            data["xtra_abi"]==summary["xtra_abi"],"Managed manifest XTRA ABI mismatch")
+    reports=data["evidence"]
+    stock=summary.get("stock_donor_bindings",{})
+    pixel=summary.get("pixel_system_binding")
+    require(isinstance(reports,dict) and set(reports)=={"system","j4","tizen"} and
+            set(stock)=={"j4","tizen"} and isinstance(pixel,dict),"Managed donor reports missing")
+    for role,row in reports.items():
+        fields={"path","sha256"} if role=="system" else {"path","sha256","archive_sha256"}
+        require(isinstance(row,dict) and set(row)==fields,"Managed report fields mismatch")
+        observed=pixel if role=="system" else stock[role]
+        require(row["sha256"]==observed["report_sha256"],"Managed report pin mismatch: "+role)
+        if role!="system":
+            require(row["archive_sha256"]==observed["reported_archive_sha256"],
+                    "Managed archive pin mismatch: "+role)
+    assets=data["assets"]
+    if assets is None:
+        require(summary.get("assets_manifest_sha256") is None,"Managed asset pin mismatch")
+    else:
+        require(isinstance(assets,dict) and set(assets)=={"path","sha256"} and
+                assets["sha256"]==summary.get("assets_manifest_sha256") and valid_pin(assets["sha256"]),
+                "Managed asset pin mismatch")
+    # These are saved relative references only, not resolved against the original workspace.
+    paths=[row["path"] for row in rows.values()]+[row["path"] for row in reports.values()]
+    if assets is not None:
+        paths.append(assets["path"])
+    require(all(isinstance(p,str) and 0<len(p)<=1024 and "\\" not in p and ":" not in p and
+                all(x not in ("",".","..") for x in p.split("/")) for p in paths),
+            "Invalid managed relative path")
+    require(len({row["path"] for row in rows.values()})==len(rows) and
+            len({row["path"] for row in reports.values()})==len(reports),"Duplicate managed paths")
+    return "SAVED_MANIFEST_CHAIN_ONLY","SAVED_SELECTED_TOOL_PINS_MATCH_MANIFEST"
+
+
 def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
               pit_path=None,pit_pin=None,artifacts=None,artifact_pins=None):
     checkout_sha(source_sha)
@@ -143,6 +225,8 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
             "Unexpected local build scope")
     pins=summary["stage_evidence_sha256"]
     expected=set(STAGES)|RECIPE|stock_inventory(summary)
+    if summary.get("managed_manifest_sha256") is not None:
+        expected.add("managed-donor-manifest.json")
     if summary.get("pixel_system_binding") is not None:
         expected.add("pixel-system-evidence.json")
     if summary.get("assets_manifest_sha256") is not None:
@@ -163,6 +247,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
     chain(summary,reports,i,u)
     stock_status=stock_chain(summary,evidence,source_sha)
     pixel_status=pixel_chain(summary,evidence,source_sha)
+    managed_status,ndk_status=managed_chain(summary,evidence,source_sha)
     baseline=review(tree,tree_pin,source_sha)
     require(baseline==reports["handover-review.json"],"Saved handover differs from recomputed review")
     layout=prepare(tree,tree_pin,source_sha,capacity_path=capacity_path,capacity_pin=capacity_pin)
@@ -185,12 +270,15 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
             "integrated_evidence_sha256":tree_pin,"stage_evidence_sha256":pins,
             "checks":{"stage_chain":"STATIC_PASS","handover":"STATIC_PASS",
                       "stock_donor_evidence":stock_status,"pixel_system_evidence":pixel_status,
+                      "managed_manifest":managed_status,"ndk_selected_tools":ndk_status,
                       "installation_layout":"STATIC_PLAN_ONLY",
                       "recovery_inputs":"OFFLINE_REVIEW_ONLY" if recovery else "NOT_SUPPLIED",
                       "hardware_boot":"NOT_TESTED","wear_os_boot":"NOT_TESTED"},
             "handover":baseline,"installation":layout,"recovery":recovery,
             "stock_donor_bindings":summary.get("stock_donor_bindings",{}),
             "pixel_system_binding":summary.get("pixel_system_binding"),
+            "managed_manifest_sha256":summary.get("managed_manifest_sha256"),
+            "ndk_selected_tool_evidence":summary.get("ndk_selected_tool_evidence"),
             "original_donor_authenticity_verified":False,"hardware_tested":False,
             "installation_authorized":False,"safe_to_flash":False}
 
