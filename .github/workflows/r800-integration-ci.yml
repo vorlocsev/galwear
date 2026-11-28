@@ -1127,6 +1127,47 @@ jobs:
             }
           python3 build/r800_gps_link_gate.py --binary "$ref/gpsbridge" --libdir "$ref/libs" > "$ref/reference-postlink.json"
           echo "DEBIAN_ARMEL_REFERENCE_LINK_PASS; tizen_donor_verified=false; runtime_verified=false; safe_to_flash=false"
+      - name: Assemble reference-only GalWear GPS runtime subset from real compiled bridge
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          python3 - "$ref" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          origin = json.loads((root/"reference-origin.json").read_text())
+          assert origin["scope"] == "DEBIAN_ARMEL_REFERENCE_NOT_TIZEN"
+          (root/"runtime-pins.json").write_text(json.dumps(origin["files"]))
+          PY
+          python3 build/r800_stage_runtime_layer.py \
+            --libdir "$ref/libs" --pins "$ref/runtime-pins.json" \
+            --ndk "$RUNNER_TEMP/android-ndk-r27c" \
+            --output "$ref/runtime-layer" --source-sha "$GITHUB_SHA" \
+            --scope DEBIAN_REFERENCE_NOT_TIZEN --xtra-abi 0
+          python3 - "$ref" <<'PY'
+          import hashlib, json, pathlib, sys, stat, os
+          ref = pathlib.Path(sys.argv[1])
+          root = ref/"runtime-layer"
+          report = json.loads((root/"runtime-layer-evidence.json").read_text())
+          old = json.loads((ref/"reference-postlink.json").read_text())
+          assert report["source_sha"] == os.environ["GITHUB_SHA"]
+          assert report["scope"] == "DEBIAN_REFERENCE_NOT_TIZEN"
+          assert report["gpsbridge_sha256"] == old["sha256"]
+          assert report["library_sha256"] == old["donor_sha256"]
+          assert len(report["files"]) == 5
+          assert not (root/"r800dev").exists()
+          for flag in ("tizen_donor_verified", "full_runtime_built", "guest_execution_verified",
+                       "gnss_runtime_verified", "hardware_tested", "safe_to_flash"):
+              assert report[flag] is False
+          actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+          assert actual == set(report["files"]) | {"runtime-layer-evidence.json"}
+          for name, row in report["files"].items():
+              path = root/name
+              assert not path.is_symlink() and name.startswith("reference-runtime/")
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == row["sha256"]
+              assert oct(stat.S_IMODE(path.stat().st_mode)) == row["mode"]
+          print("REAL_REFERENCE_RUNTIME_LAYER_PASS", len(report["files"]))
+          PY
       - name: Compare two independent real GPSBridge links for each reference XTRA ABI
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
@@ -1175,6 +1216,7 @@ jobs:
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-prelink.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-symbol-review.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-postlink.json
+            ${{ runner.temp }}/r800-debian-glibc-reference/runtime-layer/runtime-layer-evidence.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-link.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-repeatability-*.json
           if-no-files-found: warn
