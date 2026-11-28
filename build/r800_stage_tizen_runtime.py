@@ -24,6 +24,7 @@ from r800_stage_runtime_layer import build as build_bridge
 from r800_tizen_dependencies import TARGETS
 from r800_verify_tizen_stage import verify, guest_name, unique_keys, MANIFEST, MAX_MANIFEST
 from r800_peripheral_firmware import REQUIRED, check_bytes
+from r800_tizen_config_layout import extract_configs, PREFIX, MOUNTPOINTS, materialize
 
 MAX_TOTAL = 1024*1024**2
 FIRMWARE = tuple(sorted(n for n in TIZEN if n.startswith("payload/fw/")))
@@ -130,6 +131,10 @@ def assemble(image, image_sha, closure, closure_sha, ndk, output, source_sha, xt
             if name in REQUIRED:
                 check_bytes(name, raw)
             total = merge_file(stage, rows, "r800dev/"+name, raw, "0o644", "tizen-image:"+info["source"], total)
+        configs, config_identity = extract_configs(image, image_sha, work)
+        for path, raw in sorted(configs.items()):
+            total = merge_file(stage, rows, PREFIX+path, raw, "0o644", "tizen-image:"+path, total)
+        materialize(stage, MOUNTPOINTS)
         # Link audit is repeated on the exact final staged library path.
         final = audit(stage/"r800dev/gpsbridge", stage/"r800dev/tzlite/lib")
         require(final["status"] == "STATIC_GLIBC_CLOSURE_ONLY" and
@@ -143,7 +148,8 @@ def assemble(image, image_sha, closure, closure_sha, ndk, output, source_sha, xt
                   "source_sha": source_sha, "tizen_image_sha256": image_sha,
                   "closure_manifest_sha256": closure_sha, "library_sha256": pins,
                   "gpsbridge_sha256": final["sha256"], "files": rows, "total_bytes": total,
-                  "missing_inputs": ["Tizen configuration, plugins and runtime mountpoint layout",
+                  "chroot_mountpoints": MOUNTPOINTS, "configuration_identity": config_identity,
+                  "missing_inputs": ["Additional Tizen configuration and plugins",
                                      "Original ownership, permissions and SELinux acceptance",
                                      "Device daemon startup and hardware GNSS"],
                   "same_origin_proven": False, "donor_authenticity_verified": False,
