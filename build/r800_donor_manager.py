@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from r800_android_userspace_preflight import read_regular
 from r800_build_local_development import build, preflight, stock_bindings, sha
 from r800_bind_pixel_system import verify as verify_pixel
+from r800_ndk_pins import verify as verify_ndk, KEYS as NDK_KEYS
 from r800_display_asset_layer import load_assets
 from r800_extract_super import require
 from r800_graphics_donor_binding import checkout_sha
@@ -52,10 +53,17 @@ def load(root,manifest,pin,source_sha):
     rows=data["inputs"]
     require(isinstance(rows,dict) and set(rows)==ROLES,"Complete manifest input roles required")
     paths,pins={},{}
+    ndk_pins=None
     for name,row in rows.items():
         fields={"path"} if name=="ndk" else {"path","sha256"}
+        if name=="ndk" and isinstance(row,dict) and "tools_sha256" in row:
+            fields.add("tools_sha256")
         require(isinstance(row,dict) and set(row)==fields,"Unexpected input fields: "+name)
         paths[name]=local_path(root,row["path"])
+        if name=="ndk" and "tools_sha256" in row:
+            ndk_pins=row["tools_sha256"]
+            require(isinstance(ndk_pins,dict) and set(ndk_pins)==NDK_KEYS and
+                    all(valid_pin(v) for v in ndk_pins.values()),"Invalid NDK selected tool pins")
         if name!="ndk":
             require(valid_pin(row["sha256"]),"Explicit input SHA-256 required: "+name)
             pins[name]=row["sha256"]
@@ -84,12 +92,13 @@ def load(root,manifest,pin,source_sha):
     checkout_sha(source_sha)
     return {"paths":paths,"pins":pins,"stock_evidence":{n:reports[n] for n in ("j4","tizen")},
             "pixel_evidence":reports["system"],"xtra_abi":data["xtra_abi"],
-            "assets":asset_path,"assets_sha":asset_pin}
+            "assets":asset_path,"assets_sha":asset_pin,"ndk_pins":ndk_pins}
 
 
 def check(config,output,source_sha):
     paths,pins=config["paths"],config["pins"]
     preflight(paths,pins,output,source_sha)
+    ndk=None if config["ndk_pins"] is None else verify_ndk(paths["ndk"],config["ndk_pins"])
     pixel=verify_pixel(paths["system"],pins["system"],*config["pixel_evidence"],source_sha)
     stock=stock_bindings(paths,pins,config["stock_evidence"],source_sha)
     if config["assets"] is not None:
@@ -98,6 +107,8 @@ def check(config,output,source_sha):
     return {"schema":"galwear-r800-managed-donor-check-v1","status":"MANAGED_INPUT_PINS_MATCH_ONLY",
             "source_sha":source_sha,"input_sha256":pins,"stock_donor_bindings":stock,
             "pixel_system_binding":pixel,"ndk_identity_verified":False,
+            "ndk_selected_tool_evidence":ndk,
+            "ndk_selected_tool_status":"NOT_SUPPLIED" if ndk is None else ndk["status"],
             "base_vendor_origin_verified":False,"effects_origin_verified":False,
             "donor_authenticity_verified":False,"hardware_tested":False,"safe_to_flash":False}
 
@@ -118,9 +129,11 @@ def main():
     else:
         # The existing builder independently checks all pins and evidence
         # before and after assembly, and publishes only after readiness.
+        require(cfg["ndk_pins"] is not None,"Managed build requires explicit selected NDK tool pins")
         result=build(cfg["paths"],cfg["pins"],a.output,a.source_sha,cfg["xtra_abi"],
                      assets=cfg["assets"],assets_sha=cfg["assets_sha"],
-                     stock_evidence=cfg["stock_evidence"],pixel_evidence=cfg["pixel_evidence"])
+                     stock_evidence=cfg["stock_evidence"],pixel_evidence=cfg["pixel_evidence"],
+                     ndk_pins=cfg["ndk_pins"])
     print(json.dumps(result,indent=2,sort_keys=True))
 
 
