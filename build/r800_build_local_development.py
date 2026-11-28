@@ -105,6 +105,10 @@ def build(paths,pins,output,source_sha,xtra_abi=0):
                            android_pin,result,source_sha)
         ip=bind(result,"integrated-development-evidence.json",i,source_sha,
                 "FUNCTIONAL_KERNEL_AND_ANDROID_TREE_STAGED_ONLY")
+        from r800_review_handover import review
+        handover=review(result,ip,source_sha)
+        require(handover["status"]=="HOLD_HARDWARE_UNVERIFIED" and handover["safe_to_flash"] is False,
+                "Unexpected handover review scope")
         require(i["kernel_evidence_sha256"]==pins["kernel"],"Integrated kernel pin mismatch")
         # No stage may silently change any of the original donor pins.
         preflight(p,pins,output,source_sha)
@@ -137,6 +141,9 @@ def build(paths,pins,output,source_sha,xtra_abi=0):
             require(sha(data)==pin,"Vendor recipe evidence changed")
             (evidence/name).write_bytes(data)
             copied[name]=pin
+        handover_raw=(json.dumps(handover,indent=2,sort_keys=True)+"\n").encode()
+        (evidence/"handover-review.json").write_bytes(handover_raw)
+        copied["handover-review.json"]=sha(handover_raw)
         summary={"schema":"galwear-r800-local-development-build-v1",
                  "status":"LOCAL_GALWEAR_DEVELOPMENT_TREE_BUILT_STATIC_ONLY",
                  "source_sha":source_sha,"input_sha256":pins,"xtra_abi":xtra_abi,
