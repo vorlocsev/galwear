@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 
 from r800_graphics_fixture_summary import HWC_FLAGS, EGL_FLAGS
-from r800_android_graphics_abi import LIBHARDWARE, SYSTEM_CORE
+from r800_android_graphics_abi import LIBHARDWARE, SYSTEM_CORE, expressions
 
 HOLDS = ("hardware_tested", "safe_to_flash")
 FIXTURE_HOLDS = ("donor_surfaceflinger_verified", "donor_mapper_verified",
@@ -38,13 +38,15 @@ def combine(abi, fixture, source_sha, donor=None):
         errors.append("ABI reference pins mismatch")
     count = abi.get("fields_per_abi")
     layouts = abi.get("layouts", {})
-    if type(count) is not int or count < 97:
+    expected_fields = set(expressions())
+    if type(count) is not int or count != len(expected_fields):
         errors.append("ABI field count incomplete")
-    for arch in ("arm", "arm64"):
+    for arch, pointer_size in (("arm", 4), ("arm64", 8)):
         layout = layouts.get(arch, {})
         aosp, local = layout.get("aosp"), layout.get("local")
         if (not isinstance(aosp, dict) or not isinstance(local, dict) or
-                aosp != local or len(aosp) != count or layout.get("differences") != []):
+                aosp != local or set(aosp) != expected_fields or
+                aosp.get("pointer_bytes") != pointer_size or layout.get("differences") != {}):
             errors.append("ABI layout mismatch: " + arch)
     if layouts.get("arm", {}).get("aosp", {}).get("hwc_layer_1_t.size") != 96:
         errors.append("ARM32 HWC layer size mismatch")
@@ -117,6 +119,8 @@ def main():
         json.dump(result, stream, sort_keys=True, indent=2)
         stream.write("\n")
     print(result["status"])
+    for error in result["errors"]:
+        print("GRAPHICS_ACCEPTANCE_ERROR:", error)
     return 2 if result["errors"] else 0
 
 
