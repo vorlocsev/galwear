@@ -7,6 +7,7 @@
 #include <poll.h>
 #include <sys/eventfd.h>
 #include "r800-window-queue-fixture.h"
+#include "r800-native-handle-import-fixture.h"
 static atomic_int hwc_ticks,hwc_bad;
 static atomic_llong hwc_last;
 static void hwc_fixture_vsync(const hwc_procs_t *procs,int disp,int64_t ts)
@@ -146,11 +147,23 @@ static int hwc_cpu_present(hwc_composer_device_1_t *dev,int cycle)
         int fd=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
         struct stat s;
         if(before<0||fd<0||fstat(fd,&s)||!S_ISREG(s.st_mode)||s.st_size!=368*360*4)return 0;
-        native_handle_t *buf=calloc(1,sizeof(*buf)+5*sizeof(int));
-        if(!buf)return 0;
-        buf->version=sizeof(*buf);buf->numFds=1;buf->numInts=4;
-        buf->data[0]=fd;buf->data[1]=i?HAL_PIXEL_FORMAT_BGRA_8888:HAL_PIXEL_FORMAT_RGBA_8888;
-        buf->data[2]=360;buf->data[3]=360;buf->data[4]=368;
+        const size_t bytes=sizeof(native_handle_t)+5*sizeof(int);
+        native_handle_t *raw=calloc(1,bytes),*buf=NULL;
+        if(!raw){close(fd);return 0;}
+        raw->version=sizeof(*raw);raw->numFds=1;raw->numInts=4;
+        raw->data[0]=fd;raw->data[1]=i?HAL_PIXEL_FORMAT_BGRA_8888:HAL_PIXEL_FORMAT_RGBA_8888;
+        raw->data[2]=360;raw->data[3]=360;raw->data[4]=368;
+        int rc=import_model(raw,bytes,&buf);
+        int valid=!rc&&buf&&buf!=raw&&buf->data[0]!=fd&&
+            fcntl(buf->data[0],F_GETFD)==FD_CLOEXEC&&
+            !memcmp(raw->data+1,buf->data+1,4*sizeof(int));
+        int closed=close(fd);
+        free(raw);
+        if(!valid||closed||fcntl(fd,F_GETFD)!=-1||errno!=EBADF){
+            if(buf)free_model(&buf);
+            return 0;
+        }
+        if(fd_count()!=before+i+1){free_model(&buf);return 0;}
         queue.slots[i].handle=buf;
     }
     hwc_display_contents_1_t *c=calloc(1,sizeof(*c)+sizeof(hwc_layer_1_t));
@@ -196,8 +209,9 @@ static int hwc_cpu_present(hwc_composer_device_1_t *dev,int cycle)
        queue.slots[0].state!=WINDOW_FREE||queue.slots[1].state!=WINDOW_FREE)return 0;
     free(c);
     for(int i=0;i<2;++i){
-        if(close(queue.slots[i].handle->data[0]))return 0;
-        free(queue.slots[i].handle);
+        int imported_fd=queue.slots[i].handle->data[0];
+        if(free_model(&queue.slots[i].handle)||queue.slots[i].handle||
+           fcntl(imported_fd,F_GETFD)!=-1||errno!=EBADF)return 0;
     }
     return fd_count()==before;
 }
@@ -603,6 +617,7 @@ static int hwc_fixture(const hw_module_t *module)
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
     puts("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8");
+    puts("HAL_HWC_IMPORTED_HANDLE_FIXTURE_PASS frames=8 imports=8 source_closed=8 freed=8 cloexec=8 fd_stable=1");
     puts("HAL_HWC_EGL_ACQUIRE_FIXTURE_PASS frames=4 exported=4 consumed=4 provider_unloaded=4 pixel_match=4");
     puts("HAL_HWC_WINDOW_QUEUE_FIXTURE_PASS cycles=4 slots=2 fifo_frames=8 cancel=4 rejected_transfer=8 backpressure=4 fd_stable=1");
     puts("HAL_HWC_FIXTURE_PASS geometry=360x360 cycles=4 invalid_bpp=1 power_recovery=4 timer_vsync=4");
