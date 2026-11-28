@@ -82,6 +82,23 @@ def config(objects, *, vm_oat=False):
         paths["neuralnetworks"]="/apex/com.android.neuralnetworks/lib"
         links["default"]+=("neuralnetworks",)
         links["neuralnetworks"]=("runtime","system")
+    # VM-only cross-APEX System imports. In run 46179354127 the original
+    # libharfbuzz_ng.so needed libicu.so from i18n. Build an explicit
+    # allowlist from staged DT_NEEDED records, not a global search path.
+    overrides={}
+    if vm_oat:
+        system_needed={n for key,row in objects.items()
+                       if key.startswith("system:") and key!=STUB
+                       for n in row.get("needed",())}
+        external=system_needed-names["system"]-names["runtime"]
+        targets=("i18n","neuralnetworks","statsd")
+        for dst in targets:
+            eligible={n for n in external & names[dst]
+                      if sum(n in names[p] for p in targets)==1
+                      and n not in names["art"]}
+            if eligible:
+                links["system"]+=(dst,)
+                overrides[("system",dst)]=eligible
     for ns,path in paths.items():
         p="namespace."+ns
         lines.extend([p+".isolated = true",p+".search.paths = "+path])
@@ -93,7 +110,8 @@ def config(objects, *, vm_oat=False):
         if links[ns]:
             lines.append(p+".links = "+",".join(links[ns]))
             for dst in links[ns]:
-                lines.append(p+".link."+dst+".shared_libs = "+":".join(sorted(names[dst])))
+                allowed_names=overrides.get((ns,dst),names[dst])
+                lines.append(p+".link."+dst+".shared_libs = "+":".join(sorted(allowed_names)))
     return "\n".join(lines)+"\n"
 
 

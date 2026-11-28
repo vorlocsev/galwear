@@ -55,6 +55,22 @@ class ArtProbeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             probe.guest_path("neuralnetworks:/lib64/libneuralnetworks.so")
 
+    def test_system_vm_imports_only_needed_unique_apex_providers(self):
+        data=objects()
+        data["system:/system/lib/libharfbuzz_ng.so"]={"soname":"libharfbuzz_ng.so","needed":["libicu.so","libc.so","libstatspull.so","libambiguous.so"]}
+        data["i18n:/lib/libicu.so"]={"soname":"libicu.so"}
+        data["i18n:/lib/libicuuc.so"]={"soname":"libicuuc.so"}
+        data["i18n:/lib/libambiguous.so"]={"soname":"libambiguous.so"}
+        data["neuralnetworks:/lib/libambiguous.so"]={"soname":"libambiguous.so"}
+        baseline=probe.config(data)
+        self.assertNotIn("namespace.system.link.i18n.",baseline)
+        cfg=probe.config(data,vm_oat=True)
+        self.assertIn("namespace.system.links = runtime,i18n,statsd\n",cfg)
+        self.assertIn("namespace.system.link.i18n.shared_libs = libicu.so\n",cfg)
+        self.assertIn("namespace.system.link.statsd.shared_libs = libstatspull.so\n",cfg)
+        self.assertNotIn("namespace.system.link.neuralnetworks.",cfg)
+        self.assertNotIn("allow_all_shared_libs",cfg)
+
     def test_vm_oat_export_is_scoped_to_private_boot_directory(self):
         baseline=probe.config(objects())
         self.assertNotIn("namespace.system.visible",baseline)
