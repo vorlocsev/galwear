@@ -431,6 +431,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                                   log.splitlines().count("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8") == 1 and
                                   log.splitlines().count("HAL_HWC_IMPORTED_HANDLE_FIXTURE_PASS frames=8 imports=8 source_closed=8 freed=8 cloexec=8 fd_stable=1") == 1 and
                                   log.splitlines().count("HAL_HWC_IMPORTED_OVERLAY_FIXTURE_PASS imports=3 source_closed=3 freed=3 overlay_release_handoff=1 fd_stable=1") == 1 and
+                                  log.splitlines().count("HAL_HWC_DELAYED_OVERLAY_RELEASE_FIXTURE_PASS unsignaled=1 blocked_reuse=1 signaled=1 reclaimed=1") == 1 and
+                                  log.splitlines().count("HAL_HWC_IMPORTED_QUARANTINE_FIXTURE_PASS cycles=4 retained=4 blocked_reuse=4 teardown=4 fd_stable=1") == 1 and
                                   log.splitlines().count("HAL_HWC_EGL_ACQUIRE_FIXTURE_PASS frames=4 exported=4 consumed=4 provider_unloaded=4 pixel_match=4") == 1 and
                                   log.splitlines().count("HAL_HWC_WINDOW_QUEUE_FIXTURE_PASS cycles=4 slots=2 fifo_frames=8 cancel=4 rejected_transfer=8 backpressure=4 fd_stable=1") == 1 and
                                   log.splitlines().count("HAL_HWC_WINDOW_RELEASE_FIXTURE_PASS cycles=4 delayed=4 signaled=4 rejected=4 quarantined=4 overlay_handoff=1 fd_stable=1") == 1 and
@@ -549,6 +551,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "hwc_synthetic_cpu_present_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_synthetic_imported_handle_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_synthetic_imported_overlay_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
+        "hwc_synthetic_delayed_overlay_release_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
+        "hwc_synthetic_imported_quarantine_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_synthetic_egl_acquire_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_synthetic_window_queue_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_synthetic_async_release_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
