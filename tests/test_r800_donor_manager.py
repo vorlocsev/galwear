@@ -179,5 +179,32 @@ class DonorManagerTests(unittest.TestCase):
             self.load()
 
 
+    def test_environment_elf_mapping(self):
+        for name in ("lock.json","probe.json","elf.json"):
+            (self.root/name).write_text("{}")
+        self.data["environment"]={"lock":"lock.json","lock_sha256":PIN,
+                                  "probe":"probe.json","probe_sha256":"c"*64,
+                                  "elf":"elf.json","elf_sha256":"d"*64}
+        cfg=self.load()
+        self.assertEqual(cfg["environment"][4:],(self.root/"elf.json","d"*64))
+        with patch.object(manager,"preflight"), \
+             patch.object(manager,"verify_pixel",return_value={}), \
+             patch.object(manager,"stock_bindings",return_value={}), \
+             patch.object(manager,"audit_base",return_value={"identity_blockers":[]}), \
+             patch.object(manager,"verify_bundle",return_value=(b"lock",b"probe",{"fixture":True},b"elf")) as verify:
+            result=manager.check(cfg,self.output,SOURCE)
+        verify.assert_called_once_with(cfg["environment"],SOURCE)
+        self.assertEqual(result["host_elf_status"],"LIVE_STATIC_CANDIDATES_ONLY")
+
+    def test_environment_elf_alias(self):
+        for name in ("lock.json","probe.json"):
+            (self.root/name).write_text("{}")
+        self.data["environment"]={"lock":"lock.json","lock_sha256":PIN,
+                                  "probe":"probe.json","probe_sha256":"c"*64,
+                                  "elf":"lock.json","elf_sha256":"d"*64}
+        with self.assertRaisesRegex(ValueError,"Distinct environment evidence paths"):
+            self.load()
+
+
 if __name__=="__main__":
     unittest.main()
