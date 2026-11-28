@@ -13,6 +13,7 @@ from r800_stage_adaptation_layer import valid_pin
 from r800_verify_tizen_stage import unique_keys
 from r800_graphics_donor_binding import checkout_sha
 from r800_extract_super import require
+from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, describe as describe_stock
 
 STAGES={
     "development-kernel-evidence.json":"DEVELOPMENT_KERNEL_COMPONENTS_STATIC_ONLY",
@@ -89,6 +90,26 @@ def chain(summary,reports,i,u):
     return True
 
 
+def stock_inventory(summary):
+    stock=summary.get("stock_donor_bindings",{})
+    require(isinstance(stock,dict) and (not stock or set(stock)==set(STOCK_INPUTS)),
+            "Incomplete stock donor binding inventory")
+    return {"stock-"+n+"-evidence.json" for n in stock}
+
+
+def stock_chain(summary,evidence,source_sha):
+    stock=summary.get("stock_donor_bindings",{})
+    stock_inventory(summary)
+    for name,row in stock.items():
+        filename="stock-"+name+"-evidence.json"
+        pin=summary["stage_evidence_sha256"][filename]
+        report=read_report(evidence/filename,pin,source_sha,"STOCK_PARTITION_CANDIDATE_ONLY")
+        expected=describe_stock(report,summary["input_sha256"][name],pin,
+                               row["reported_archive_sha256"],name,source_sha)
+        require(row==expected,"Saved stock binding differs from extraction evidence: "+name)
+    return "SAVED_REPORT_CHAIN_ONLY" if stock else "NOT_SUPPLIED"
+
+
 def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
               pit_path=None,pit_pin=None,artifacts=None,artifact_pins=None):
     checkout_sha(source_sha)
@@ -107,7 +128,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
                 "wear_os_verified","payload_complete","android_handover_tested","hardware_tested")),
             "Unexpected local build scope")
     pins=summary["stage_evidence_sha256"]
-    expected=set(STAGES)|RECIPE
+    expected=set(STAGES)|RECIPE|stock_inventory(summary)
     if summary.get("assets_manifest_sha256") is not None:
         expected.add("assets-evidence.json")
     require(set(pins)==expected and {x.name for x in evidence.iterdir()}==expected and
@@ -124,6 +145,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
     u=read_report(tree/"development-tree-evidence.json",i["userspace_evidence_sha256"],source_sha,
                   "ANDROID_DEVICE_DEVELOPMENT_TREE_STAGED_ONLY")
     chain(summary,reports,i,u)
+    stock_status=stock_chain(summary,evidence,source_sha)
     baseline=review(tree,tree_pin,source_sha)
     require(baseline==reports["handover-review.json"],"Saved handover differs from recomputed review")
     layout=prepare(tree,tree_pin,source_sha,capacity_path=capacity_path,capacity_pin=capacity_pin)
@@ -145,10 +167,12 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
             "source_sha":source_sha,"local_build_evidence_sha256":pin,
             "integrated_evidence_sha256":tree_pin,"stage_evidence_sha256":pins,
             "checks":{"stage_chain":"STATIC_PASS","handover":"STATIC_PASS",
+                      "stock_donor_evidence":stock_status,
                       "installation_layout":"STATIC_PLAN_ONLY",
                       "recovery_inputs":"OFFLINE_REVIEW_ONLY" if recovery else "NOT_SUPPLIED",
                       "hardware_boot":"NOT_TESTED","wear_os_boot":"NOT_TESTED"},
             "handover":baseline,"installation":layout,"recovery":recovery,
+            "stock_donor_bindings":summary.get("stock_donor_bindings",{}),
             "original_donor_authenticity_verified":False,"hardware_tested":False,
             "installation_authorized":False,"safe_to_flash":False}
 
