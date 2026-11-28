@@ -109,3 +109,57 @@ ISO pin, package lock pin и идентификатор snapshot в журнал
 версии пакетов Ubuntu и результаты проб не получены. Никаких релизов,
 установки на часы или подтверждения воспроизводимости.
 safe_to_flash=false.
+
+
+## 6. Закрепление экспортированного baseline
+
+После выключения donor-free VM экспортировать одну OVA либо плоский набор
+OVF/VMDK (допустимы сопутствующие MF/CERT/NVRAM). Экспорт и отчёты должны
+находиться в разных каталогах на доверенном Linux-хосте с clean exact-head
+checkout. Не использовать работающую VM, linked clone или изменяемые
+файлы. Хешируются все файлы каталога дважды; большие диски потребуют
+соответствующего времени чтения и места.
+
+Создать отдельный JSON-файл декларации оператора (все значения заполнить
+по фактической VM; placeholder не является pin):
+
+```json
+{
+  "schema": "galwear-r800-vm-export-declaration-v1",
+  "source_sha": "FULL_HEAD_SHA",
+  "profile_sha256": "PROFILE_SHA256",
+  "package_lock_sha256": "PACKAGE_LOCK_SHA256",
+  "iso_sha256": "VERIFIED_ISO_SHA256",
+  "hypervisor": "actual hypervisor",
+  "hypervisor_version": "actual version",
+  "snapshot_id": "actual baseline identifier",
+  "powered_off": true,
+  "donor_free": true,
+  "physical_passthrough_disabled": true,
+  "shared_host_folders_disabled": true,
+  "network_disconnected": true
+}
+```
+
+```sh
+sha256sum build/vm/r800-ubuntu-24.04-profile.json
+sha256sum /local/galwear-evidence/vm-export-declaration.json
+/usr/bin/python3 -B build/r800_vm_export_lock.py \
+  --mode capture --export /local/galwear-baseline-export \
+  --declaration /local/galwear-evidence/vm-export-declaration.json \
+  --declaration-sha256 "$DECLARATION_SHA256" \
+  --package-lock /local/galwear-evidence/vm-package-lock.json \
+  --package-lock-sha256 "$PACKAGE_LOCK_SHA256" --source-sha "$HEAD_SHA" \
+  > /local/galwear-evidence/vm-export-lock.json
+sha256sum /local/galwear-evidence/vm-export-lock.json
+```
+
+Для проверки копии повторить команду с --mode check и дополнительными
+--lock /local/galwear-evidence/vm-export-lock.json --lock-sha256 "$EXPORT_LOCK_SHA256"
+(без перенаправления в существующий lock). Хеш lock хранить отдельно.
+VM_EXPORT_BYTES_MATCH_DECLARED_BASELINE_ONLY подтверждает только совпадение
+байтов, перечня файлов и декларации с закреплёнными отчётами.
+OVA и OVF/VMDK рассматриваются как непрозрачные файлы: структура архива,
+ссылки OVF, зависимости backing disk, содержимое файловой системы,
+фактическая выключенность, изоляция и отсутствие доноров не проверяются.
+Нельзя использовать этот статус для автоматического импорта или запуска VM.
