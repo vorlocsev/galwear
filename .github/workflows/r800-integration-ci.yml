@@ -323,6 +323,12 @@ jobs:
             --probe-dir "$RUNNER_TEMP/r800-hal-probe" --hals "$RUNNER_TEMP/r800-hal" \
             --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" \
             --output "$RUNNER_TEMP/r800-namespace-fixture" --namespace-fixture
+      - name: Test synthetic EGL GLES exports in isolated ARM32 Bionic
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          ref="$RUNNER_TEMP/r800-phh-reference/runtime"
+          python3 build/r800_egl_link_probe.py --ndk "$RUNNER_TEMP/android-ndk-r27c" --runtime "$ref" --runtime-manifest "$ref/runtime-manifest.json" --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/r800-egl-link"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -341,6 +347,7 @@ jobs:
             ${{ runner.temp }}/r800-audio-pcm-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-hwc-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-namespace-fixture/hal-runtime-evidence.json
+            ${{ runner.temp }}/r800-egl-link/egl-link-evidence.json
           if-no-files-found: warn
           retention-days: 7
   overlay-independent:

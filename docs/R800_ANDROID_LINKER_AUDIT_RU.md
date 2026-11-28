@@ -99,3 +99,12 @@ entrypoint gate; общий inventory сохраняет прежний стат
 прямой экспорт может разрешаться через зависимости или eglGetProcAddress;
 REVIEW_REQUIRED не означает доказанную несовместимость. Ни dlsym, ни
 EGL init, ни KBASE runtime не выполняются. Donor archive отсутствует.
+
+## ARM32 synthetic EGL link probe
+
+Изолированный Bionic/QEMU с hash-pinned reference runtime проверяет split,
+combined, неполный экспорт glUseProgram, отказ загрузки private library
+по имени и абсолютному пути, восстановление и стабильность FD после
+warmup. Библиотеки синтетические, с NDK EGL/GLES prototypes, но функции
+не вызываются. Никаких реальных EGL init, GPU, SurfaceFlinger или donor
+библиотек. CI публикует только JSON evidence, safe_to_flash=false.
