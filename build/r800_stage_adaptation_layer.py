@@ -16,6 +16,7 @@ from r800_stage_device_layer import COMPILED, OVERLAY, SCRIPTS, destination, CHA
 from r800_stage_tizen_runtime import FIRMWARE, DONORS, TARGETS
 from r800_verify_tizen_stage import unique_keys, guest_name
 from r800_gps_link_gate import audit
+from r800_tizen_config_layout import layout, check_guest, materialize, verify_dir
 
 MAX_FILE = 64*1024**2
 MAX_TOTAL = 1536*1024**2
@@ -68,14 +69,16 @@ def load(root, name, pin, source_sha, runtime):
     else:
         require(files.keys() == DEVICE.keys(), "Unexpected device inventory")
         require(valid_pin(report.get("component_manifest_sha256")), "Missing component manifest pin")
-    dirs = set()
+    mountpoints = layout(report, files) if runtime else {}
+    require(runtime or not report.get("chroot_mountpoints"), "Device layer must not declare Tizen mountpoints")
+    dirs = set(mountpoints)
     for path, row in files.items():
         require(isinstance(path, str) and len(path) <= 1024 and
                 all(re.fullmatch(r"[A-Za-z0-9_.@+-]+", p) and p not in (".","..") for p in path.split("/")),
                 "Unsafe layer path")
         if runtime:
             if path.startswith("r800dev/tzlite/"):
-                guest_name(path.removeprefix("r800dev/tzlite"))
+                check_guest(path, mountpoints)
             else:
                 require(path in RUNTIME_REQUIRED, "Unexpected runtime path")
         require(type(row.get("bytes")) is int and 0 < row["bytes"] <= MAX_FILE and
@@ -99,6 +102,7 @@ def load(root, name, pin, source_sha, runtime):
             s = entry.stat(follow_symlinks=False)
             if stat.S_ISDIR(s.st_mode):
                 require(rel in dirs and not s.st_mode & 0o7000, "Unexpected layer directory: "+rel)
+                verify_dir(p, rel, mountpoints)
                 seen_dirs.add(rel)
                 pending.append(p)
             else:
@@ -142,6 +146,8 @@ def assemble(device, device_sha, runtime, runtime_sha, output, source_sha):
                 dest.chmod(int(row["mode"],8))
                 rows[path] = {k:row[k] for k in ("bytes","sha256","mode")}
                 rows[path]["layer"] = "tizen-runtime" if kind else "device"
+        mountpoints = layout(t, t["files"])
+        materialize(stage, mountpoints)
         for module in ("audio.primary.r800.so","gps.r800.so","hwcomposer.r800.so","sensors.r800.so"):
             require(rows["vendor/lib/hw/"+module]["sha256"] == rows["r800dev/hwc/"+module]["sha256"],
                     "HAL copies differ: "+module)
@@ -159,8 +165,9 @@ def assemble(device, device_sha, runtime, runtime_sha, output, source_sha):
                   "source_sha":source_sha,"device_manifest_sha256":device_sha,
                   "runtime_manifest_sha256":runtime_sha,"files":rows,
                   "total_bytes":sum(r["bytes"] for r in rows.values()),
+                  "chroot_mountpoints":mountpoints,
                   "missing_inputs":["Wear OS system and complete Android vendor",
-                                    "Tizen configuration/plugins/mountpoints and ownership",
+                                    "Additional Tizen configuration/plugins and ownership",
                                     "Display assets and validated kernel handover",
                                     "Independent hardware and recovery acceptance"],
                   "donor_authenticity_verified":False,"full_runtime_built":False,
