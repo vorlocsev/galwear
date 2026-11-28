@@ -27,6 +27,7 @@ import r800_review_handover as handover
 import r800_installation_layout as installation
 import r800_development_readiness as readiness
 import r800_bind_stock_donor as stock_binding
+import r800_bind_pixel_system as pixel_binding
 import test_r800_build_local_android as android_fixture
 import test_r800_stage_integrated_development as kernel_fixture
 import test_r800_stage_adaptation_layer as runtime_fixture
@@ -120,6 +121,7 @@ class UnifiedPipelineTests(unittest.TestCase):
         self.assertEqual(final["checks"]["stage_chain"],"STATIC_PASS")
         self.assertEqual(final["checks"]["recovery_inputs"],"NOT_SUPPLIED")
         self.assertEqual(final["checks"]["stock_donor_evidence"],"NOT_SUPPLIED")
+        self.assertEqual(final["checks"]["pixel_system_evidence"],"NOT_SUPPLIED")
         self.assertEqual(final["handover"]["checks"]["display_assets"],"STATIC_PASS")
         self.assertEqual(final["handover"]["missing_display_assets"],[])
         self.assertEqual(final["installation"]["partition_layout"]["p15"]["files"].keys(),
@@ -210,6 +212,65 @@ class UnifiedPipelineTests(unittest.TestCase):
             data["stock_donor_bindings"]["j4"]["image"]["bytes"]+=1
             summary.write_text(json.dumps(data))
             with self.assertRaisesRegex(ValueError,"Saved stock binding differs"):
+                readiness.readiness(self.output,pipeline.sha(summary.read_bytes()),SOURCE)
+
+
+    def pixel_fixture(self):
+        raw={"bytes":self.paths["system"].stat().st_size,"sha256":self.pins["system"]}
+        fs={"kind":"EXT4","partition_bytes":raw["bytes"]}
+        factory=pixel_binding.FACTORY_SHA256
+        identity={"schema":"galwear-r800-partition-identity-v1","source_sha":SOURCE,
+                  "partition":"system","image_sha256":raw["sha256"],"filesystem":fs,
+                  **{k:False for k in ("donor_authenticity_verified","wear_os_runtime_verified",
+                                       "hardware_tested","safe_to_flash")}}
+        data={"schema":"galwear-r800-pixel-raw-donor-v1","status":pixel_binding.STATUS,
+              "source_sha":SOURCE,"factory_sha256":factory,"documented_factory_pin_matched":True,
+              "factory_extraction":{"status":"PIXEL_DONOR_EXTRACTED_ONLY","factory_sha256":factory,
+                 "nested_zip":{"bytes":4096,"sha256":"e"*64},"images":{"system.img":raw},
+                 "system_adaptation_verified":False,"vendor_compatibility_verified":False,
+                 "safe_to_flash":False},
+              "mode":"direct","metadata_slot":None,"super_extraction":None,
+              "partitions":{"system":{"file":"system.img",**raw,"filesystem":fs,"identity":identity,
+                 "provenance":{"format":"raw","source_sha256":raw["sha256"],"source_bytes":raw["bytes"],
+                               "raw_sha256":raw["sha256"],"raw_bytes":raw["bytes"]}}},
+              **{k:False for k in pixel_binding.FLAGS}}
+        path=self.root/"pixel-stock.json"
+        path.write_text(json.dumps(data))
+        return path,pipeline.sha(path.read_bytes())
+
+    def fake_pixel(self,image,image_pin,report,report_pin,source_sha):
+        self.assertEqual(image_pin,pipeline.sha(image.read_bytes()))
+        self.assertEqual(report_pin,pipeline.sha(report.read_bytes()))
+        return pixel_binding.describe(json.loads(report.read_bytes()),image_pin,report_pin,source_sha)
+
+    def test_build_with_all_donor_evidence(self):
+        pixel=self.pixel_fixture()
+        stock=self.stock_fixture()
+        with ExitStack() as stack:
+            self.context(stack)
+            check=stack.enter_context(patch.object(pipeline,"verify_pixel",side_effect=self.fake_pixel))
+            stack.enter_context(patch.object(pipeline,"verify_stock",side_effect=self.fake_stock))
+            result=pipeline.build(self.paths,self.pins,self.output,SOURCE,
+                                  stock_evidence=stock,pixel_evidence=pixel)
+            summary=self.output/"local-build-evidence.json"
+            final=readiness.readiness(self.output,pipeline.sha(summary.read_bytes()),SOURCE)
+        self.assertEqual(check.call_count,2)
+        self.assertEqual(final["checks"]["pixel_system_evidence"],"SAVED_REPORT_CHAIN_ONLY")
+        self.assertEqual(final["checks"]["stock_donor_evidence"],"SAVED_REPORT_CHAIN_ONLY")
+        self.assertEqual(result["pixel_system_binding"],final["pixel_system_binding"])
+        self.assertFalse(final["safe_to_flash"])
+
+    def test_rehashed_pixel_binding_summary_rejected(self):
+        pixel=self.pixel_fixture()
+        with ExitStack() as stack:
+            self.context(stack)
+            stack.enter_context(patch.object(pipeline,"verify_pixel",side_effect=self.fake_pixel))
+            pipeline.build(self.paths,self.pins,self.output,SOURCE,pixel_evidence=pixel)
+            summary=self.output/"local-build-evidence.json"
+            data=json.loads(summary.read_bytes())
+            data["pixel_system_binding"]["image"]["bytes"]+=1
+            summary.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError,"Saved Pixel binding differs"):
                 readiness.readiness(self.output,pipeline.sha(summary.read_bytes()),SOURCE)
 
 
