@@ -975,6 +975,7 @@ def audit_graphics_dependencies(root, kernel_config=None, dtb=None):
     report["uninspected_symbol_tables"] = unknown_symbols
     if (not invalid and not report["errors"] and not unknown_symbols and
             inventory["status"] == "STATIC_GRAPHICS_INVENTORY_ONLY" and
+            inventory["entrypoint_evidence"]["status"] == "STATIC_GRAPHICS_MINIMUM_EXPORTS_ONLY" and
             graph["status"] == "CANDIDATES_FOUND_ONLY"):
         report["status"] = "STATIC_GRAPHICS_DEPENDENCY_CANDIDATES_ONLY"
     return report

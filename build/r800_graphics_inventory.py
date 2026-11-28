@@ -34,6 +34,88 @@ EGL_SUFFIX = re.compile(r"[A-Za-z0-9_-]{1,80}")
 EGL_DRIVER = re.compile(r"(libEGL|libGLESv1_CM|libGLESv2|libGLES)(?:_([A-Za-z0-9_-]+))?\.so")
 
 
+# Minimum diagnostic subset, not a complete Khronos conformance contract.
+ENTRYPOINTS = {
+    "libEGL": ("eglGetDisplay", "eglInitialize", "eglChooseConfig",
+               "eglCreateContext", "eglDestroyContext", "eglMakeCurrent",
+               "eglGetProcAddress", "eglSwapBuffers", "eglTerminate"),
+    "libGLESv2": ("glGetString", "glGetError", "glClear", "glDrawArrays",
+                  "glCreateShader", "glShaderSource", "glCompileShader",
+                  "glCreateProgram", "glLinkProgram", "glUseProgram"),
+    "libGLESv1_CM": ("glGetString", "glGetError", "glClear", "glDrawArrays"),
+}
+
+
+def entrypoint_evidence(path, info):
+    """Report directly visible defined exports only; never infer dlsym success."""
+    name = path.rsplit("/", 1)[1]
+    match = EGL_DRIVER.fullmatch(name)
+    role = match.group(1) if match else None
+    if role == "libGLES":
+        required = sorted(set(ENTRYPOINTS["libEGL"] + ENTRYPOINTS["libGLESv2"]))
+    elif role in ENTRYPOINTS:
+        required = list(ENTRYPOINTS[role])
+    elif name.startswith(("gralloc.", "hwcomposer.")) and path.rsplit("/",1)[0].endswith("/hw"):
+        role, required = "legacy_hal", ["HMI"]
+    else:
+        return {"status": "NO_ENTRYPOINT_POLICY", "role": None,
+                "runtime_resolution_verified": False}
+    # STT_FUNC / STT_NOTYPE for functions (NOTYPE is a review candidate, not
+    # proof of a callable function); HMI must be a data object.
+    allowed = {1} if role == "legacy_hal" else {2}
+    found, untyped, incompatible = set(), set(), set()
+    checked = info.get("dynamic_symbol_count") is not None
+    for symbol in info.get("symbol_exports", ()):
+        symbol_name = symbol["name"]
+        if symbol_name not in required:
+            continue
+        if (symbol.get("version_hidden") or symbol.get("binding") not in (1, 2)
+                or symbol.get("visibility") not in (0, 3)):
+            incompatible.add(symbol_name)
+        elif symbol["type"] in allowed:
+            found.add(symbol_name)
+        elif role != "legacy_hal" and symbol["type"] == 0:
+            untyped.add(symbol_name)
+        else:
+            incompatible.add(symbol_name)
+    missing = sorted(set(required) - found)
+    return {"status": ("UNINSPECTED" if not checked else
+                       "STATIC_MINIMUM_EXPORTS_ONLY" if not missing else "REVIEW_REQUIRED"),
+            "role": role, "required": required, "direct_exports": sorted(found),
+            "missing_or_unconfirmed": missing,
+            "untyped_candidates": sorted(untyped - found),
+            "incompatible_candidates": sorted(incompatible - found),
+            "runtime_resolution_verified": False}
+
+
+def graphics_entrypoints(libraries, groups, abi):
+    selected = {path: info["entrypoints"] for path, info in libraries.items()
+                if info and info["abi"] == abi and
+                info["entrypoints"]["status"] != "NO_ENTRYPOINT_POLICY"}
+    complete = []
+    for group in groups["groups"]:
+        if not group["structurally_complete"]:
+            continue
+        roles = group["libraries"]
+        def good(role):
+            return selected.get(roles.get(role), {}).get("status") == "STATIC_MINIMUM_EXPORTS_ONLY"
+        # Alternative combined/split layouts are reported independently.
+        combined = good("libGLES")
+        split = good("libEGL") and good("libGLESv2")
+        complete.append({"directory": group["directory"], "suffix": group["suffix"],
+                         "combined_minimum_exports": combined, "split_minimum_exports": split})
+    blockers = sorted(path for path, item in selected.items()
+                      if item["status"] != "STATIC_MINIMUM_EXPORTS_ONLY")
+    ready = (groups["status"] == "STATIC_EGL_DRIVER_GROUP_ONLY" and
+             len(complete) == 1 and
+             (complete[0]["combined_minimum_exports"] or complete[0]["split_minimum_exports"])
+             and not blockers)
+    return {"status": "STATIC_GRAPHICS_MINIMUM_EXPORTS_ONLY" if ready else "REVIEW_REQUIRED",
+            "abi": abi, "libraries": selected, "groups": complete,
+            "review_libraries": blockers, "runtime_resolution_verified": False,
+            "egl_initialized": False, "safe_to_flash": False}
+
+
 def egl_driver_candidates(root, libraries, abi):
     """Group drivers by ABI, directory and suffix; do not predict runtime priority."""
     hints, errors, groups = {}, [], {}
@@ -249,7 +331,8 @@ def audit(root, init, vintf, inspect_elf, kernel_config=None, dtb=None):
                                                 "version_needs": info["version_needs"],
                                                 "version_definitions": info["version_definitions"],
                                                 "dynamic_symbol_count": info["dynamic_symbol_count"],
-                                                "custom_search_path": info["custom_search_path"]}
+                                                "custom_search_path": info["custom_search_path"],
+                                                "entrypoints": entrypoint_evidence(guest, info)}
                         except (OSError, ValueError) as exc:
                             errors.append(guest + ": " + str(exc))
                             if "budget exceeded" in str(exc):
@@ -297,6 +380,7 @@ def audit(root, init, vintf, inspect_elf, kernel_config=None, dtb=None):
             "surfaceflinger_abi": sf_abi, "services": services, "declared_hals": declared,
             "missing_hal_declarations": missing, "libraries": libraries, "candidates": candidates,
             "egl_driver_groups": driver_groups,
+            "entrypoint_evidence": graphics_entrypoints(libraries, driver_groups, sf_abi),
             "mali_evidence": mali_evidence(libraries, sf_abi, kernel_config, dtb),
             "device_nodes": nodes, "kernel_config": None if kernel_config is None else
             {key: kernel_config.get(key) for key in KERNEL_KEYS},
