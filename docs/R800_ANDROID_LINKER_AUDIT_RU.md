@@ -119,3 +119,13 @@ terminate, reinitialize/reload и проверка FD. Это не полноц�
 реализация, не проверка EGL conformance или реального рендеринга.
 Не моделируются deferred destruction, concurrency или настоящие native
 windows. Реальные EGL, GPU и SurfaceFlinger не инициализируются.
+
+## ARM32 synthetic EGL/GLES context integration
+
+Отдельная combined fixture разделяет состояние EGL context с ограниченной
+моделью GLES. 4 цикла: отсутствие current context, отказ draw до use,
+искусственный compile/link failure и повторная попытка, 12 счётчиков
+условного draw, unbind и сброс состояния при destroy/terminate. Никаких
+реальных GLSL compilation, shader attachment/linking, rasterization или
+pixel output. Даже поведение без current context — исключительно контракт
+fixture, не утверждение о GLES conformance. Evidence хранит отдельный marker.

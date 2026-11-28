@@ -21,11 +21,13 @@ LIBS = {
     "libGLESv2_galwear_incomplete.so": ("FIXTURE_GLES","FIXTURE_INCOMPLETE"),
     "libGLES_galwear_private.so": ("FIXTURE_EGL","FIXTURE_GLES"),
     "libEGL_galwear_lifecycle.so": (),
+    "libGLES_galwear_context.so": ("FIXTURE_CONTEXT_GLES",),
 }
 PRIVATE = "libGLES_galwear_private.so"
 INCOMPLETE = "libGLESv2_galwear_incomplete.so"
 MARKER = "EGL_LINK_FIXTURE_PASS cycles=4 split=1 combined=1 missing=1 private_denials=2 recovery=1 fd_stable=1"
 LIFECYCLE_MARKER = "EGL_LIFECYCLE_FIXTURE_PASS cycles=5 swaps=15 errors=35 partial_rollback=5 reload=1 fd_stable=1"
+CONTEXT_MARKER = "EGL_GLES_CONTEXT_FIXTURE_PASS cycles=4 draw_model=12 compile_recovery=4 link_recovery=4 context_reset=4 fd_stable=1"
 
 
 def config():
@@ -80,7 +82,7 @@ def run(ndk, runtime, manifest, output, source_sha):
         fixtures={}
         for name,defines in LIBS.items():
             target=root/"vendor/lib/egl"/name
-            source = ("r800-egl-lifecycle-fixture.c" if name=="libEGL_galwear_lifecycle.so"
+            source = ("r800-egl-lifecycle-fixture.c" if name in ("libEGL_galwear_lifecycle.so","libGLES_galwear_context.so")
                       else "r800-egl-fixture.c")
             subprocess.run(flags+["-shared","-fPIC",*("-D"+d for d in defines),
                 str(ROOT/"src/initramfs"/source),"-Wl,-soname,"+name,"-o",str(target)],
@@ -111,13 +113,14 @@ def run(ndk, runtime, manifest, output, source_sha):
             "--dev","/dev","--proc","/proc","--chdir","/",
             "/qemu","-cpu","cortex-a15","-L","/","/system/bin/egl-probe"],
             capture_output=True,text=True,timeout=60)
-        if result.returncode or result.stdout.strip().splitlines()!=[MARKER,LIFECYCLE_MARKER]:
+        if result.returncode or result.stdout.strip().splitlines()!=[MARKER,LIFECYCLE_MARKER,CONTEXT_MARKER]:
             raise ValueError("Synthetic EGL link failed: "+str(result.returncode)+" "+result.stderr[:4000])
         report={"status":"ARM32_SYNTHETIC_EGL_LINK_ONLY","source_sha":source_sha,
                 "runtime_sha256":pins,"fixture_libraries":fixtures,"probe_sha256":probe_sha,
                 "namespace_config_sha256":sha(cfg.read_bytes()),"marker":MARKER,
                 "synthetic_dlsym_verified":True,"synthetic_lifecycle_verified":True,
-                "synthetic_lifecycle_marker":LIFECYCLE_MARKER,"donor_driver_loaded":False,
+                "synthetic_lifecycle_marker":LIFECYCLE_MARKER,"synthetic_context_gles_verified":True,
+                "synthetic_context_marker":CONTEXT_MARKER,"donor_driver_loaded":False,
                 "egl_initialized":False,"surfaceflinger_started":False,
                 "gpu_hardware_verified":False,"safe_to_flash":False}
         (output/"egl-link-evidence.json").write_text(json.dumps(report,sort_keys=True)+"\n")

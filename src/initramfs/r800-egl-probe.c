@@ -1,5 +1,6 @@
 /* ARM32 Bionic dlsym and synthetic EGL lifecycle only; no GPU device. */
 #include <EGL/egl.h>
+#include <GLES2/gl2.h>
 #include <assert.h>
 #include <dlfcn.h>
 #include <dirent.h>
@@ -51,7 +52,42 @@ static void *resolve(void *h,const char *name) {
 }
 #define RESOLVE(name) __typeof__(&name) p_##name=(__typeof__(&name))resolve(h,#name)
 #define EXPECT_ERROR(e) do {assert(p_eglGetError()==(e));assert(p_eglGetError()==EGL_SUCCESS);}while(0)
-static void lifecycle(void *h) {
+static void gles_context(void *h,int stage) {
+    RESOLVE(glGetString);RESOLVE(glGetError);RESOLVE(glCreateShader);
+    RESOLVE(glShaderSource);RESOLVE(glCompileShader);RESOLVE(glGetShaderiv);
+    RESOLVE(glCreateProgram);RESOLVE(glLinkProgram);RESOLVE(glGetProgramiv);
+    RESOLVE(glUseProgram);RESOLVE(glClear);RESOLVE(glDrawArrays);
+    int (*count)(void)=(int (*)(void))resolve(h,"galwear_fixture_draw_count");
+    if(stage!=1) {
+        assert(p_glGetString(GL_VERSION)==0);
+        assert(p_glGetError()==GL_INVALID_OPERATION);
+        assert(p_glGetError()==GL_NO_ERROR);
+        assert(count()==(stage==2?3:0));
+        return;
+    }
+    assert(strcmp((const char *)p_glGetString(GL_VERSION),"OpenGL ES 2.0 GalWear synthetic")==0);
+    assert(count()==0);
+    assert(p_glGetError()==GL_NO_ERROR);
+    p_glDrawArrays(GL_TRIANGLES,0,3);
+    assert(p_glGetError()==GL_INVALID_OPERATION);
+    GLuint shader=p_glCreateShader(GL_VERTEX_SHADER);
+    assert(shader);
+    const GLchar *bad="invalid",*good="void main(){gl_Position=vec4(0.0);}";
+    GLint ok=-1;
+    p_glShaderSource(shader,1,&bad,0);p_glCompileShader(shader);
+    p_glGetShaderiv(shader,GL_COMPILE_STATUS,&ok);assert(ok==0);
+    GLuint program=p_glCreateProgram();assert(program);
+    p_glLinkProgram(program);p_glGetProgramiv(program,GL_LINK_STATUS,&ok);assert(ok==0);
+    p_glUseProgram(program);assert(p_glGetError()==GL_INVALID_OPERATION);
+    p_glShaderSource(shader,1,&good,0);p_glCompileShader(shader);
+    p_glGetShaderiv(shader,GL_COMPILE_STATUS,&ok);assert(ok==1);
+    p_glLinkProgram(program);p_glGetProgramiv(program,GL_LINK_STATUS,&ok);assert(ok==1);
+    p_glUseProgram(program);p_glClear(GL_COLOR_BUFFER_BIT);
+    for(int i=0;i<3;++i)p_glDrawArrays(GL_TRIANGLES,0,3);
+    assert(p_glGetError()==GL_NO_ERROR && count()==3);
+    p_glUseProgram(0);
+}
+static void lifecycle(void *h,int with_gles) {
     RESOLVE(eglGetDisplay);RESOLVE(eglInitialize);RESOLVE(eglGetError);
     RESOLVE(eglBindAPI);RESOLVE(eglChooseConfig);RESOLVE(eglCreateContext);
     RESOLVE(eglCreatePbufferSurface);RESOLVE(eglMakeCurrent);RESOLVE(eglSwapBuffers);
@@ -81,28 +117,36 @@ static void lifecycle(void *h) {
     EGLSurface s=p_eglCreatePbufferSurface(d,config,pbattrs);
     assert(s!=EGL_NO_SURFACE);
     assert(!p_eglMakeCurrent(d,s,s,EGL_NO_CONTEXT));EXPECT_ERROR(EGL_BAD_CONTEXT);
+    if(with_gles)gles_context(h,0);
     assert(p_eglMakeCurrent(d,s,s,c));
+    if(with_gles)gles_context(h,1);
     assert(!p_eglSwapBuffers(d,EGL_NO_SURFACE));EXPECT_ERROR(EGL_BAD_SURFACE);
     for(int i=0;i<3;++i)assert(p_eglSwapBuffers(d,s));
     assert(p_eglMakeCurrent(d,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT));
+    if(with_gles)gles_context(h,2);
     assert(p_eglDestroySurface(d,s));
     assert(p_eglDestroyContext(d,c));
     assert(p_eglTerminate(d));
+    if(with_gles)gles_context(h,3);
     assert(!p_eglChooseConfig(d,cfgattrs,&config,1,&count));EXPECT_ERROR(EGL_NOT_INITIALIZED);
 }
 static void lifecycle_cycles(void) {
     void *h=load("libEGL_galwear_lifecycle.so");
-    for(int i=0;i<4;++i)lifecycle(h);
+    for(int i=0;i<4;++i)lifecycle(h,0);
     assert(dlclose(h)==0);
-    h=load("libEGL_galwear_lifecycle.so");lifecycle(h);assert(dlclose(h)==0);
+    h=load("libEGL_galwear_lifecycle.so");lifecycle(h,0);assert(dlclose(h)==0);
 }
 int main(void) {
     exercise(); /* warm up lazy runtime resources before fd baseline */
     int before=fds();
     for(int i=0;i<4;++i){exercise();assert(fds()==before);}
     lifecycle_cycles();
+    void *combined=load("libGLES_galwear_context.so");
+    for(int i=0;i<4;++i)lifecycle(combined,1);
+    assert(dlclose(combined)==0);
     assert(fds()==before);
     puts("EGL_LINK_FIXTURE_PASS cycles=4 split=1 combined=1 missing=1 private_denials=2 recovery=1 fd_stable=1");
     puts("EGL_LIFECYCLE_FIXTURE_PASS cycles=5 swaps=15 errors=35 partial_rollback=5 reload=1 fd_stable=1");
+    puts("EGL_GLES_CONTEXT_FIXTURE_PASS cycles=4 draw_model=12 compile_recovery=4 link_recovery=4 context_reset=4 fd_stable=1");
     return 0;
 }
