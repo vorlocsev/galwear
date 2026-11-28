@@ -74,6 +74,18 @@ class ChargerAssetsTests(unittest.TestCase):
         self.assertEqual(splash[:4],b"\0\0\0\xff")
         self.assertEqual(splash[(179*360+179)*4:(179*360+179)*4+4],b"\x56\x34\x12\xff")
 
+    def test_generated_assets_accepted_by_device_intake(self):
+        import sys
+        sys.path.insert(0,str(ROOT/"build"))
+        from r800_display_asset_layer import load_assets
+        result=self.generate()
+        self.assertEqual(result.returncode,0,result.stderr)
+        pin=hashlib.sha256((self.out/"assets-evidence.json").read_bytes()).hexdigest()
+        data=load_assets(self.out,pin)
+        self.assertEqual(set(data),{"r800dev/"+n for n in SIZES})
+        for name,raw in data.items():
+            self.assertEqual(raw,(self.out/name.removeprefix("r800dev/")).read_bytes())
+
     def test_duplicate_digit_rejected(self):
         self.prepare(duplicate=True)
         self.assertNotEqual(self.generate().returncode,0)
