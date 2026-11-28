@@ -1395,6 +1395,28 @@ jobs:
           sh build/r800_gps_glibc_qemu.sh "$RUNNER_TEMP/android-ndk-r27c" "$ref/libs" 2>&1 | tee "$ref/reference-qemu-glibc.log"
           grep -Fx 'QEMU_USER_ONLY=PASS' "$ref/reference-qemu-glibc.log"
           echo "DEBIAN_REFERENCE_QEMU_PROBE_PASS; tizen_donor_verified=false; gnss_runtime_verified=false; safe_to_flash=false"
+      - name: Resolve actual staged GPSBridge libraries in isolated ARM32 loader
+        run: |
+          set -eu
+          ref="$RUNNER_TEMP/r800-debian-glibc-reference"
+          python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["files"]))' "$ref/reference-origin.json" > "$ref/loader-pins.json"
+          python3 build/r800_stage_runtime_layer.py --libdir "$ref/libs" --pins "$ref/loader-pins.json" \
+            --ndk "$RUNNER_TEMP/android-ndk-r27c" --output "$RUNNER_TEMP/r800-loader-runtime" \
+            --source-sha "$GITHUB_SHA" --scope DEBIAN_REFERENCE_NOT_TIZEN
+          pin=$(sha256sum "$RUNNER_TEMP/r800-loader-runtime/runtime-layer-evidence.json" | cut -d' ' -f1)
+          python3 build/r800_runtime_loader_qemu.py --runtime "$RUNNER_TEMP/r800-loader-runtime" \
+            --runtime-sha256 "$pin" --scope DEBIAN_REFERENCE_NOT_TIZEN \
+            --source-sha "$GITHUB_SHA" --output "$ref/reference-loader-qemu.json"
+          python3 - "$ref/reference-loader-qemu.json" <<'PY'
+          import json, os, sys
+          r=json.load(open(sys.argv[1]))
+          assert r["source_sha"]==os.environ["GITHUB_SHA"]
+          assert r["status"]=="ARM32_LOADER_LIST_PASS" and r["scope"]=="DEBIAN_REFERENCE_NOT_TIZEN"
+          assert "libc.so.6" in r["checks"]["/opt/usr/r800dev/gpsbridge"]["resolved"]
+          for flag in ("daemon_startup_verified","dlopen_runtime_verified","gnss_runtime_verified","hardware_tested","safe_to_flash"):
+              assert r[flag] is False
+          print("REAL_STAGED_REFERENCE_LOADER_PASS")
+          PY
       - name: Isolated synthetic GPS HAL and daemon recovery against Debian reference
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
@@ -1454,6 +1476,7 @@ jobs:
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-origin.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-prelink.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-glibc.log
+            ${{ runner.temp }}/r800-debian-glibc-reference/reference-loader-qemu.json
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-mock.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-qemu-xtra.log
             ${{ runner.temp }}/r800-debian-glibc-reference/reference-repeatability-*.json
