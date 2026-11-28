@@ -134,6 +134,18 @@ def check(config,output,source_sha):
             "donor_authenticity_verified":False,"hardware_tested":False,"safe_to_flash":False}
 
 
+def runtime_diagnostics(config,values,source_sha):
+    env=config["environment"]
+    require(env is not None and len(env)==6,"Runtime diagnostics require host and ELF locks")
+    require(len(values)==6,"Expected loader, Python runtime and import report pairs")
+    # Keep runtime diagnostics separate from the privileged assembly path.
+    from r800_host_runtime_diagnostic_chain import check as check_runtime
+    bundle={"lock":env[:2],"elf":env[4:6]}
+    for i,name in enumerate(("loader","runtime","imports")):
+        bundle[name]=(Path(values[2*i]),values[2*i+1])
+    return check_runtime(bundle,source_sha)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace",type=Path,required=True)
@@ -142,11 +154,17 @@ def main():
     parser.add_argument("--source-sha",required=True)
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--mode",choices=("check","build"),default="check")
+    parser.add_argument("--runtime-diagnostics",nargs=6,
+                        metavar=("LOADER","LOADER_SHA","PYTHON","PYTHON_SHA","IMPORTS","IMPORTS_SHA"))
     a=parser.parse_args()
+    require(a.mode=="check" or a.runtime_diagnostics is None,
+            "Saved runtime diagnostics are check-mode only")
     cfg=load(a.workspace,a.manifest,a.manifest_sha256,a.source_sha)
     if a.mode=="check":
         result=check(cfg,a.output,a.source_sha)
         result["local_manifest_sha256"]=a.manifest_sha256
+        if a.runtime_diagnostics is not None:
+            result["runtime_diagnostics"]=runtime_diagnostics(cfg,a.runtime_diagnostics,a.source_sha)
     else:
         # The existing builder independently checks all pins and evidence
         # before and after assembly, and publishes only after readiness.
