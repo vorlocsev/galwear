@@ -94,7 +94,7 @@ def walk(load, candidates, roots=ROOTS, runtime_loads=None):
             "symbol_resolution_verified":False,"art_initialized":False,"safe_to_flash":False}
 
 
-def audit(sources):
+def audit(sources,*,roots=ROOTS):
     """sources: fixed labels -> (debugfs, private image, private scratch)."""
     if not {"system","runtime","art"} <= set(sources) <= {"system","runtime","art","statsd"}:
         raise ValueError("Expected selected System, Runtime, ART and optional StatsD filesystems")
@@ -121,7 +121,26 @@ def audit(sources):
         label,path=key.split(":",1)
         tool,image,scratch=sources[label]
         return ext4_member(tool,image,path,MAX_MEMBER,scratch)
-    result=walk(load,candidates,runtime_loads=RUNTIME_LOADS)
+    result=walk(load,candidates,roots=roots,runtime_loads=RUNTIME_LOADS)
     result["selected_directories"]={p:{"status":v["status"],"entries":len(v["entries"])}
                                     for p,v in listings.items()}
+    return result
+
+def audit_vm(sources):
+    """Discover the original standalone VM and its separate static closure."""
+    tool,image,scratch=sources["art"]
+    listing=list_directory(tool,image,"/bin")
+    names=("dalvikvm32","dalvikvm","dalvikvm64")
+    entries={n:listing["entries"].get(n,{"type":"NOT_FOUND"}) for n in names}
+    root="art:/bin/dalvikvm32"
+    result={"status":"REVIEW_REQUIRED","bin_entries":entries,
+            "guest_executed":False,"java_code_executed":False,"safe_to_flash":False}
+    if entries["dalvikvm32"].get("type")!="regular":
+        result["reason"]="Original regular dalvikvm32 not observed"
+        return result
+    closure=audit(sources,roots=(root,))
+    result["graph"]=closure
+    if root in closure["objects"] and not closure["review"] and all(
+            e["eligible_candidates"] for e in closure["edges"]):
+        result["status"]="DALVIKVM32_STATIC_CANDIDATES_ONLY"
     return result
