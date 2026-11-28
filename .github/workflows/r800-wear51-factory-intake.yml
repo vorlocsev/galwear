@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs
+          sudo apt-get install -y --no-install-recommends e2fsprogs binutils
           PYTHONPATH=build python3 - <<'PY'
           import json, os
           from pathlib import Path
@@ -80,6 +80,43 @@ jobs:
                   runtime=audit(path,pin,source)
                   (evidence/"runtime-layout.json").write_text(json.dumps(runtime,indent=2,sort_keys=True)+"\n")
                   print("WEAR51_RUNTIME_MEMBERS",json.dumps(runtime["members"],sort_keys=True))
+                  print("WEAR51_RUNTIME_DIRECTORIES",json.dumps({p:{"status":v["status"],"names":sorted(v["entries"]),"reason":v.get("reason")} for p,v in runtime["directories"].items()},sort_keys=True))
+                  print("WEAR51_RUNTIME_MODULES",json.dumps(runtime["module_candidates"],sort_keys=True))
+                  # Compare rejected TLS layouts with independent host readelf.
+                  # Only metadata; no guest execution or relaxation of the validator.
+                  import hashlib, shutil, tempfile, subprocess, re
+                  from r800_extract_ext4 import snapshot_image
+                  from r800_framework_inventory import ext4_member, MAX_MEMBER
+                  from r800_donor_preflight import digest
+                  diagnostics={}
+                  with tempfile.TemporaryDirectory(dir=root) as tmp:
+                      scratch=Path(tmp)
+                      private=scratch/"system.img"
+                      snapshot_image(path,private,pin)
+                      tool=shutil.which("debugfs")
+                      readelf=shutil.which("readelf")
+                      assert tool and readelf
+                      for member in ("/system/lib/libc++.so","/system/lib/libhidlbase.so","/system/lib/libutils.so"):
+                          raw=ext4_member(tool,private,member,MAX_MEMBER,scratch)
+                          if raw is None:
+                              diagnostics[member]={"status":"NOT_FOUND"}
+                              continue
+                          target=scratch/"elf"
+                          target.write_bytes(raw)
+                          try:
+                              proc=subprocess.run([readelf,"-W","-h","-l","-d",str(target)],capture_output=True,text=True,timeout=30,check=True)
+                              lines=proc.stdout.splitlines()
+                              diagnostics[member]={"status":"INDEPENDENT_ELF_HEADER_OBSERVATION_ONLY",
+                                  "sha256":hashlib.sha256(raw).hexdigest(),
+                                  "strict_observation":runtime["members"].get(member),
+                                  "program_headers":[line.strip() for line in lines if re.match(r"\s+(?:LOAD|TLS|GNU_RELRO|DYNAMIC)\s",line)],
+                                  "dynamic_needed":[line.strip() for line in lines if "(NEEDED)" in line],
+                                  "stderr":proc.stderr[:2048]}
+                          finally:
+                              target.unlink()
+                      assert digest(private,4*1024**3)["sha256"]==digest(path,4*1024**3)["sha256"]==pin
+                  (evidence/"elf-tls-diagnostics.json").write_text(json.dumps({"source_sha":source,"image_sha256":pin,"members":diagnostics,"safe_to_flash":False},indent=2,sort_keys=True)+"\n")
+                  print("WEAR51_ELF_TLS_DIAGNOSTICS",json.dumps(diagnostics,sort_keys=True))
           if "super.img" in images:
               assert "system.img" not in images, "Ambiguous System source"
               raw=root/"super.raw"
@@ -124,5 +161,6 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/super-inventory.json
             ${{ runner.temp }}/wear51-evidence/partitions.json
             ${{ runner.temp }}/wear51-evidence/runtime-layout.json
+            ${{ runner.temp }}/wear51-evidence/elf-tls-diagnostics.json
           if-no-files-found: warn
           retention-days: 7
