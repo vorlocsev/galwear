@@ -89,6 +89,51 @@ class IntegratedDevelopmentTests(unittest.TestCase):
         self.assertFalse((self.out/"r800dev/android/BOOT_ANDROID").exists())
         self.assertFalse(result["safe_to_flash"])
 
+    def handover_fixture(self):
+        fixture=tree_fixture.DevelopmentTreeTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.fixture()
+        with patch.object(stage,"checkout_sha"),patch.object(kernel,"checkout_sha"),patch.object(tree,"checkout_sha"):
+            stage.assemble(self.boot,self.pin,fixture.adaptation,fixture.apin,
+                           fixture.android,fixture.bpin,self.out,SOURCE)
+        return stage.sha((self.out/"integrated-development-evidence.json").read_bytes())
+
+    def test_final_handover_review(self):
+        import r800_review_handover as handover
+        pin=self.handover_fixture()
+        with patch.object(handover,"checkout_sha"):
+            result=handover.review(self.out,pin,SOURCE)
+        self.assertEqual(result["status"],"HOLD_HARDWARE_UNVERIFIED")
+        self.assertEqual(result["checks"]["tree_inventory"],"PASS")
+        self.assertEqual(result["checks"]["android_switch_root"],"NOT_TESTED")
+        self.assertEqual(result["checks"]["local_runtime_startup"],"NOT_TESTED")
+        self.assertIn("splash.raw",result["missing_display_assets"])
+        self.assertFalse(result["safe_to_flash"])
+
+    def test_handover_rejects_modified_file(self):
+        import r800_review_handover as handover
+        pin=self.handover_fixture()
+        target=self.out/"r800dev/start.sh"
+        target.write_bytes(b"modified")
+        with patch.object(handover,"checkout_sha"), self.assertRaisesRegex(ValueError,"Tree member changed"):
+            handover.review(self.out,pin,SOURCE)
+
+    def test_handover_rejects_boot_marker(self):
+        import r800_review_handover as handover
+        pin=self.handover_fixture()
+        (self.out/"r800dev/android/BOOT_ANDROID").touch()
+        with patch.object(handover,"checkout_sha"), self.assertRaisesRegex(ValueError,"Unexpected tree entry"):
+            handover.review(self.out,pin,SOURCE)
+
+    def test_handover_rejects_reference_startup(self):
+        import r800_review_handover as handover
+        with self.assertRaisesRegex(ValueError,"Local runtime observation scope"):
+            handover.runtime_observations(
+                {"schema":"galwear-r800-loader-qemu-v1","status":"ARM32_LOADER_LIST_PASS"},
+                {"schema":"galwear-r800-runtime-entry-qemu-v1","status":"REFERENCE_NEGATIVE_ENTRY_PASS"},
+                "a"*64,SOURCE)
+
     def test_stale_kernel_source(self):
         self.mutate(source_sha="b"*40)
         with self.assertRaisesRegex(ValueError,"same-head functional"):
