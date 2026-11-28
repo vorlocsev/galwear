@@ -56,11 +56,15 @@ def merge_file(stage, rows, name, raw, mode, origin, total):
     if name in rows:
         require(rows[name]["sha256"] == digest and rows[name]["bytes"] == len(raw),
                 "Conflicting runtime file: "+name)
-        # Executable loader mode from closure wins over minimal runtime copy.
+        # Only identical glibc files may overlap. Preserve the staged donor
+        # mode, except that the final PT_INTERP loader must be executable.
         require(rows[name]["mode"] == mode or
-                (name == "r800dev/tzlite/lib/ld-linux.so.3" and
+                (name in {"r800dev/tzlite/lib/"+n for n in DONORS} and
                  {rows[name]["mode"], mode} == {"0o644", "0o755"}),
                 "Conflicting runtime mode: "+name)
+        if name == "r800dev/tzlite/lib/ld-linux.so.3":
+            (stage/name).chmod(0o755)
+            rows[name]["mode"] = "0o755"
         rows[name]["origins"].append(origin)
         return total
     total += len(raw)
