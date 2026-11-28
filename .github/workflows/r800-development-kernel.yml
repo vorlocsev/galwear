@@ -1,0 +1,68 @@
+name: SM-R800 functional development kernel (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-integration-20261127
+    paths:
+      - .github/workflows/r800-development-kernel.yml
+      - build/r800_kernel_compile_development.sh
+      - build/r800_development_kernel.py
+      - build/r800_development_initramfs.py
+      - src/initramfs/init.c
+      - src/initramfs/build.sh
+      - src/kernel/r800.config
+      - src/kernel/r800-wearos.patch
+      - src/dt/r800.dts
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: r800-development-kernel-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  development-kernel:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch exact public source in disposable checkout
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sh build/r800_aosp_source_probe.sh "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/r800-development-source" "$RUNNER_TEMP/r800-development-source-preflight.json"
+          git -C "$RUNNER_TEMP/r800-development-source" sparse-checkout disable
+          test "$(git -C "$RUNNER_TEMP/r800-development-source" rev-parse HEAD)" = 50db73fc799f20a7120a8b5f653b16cc123d856f
+      - name: Compile functional init, kernel Image and DTB offline in container
+        run: |
+          set -eu
+          docker pull alpine:3.21
+          docker image inspect alpine:3.21 --format '{{.Id}}'
+          docker run --rm --pull=never \
+            -e GITHUB_SHA \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$RUNNER_TEMP/r800-development-source:/source" \
+            -v "$RUNNER_TEMP:/scratch" \
+            alpine:3.21 sh -eu -c '
+              apk add --no-cache clang19=19.1.4-r0 lld=19.1.4-r0 llvm19=19.1.4-r1 \
+                git make bash bc bison flex perl python3 openssl-dev elfutils-dev \
+                build-base linux-headers coreutils findutils dtc
+              git config --global --add safe.directory /source
+              git config --global --add safe.directory /repo
+              sh /repo/build/r800_kernel_compile_development.sh /source /repo /scratch/r800-development-build "$GITHUB_SHA"
+            '
+      - name: Upload only metadata, never kernel, DTB or initramfs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-development-kernel-evidence-only
+          path: |
+            ${{ runner.temp }}/r800-development-source-preflight.json
+            ${{ runner.temp }}/r800-development-build/development-kernel-evidence.json
+            ${{ runner.temp }}/r800-development-build/initramfs/development-initramfs-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
