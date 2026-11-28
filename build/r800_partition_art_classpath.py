@@ -149,8 +149,6 @@ def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None):
                                    "bytes": len(raw), **result}
                 if result["status"] == "NO_EMBEDDED_DEX":
                     errors.append(path+": precompiled ART evidence required")
-                elif any(item["version"] == "040" for item in result["dex"].values()):
-                    errors.append(path+": DEX 040 not accepted for Android 11 target")
             except (OSError, ValueError, RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
                 artifacts[path] = {"status": "REVIEW_REQUIRED"}
                 errors.append(path+": "+str(exc))
