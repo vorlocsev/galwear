@@ -96,13 +96,15 @@ def walk(load, candidates, roots=ROOTS, runtime_loads=None):
 
 def audit(sources,*,roots=ROOTS):
     """sources: fixed labels -> (debugfs, private image, private scratch)."""
-    if not {"system","runtime","art"} <= set(sources) <= {"system","runtime","art","statsd"}:
-        raise ValueError("Expected selected System, Runtime, ART and optional StatsD filesystems")
+    if not {"system","runtime","art"} <= set(sources) <= {"system","runtime","art","statsd","i18n"}:
+        raise ValueError("Expected selected System, Runtime, ART and optional StatsD and i18n filesystems")
     dirs={"system":("/system/lib",),
           "runtime":("/lib/bionic","/lib","/bin"),
           "art":("/lib",)}
     if "statsd" in sources:
         dirs["statsd"]=("/lib",)
+    if "i18n" in sources:
+        dirs["i18n"]=("/lib",)
     listings={}
     for label,paths in dirs.items():
         tool,image,scratch=sources[label]

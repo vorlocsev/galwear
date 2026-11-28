@@ -85,6 +85,20 @@ class ArtDependenciesTests(unittest.TestCase):
             self.assertFalse(result["java_code_executed"])
             audit.assert_called_once_with(sources,roots=(root,))
 
+    def test_i18n_candidate_is_read_only_from_selected_directory(self):
+        sources={n:("debugfs",n,"scratch") for n in ("system","runtime","art","statsd","i18n")}
+        def listing(tool,image,path):
+            return {"status":"OBSERVED","entries":{"libicu.so":{"type":"regular"}} if image=="i18n" and path=="/lib" else {}}
+        def load(tool,image,path,limit,scratch):
+            return b"icu" if image=="i18n" and path=="/lib/libicu.so" else b"root"
+        with patch.object(graph,"list_directory",side_effect=listing), patch.object(graph,"ext4_member",side_effect=load), patch.object(graph,"inspect",side_effect=lambda raw:elf("libicu.so") if raw==b"icu" else elf(None,["libicu.so"])):
+            r=graph.audit(sources,roots=("art:/bin/dalvikvm32",))
+            self.assertEqual(r["edges"][0]["eligible_candidates"],["i18n:/lib/libicu.so"])
+            self.assertFalse(r["namespace_resolution_verified"])
+            del sources["i18n"]
+            r=graph.audit(sources,roots=("art:/bin/dalvikvm32",))
+            self.assertEqual(r["edges"][0]["status"],"NOT_FOUND_IN_SELECTED_DIRS")
+
     def test_budget(self):
         with patch.object(graph,"MAX_OBJECTS",1):
             with self.assertRaisesRegex(ValueError,"budget"):

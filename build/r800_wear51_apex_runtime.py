@@ -29,6 +29,8 @@ MODULES={
          "/lib/bionic/libdl.so","/lib/bionic/libdl_android.so","/lib/bionic/ld-android.so")),
     "com.android.os.statsd":("/system/apex/com.google.android.os.statsd.apex",
         ("/lib/libstatspull.so","/lib/libstatssocket.so")),
+    "com.android.i18n":("/system/apex/com.android.i18n.apex",
+        ("/lib/libicu.so","/lib/libicuuc.so","/lib/libicui18n.so")),
     "com.android.art":("/system/apex/com.google.android.art.apex",
         ("/bin/dex2oat32","/bin/dex2oat64","/bin/dex2oat","/lib/libart.so",
          "/lib/libartbase.so","/javalib/core-oj.jar","/javalib/core-libart.jar")),
@@ -72,8 +74,8 @@ def audit(image,pin,source,output,*,probe_art=False,qemu_compare=None):
                 del raw
                 directory=scratch/module
                 directory.mkdir()
-                if nested is not None and module not in ("com.android.art","com.android.os.statsd"):
-                    raise ValueError("Nested wrapper only supported for selected ART and StatsD")
+                if nested is not None and module not in ("com.android.art","com.android.os.statsd","com.android.i18n"):
+                    raise ValueError("Nested wrapper only supported for selected ART, StatsD and i18n")
                 actual_pin=row["container"].get("nested_sha256",row["package_sha256"])
                 def read_partition(requested,limit):
                     if requested!=path:
@@ -107,12 +109,12 @@ def audit(image,pin,source,output,*,probe_art=False,qemu_compare=None):
                 row["reason"]=str(exc)
         if {"system","runtime","art"} <= set(sources):
             try:
-                art_dependencies=art_dependency_audit(sources)
+                art_dependencies=art_dependency_audit({k:v for k,v in sources.items() if k!="i18n"})
                 for reader in readers:
                     reader.verify_unchanged()
             except (OverflowError,) + ERRORS as exc:
                 art_dependencies={"status":"REVIEW_REQUIRED","reason":str(exc)}
-        if set(sources)=={"system","runtime","art","statsd"}:
+        if {"system","runtime","art","statsd"} <= set(sources):
             try:
                 from r800_wear51_art_dependencies import audit_vm
                 vm=audit_vm(sources)

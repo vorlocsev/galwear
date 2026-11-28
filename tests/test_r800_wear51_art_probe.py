@@ -31,6 +31,18 @@ class ArtProbeTests(unittest.TestCase):
         self.assertIn("namespace.default.link.system.shared_libs = libbase.so\n",cfg)
         self.assertNotIn("allow_all_shared_libs",cfg)
 
+    def test_optional_original_i18n_namespace(self):
+        data=objects()
+        self.assertNotIn("namespace.i18n.",probe.config(data))
+        data["i18n:/lib/libicu.so"]={"soname":"libicu.so"}
+        cfg=probe.config(data)
+        self.assertEqual(probe.guest_path("i18n:/lib/libicu.so"),"/apex/com.android.i18n/lib/libicu.so")
+        self.assertIn("namespace.default.link.i18n.shared_libs = libicu.so\n",cfg)
+        self.assertIn("namespace.i18n.search.paths = /apex/com.android.i18n/lib\n",cfg)
+        self.assertNotIn("allow_all_shared_libs",cfg)
+        with self.assertRaises(ValueError):
+            probe.guest_path("i18n:/lib/../libicu.so")
+
     def test_logdw_record(self):
         packet=b"\0"*11+b"\x06dex2oat\0Usage: dex2oat [options]...\0"
         self.assertEqual(probe.decode_log_record(packet),

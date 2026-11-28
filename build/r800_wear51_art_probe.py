@@ -17,7 +17,7 @@ from r800_framework_inventory import ext4_member, MAX_MEMBER
 from r800_wear51_art_dependencies import MAX_BYTES, MAX_OBJECTS, NAME
 
 PREFIX={"art":"/apex/com.android.art","runtime":"/apex/com.android.runtime",
-        "statsd":"/apex/com.android.os.statsd","system":""}
+        "statsd":"/apex/com.android.os.statsd","i18n":"/apex/com.android.i18n","system":""}
 LINKER="runtime:/bin/linker"
 DEX="art:/bin/dex2oat32"
 VM="art:/bin/dalvikvm32"
@@ -41,7 +41,7 @@ def guest_path(key):
     if key in (LINKER,DEX,VM):
         return PREFIX[label]+path
     directory,name=path.rsplit("/",1)
-    allowed={"art":{"/lib"},"statsd":{"/lib"},"runtime":{"/lib","/lib/bionic"},
+    allowed={"art":{"/lib"},"statsd":{"/lib"},"i18n":{"/lib"},"runtime":{"/lib","/lib/bionic"},
              "system":{"/system/lib"}}
     if directory not in allowed[label] or not NAME.fullmatch(name) or not name.endswith(".so"):
         raise ValueError("Unexpected provider path")
@@ -69,6 +69,12 @@ def config(objects):
            "statsd":"/apex/com.android.os.statsd/lib","system":"/system/lib"}
     links={"default":("runtime","statsd","system"),"runtime":(),
            "statsd":("runtime","system"),"system":("runtime",)}
+    # Keep baseline ART namespace unchanged unless original ICU objects are staged.
+    if names["i18n"]:
+        lines[2]+=",i18n"
+        paths["i18n"]="/apex/com.android.i18n/lib"
+        links["default"]+=("i18n",)
+        links["i18n"]=("runtime","system")
     for ns,path in paths.items():
         p="namespace."+ns
         lines.extend([p+".isolated = true",p+".search.paths = "+path])
@@ -253,7 +259,7 @@ def probe(sources,graph,scratch,source,pin,*,qemu_compare=None):
     qemu,bwrap=shutil.which("qemu-arm-static"),shutil.which("bwrap")
     if not qemu or not bwrap:
         raise ValueError("Isolated QEMU unavailable")
-    if set(sources)!=set(PREFIX) or graph["status"]!="SELECTED_ART_DEPENDENCY_CANDIDATES_ONLY" or graph["review"]:
+    if set(sources)-{"i18n"}!=set(PREFIX)-{"i18n"} or graph["status"]!="SELECTED_ART_DEPENDENCY_CANDIDATES_ONLY" or graph["review"]:
         raise ValueError("Incomplete ART candidate graph")
     if any(not e["eligible_candidates"] for e in graph["edges"]):
         raise ValueError("Missing eligible ART provider")
