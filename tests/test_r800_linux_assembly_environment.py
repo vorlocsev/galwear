@@ -88,5 +88,61 @@ class EnvironmentTests(unittest.TestCase):
                 env.executable("git")
 
 
+    def saved_fixture(self):
+        lock={"schema":env.SCHEMA,"source_sha":SOURCE,"os":dict(env.OS),
+              "architecture":"x86_64","python_version":"3.12.3",
+              "tools":{n:{"bytes":1,"sha256":"a"*64,"resolved":"/usr/bin/"+n} for n in env.TOOLS},
+              "complete_environment_verified":False,"dynamic_libraries_verified":False,
+              "safe_to_flash":False}
+        probe={"schema":"galwear-r800-synthetic-mount-probe-v1","source_sha":SOURCE,
+               "environment_lock_sha256":self.pin,"status":"SYNTHETIC_EXT4_MOUNT_XATTR_PASS_ONLY",
+               "checks":{n:True for n in env.PROBE_CHECKS},
+               "loop_detached_and_workspace_removed":True,"retained_fixture":None,"error":None,
+               **{n:False for n in ("donor_images_used","physical_devices_used","vendor_build_verified",
+                                    "reproducible_build_verified","hardware_tested","safe_to_flash")}}
+        return lock,probe
+
+    def test_saved_host_chain(self):
+        lock,probe=self.saved_fixture()
+        self.assertEqual(env.saved_environment(lock,probe,self.pin,SOURCE),
+                         "SAVED_HOST_LOCK_AND_SYNTHETIC_PROBE_ONLY")
+
+    def test_saved_wrong_lock(self):
+        lock,probe=self.saved_fixture()
+        probe["environment_lock_sha256"]="0"*64
+        with self.assertRaisesRegex(ValueError,"scope or lock binding"):
+            env.saved_environment(lock,probe,self.pin,SOURCE)
+
+    def test_saved_missing_check(self):
+        lock,probe=self.saved_fixture()
+        del probe["checks"]["unmount"]
+        with self.assertRaisesRegex(ValueError,"Incomplete saved synthetic"):
+            env.saved_environment(lock,probe,self.pin,SOURCE)
+
+    def test_saved_failed_cleanup(self):
+        lock,probe=self.saved_fixture()
+        probe["loop_detached_and_workspace_removed"]=False
+        with self.assertRaisesRegex(ValueError,"scope or lock binding"):
+            env.saved_environment(lock,probe,self.pin,SOURCE)
+
+    def test_saved_wrong_head(self):
+        lock,probe=self.saved_fixture()
+        probe["source_sha"]="0"*40
+        with self.assertRaisesRegex(ValueError,"scope or lock binding"):
+            env.saved_environment(lock,probe,self.pin,SOURCE)
+
+    def test_saved_missing_tool(self):
+        lock,probe=self.saved_fixture()
+        del lock["tools"]["git"]
+        with self.assertRaisesRegex(ValueError,"Host tool inventory"):
+            env.saved_environment(lock,probe,self.pin,SOURCE)
+
+    def test_saved_claimed_reproducibility(self):
+        lock,probe=self.saved_fixture()
+        probe["reproducible_build_verified"]=True
+        with self.assertRaisesRegex(ValueError,"scope or lock binding"):
+            env.saved_environment(lock,probe,self.pin,SOURCE)
+
+
 if __name__=="__main__":
     unittest.main()
