@@ -109,11 +109,13 @@ class DonorManagerTests(unittest.TestCase):
         with patch.object(manager,"preflight") as preflight, \
              patch.object(manager,"verify_pixel",return_value={"fixture":True}) as pixel, \
              patch.object(manager,"stock_bindings",return_value={"fixture":True}) as stock, \
+             patch.object(manager,"audit_base",return_value={"identity_blockers":[]}) as base, \
              patch.object(manager,"build") as build:
             report=manager.check(cfg,self.output,SOURCE)
         preflight.assert_called_once()
         pixel.assert_called_once()
         stock.assert_called_once()
+        base.assert_called_once_with(self.root/"base",PIN,SOURCE,effects=self.root/"effects",effects_pin=PIN)
         build.assert_not_called()
         self.assertEqual(report["status"],"MANAGED_INPUT_PINS_MATCH_ONLY")
         self.assertFalse(report["safe_to_flash"])
@@ -130,6 +132,7 @@ class DonorManagerTests(unittest.TestCase):
         with patch.object(manager,"preflight"), \
              patch.object(manager,"verify_pixel",return_value={}), \
              patch.object(manager,"stock_bindings",return_value={}), \
+             patch.object(manager,"audit_base",return_value={"identity_blockers":[]}), \
              patch.object(manager,"verify_ndk",return_value={"status":"SELECTED_NDK_TOOL_PINS_MATCH_ONLY"}) as verify:
             result=manager.check(cfg,self.output,SOURCE)
         verify.assert_called_once_with(self.root/"ndk",pins)
@@ -139,6 +142,18 @@ class DonorManagerTests(unittest.TestCase):
         self.data["inputs"]["ndk"]["tools_sha256"]={"clang":PIN}
         with self.assertRaisesRegex(ValueError,"Invalid NDK selected tool pins"):
             self.load()
+
+
+    def test_base_identity_review_status(self):
+        cfg=self.load()
+        with patch.object(manager,"preflight"), \
+             patch.object(manager,"verify_pixel",return_value={}), \
+             patch.object(manager,"stock_bindings",return_value={}), \
+             patch.object(manager,"audit_base",return_value={"identity_blockers":["Missing model"]}):
+            report=manager.check(cfg,self.output,SOURCE)
+        self.assertEqual(report["status"],"MANAGED_BASE_IDENTITY_REVIEW_REQUIRED")
+        self.assertFalse(report["base_vendor_origin_verified"])
+        self.assertFalse(report["safe_to_flash"])
 
 
 if __name__=="__main__":
