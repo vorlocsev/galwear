@@ -31,6 +31,38 @@ bootloader или другие разделы. Не изменяет ориги�
 Это исходные доноры, не подготовленные образы R800. Sparse/super требуют
 отдельного безопасного разбора, адаптация Android не выполнена.
 
+## Единый локальный конвейер raw-доноров
+
+Официальные условия Google на странице factory images ограничивают использование
+образов устройствами Pixel Watch. Не принимать условия автоматически и не
+загружать закрытые файлы в CI. Использовать только локальный архив, на
+обработку которого имеются необходимые права. Не публиковать бинарники.
+
+`build/r800_prepare_pixel_raw_donor.py` объединяет извлечение из ZIP,
+нормализацию sparse и разбор super. Для прямого system.img:
+
+```sh
+python3 build/r800_prepare_pixel_raw_donor.py \
+  --archive /path/to/local-factory.zip --output /path/to/raw-donor \
+  --source-sha "$(git rev-parse HEAD)" --mode direct --partition system
+```
+
+Если архив содержит super.img, предварительно установить имена и слот по
+его метаданным; пример для явно выбранного system_a:
+
+```sh
+python3 build/r800_prepare_pixel_raw_donor.py \
+  --archive /path/to/local-factory.zip --output /path/to/raw-donor \
+  --source-sha "$(git rev-parse HEAD)" --mode super --slot 0 --partition system_a
+```
+
+Сценарий сохраняет выбранные raw-разделы и `raw-donor-evidence.json` с
+цепочкой хешей и геометрией файловой системы. Для EXT4 читаются буквальные
+свойства Android; EROFS пока только геометрия. Наличие system.img не доказывает
+готовность к handover R800. Несовместимые разделы, подписи AVB, сборка
+целевого system-as-root и vendor требуют отдельного этапа. Синтетические
+тесты не являются подтверждением наличия оригинального архива.
+
 ## Блокеры
 
 Оригинальные архивы отсутствуют в CI. Прямое скачивание из сторонних каталогов
