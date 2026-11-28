@@ -165,7 +165,7 @@ jobs:
             --max-filesize 364782672 \
             https://github.com/phhusson/treble_experimentations/releases/download/v313/system-roar-arm32_binder64-ab-vanilla.img.xz \
             -o "$archive"
-          python3 build/r800_phh_runtime_reference.py --archive "$archive" --output "$RUNNER_TEMP/r800-phh-reference"
+          python3 build/r800_phh_runtime_reference.py --archive "$archive" --output "$RUNNER_TEMP/r800-phh-reference" --source-sha "$GITHUB_SHA"
           rm -- "$archive"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -213,7 +213,7 @@ jobs:
             --max-filesize 364782672 \
             https://github.com/phhusson/treble_experimentations/releases/download/v313/system-roar-arm32_binder64-ab-vanilla.img.xz \
             -o "$archive"
-          python3 build/r800_phh_runtime_reference.py --archive "$archive" --output "$RUNNER_TEMP/r800-phh-reference"
+          python3 build/r800_phh_runtime_reference.py --archive "$archive" --output "$RUNNER_TEMP/r800-phh-reference" --source-sha "$GITHUB_SHA"
           rm -- "$archive"
       - name: Install exact NDK release without sdkmanager
         run: |
@@ -370,6 +370,40 @@ jobs:
             ${{ runner.temp }}/graphics-fixture-summary.json
             ${{ runner.temp }}/graphics-abi-qemu/graphics-abi-evidence.json
             ${{ runner.temp }}/graphics-acceptance.json
+          if-no-files-found: warn
+          retention-days: 7
+  phh-reference-cross-host:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    needs: [arm32-reference-extract, arm32-hal-qemu]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: r800-phh-arm32-reference-evidence
+          path: ${{ runner.temp }}/phh-24
+      - uses: actions/download-artifact@v4
+        with:
+          name: r800-arm32-hal-qemu-evidence
+          path: ${{ runner.temp }}/phh-22
+      - name: Compare exact-head PHH reference extraction reports
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_phh_extraction_comparison.py \
+            --first "$RUNNER_TEMP/phh-24/reference-evidence.json" \
+            --second "$RUNNER_TEMP/phh-22/r800-phh-reference/reference-evidence.json" \
+            --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/phh-extraction-comparison.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r800-phh-extraction-cross-host-evidence
+          path: ${{ runner.temp }}/phh-extraction-comparison.json
           if-no-files-found: warn
           retention-days: 7
   overlay-independent:
