@@ -15,14 +15,17 @@ from r800_pixel_runtime_layout import list_directory
 
 NAME=re.compile(r"[A-Za-z0-9_.+~@-]{1,255}")
 ROOTS=("art:/bin/dex2oat32","art:/lib/libart.so")
+# Observed in original dex2oat no-argument run 46167789388 (62611101).
+RUNTIME_LOADS={"art:/lib/libartpalette.so":("libartpalette-system.so",)}
 MAX_OBJECTS=128
 MAX_EDGES=2048
 MAX_BYTES=128*1024**2
 MAX_DEPTH=16
 
 
-def walk(load, candidates, roots=ROOTS):
+def walk(load, candidates, roots=ROOTS, runtime_loads=None):
     """Explore all eligible candidates, never choose an ambiguous provider."""
+    runtime_loads=runtime_loads or {}
     pending=deque((path,0,None) for path in roots)
     objects, edges, reviews={},[],{}
     total=0
@@ -51,13 +54,15 @@ def walk(load, candidates, roots=ROOTS):
         except (ValueError,OSError,RuntimeError,subprocess.SubprocessError) as exc:
             reviews[path]=str(exc)
             continue
-        for name in info["needed"]:
+        dependencies=[(name,"DT_NEEDED") for name in info["needed"]]
+        dependencies.extend((name,"OBSERVED_DLOPEN") for name in runtime_loads.get(path,()))
+        for name,kind in dependencies:
             if not NAME.fullmatch(name) or name in (".",".."):
                 raise ValueError("Invalid dependency name")
             if len(edges)>=MAX_EDGES:
                 raise ValueError("ART dependency graph edge budget exceeded")
             providers=sorted(set(candidates(name)))
-            edges.append({"consumer":path,"needed":name,"candidates":providers})
+            edges.append({"consumer":path,"needed":name,"kind":kind,"candidates":providers})
             for provider in providers:
                 pending.append((provider,depth+1,name))
     for edge in edges:
@@ -116,7 +121,7 @@ def audit(sources):
         label,path=key.split(":",1)
         tool,image,scratch=sources[label]
         return ext4_member(tool,image,path,MAX_MEMBER,scratch)
-    result=walk(load,candidates)
+    result=walk(load,candidates,runtime_loads=RUNTIME_LOADS)
     result["selected_directories"]={p:{"status":v["status"],"entries":len(v["entries"])}
                                     for p,v in listings.items()}
     return result
