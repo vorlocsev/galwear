@@ -54,7 +54,9 @@ def stage(sources,guest):
         "safe_to_flash":False}
 
 
-def arguments(classpath):
+def arguments(classpath,*,compiler_filter="verify"):
+    if compiler_filter not in ("verify","speed"):
+        raise ValueError("Unsupported experimental compiler filter")
     expected=[ART_ROOT+"/javalib/"+n for n in BOOT_JARS]
     if classpath!=expected:
         raise ValueError("Unexpected boot classpath")
@@ -64,8 +66,34 @@ def arguments(classpath):
             "--image=/data/boot.art","--oat-file=/data/boot.oat",
             "--output-vdex=/data/boot.vdex","--base=0x70000000",
             "--instruction-set=arm","--instruction-set-variant=generic",
-            "--compiler-filter=verify","--single-image","-j1",
+            "--compiler-filter="+compiler_filter,"--single-image","-j1",
             "--runtime-arg","-Xms64m","--runtime-arg","-Xmx512m"]
+
+
+def oat_segments(raw):
+    """Bounded ELF32 program header observation, not machine code validation."""
+    if len(raw)<52 or raw[:7]!=b"\x7fELF\x01\x01\x01":
+        raise ValueError("Expected little endian ELF32")
+    kind,machine=struct.unpack_from("<HH",raw,16)
+    phoff=struct.unpack_from("<I",raw,28)[0]
+    ehsize,entsize,count=struct.unpack_from("<HHH",raw,40)
+    if kind!=3 or machine!=40 or ehsize!=52 or entsize!=32 or not 1<=count<=128 or phoff<52 or phoff+count*entsize>len(raw):
+        raise ValueError("Invalid ARM32 OAT program headers")
+    loads=[]
+    for i in range(count):
+        kind,offset,vaddr,_,filesz,memsz,flags,align=struct.unpack_from("<8I",raw,phoff+i*entsize)
+        if kind!=1:
+            continue
+        if filesz>memsz or offset+filesz>len(raw) or vaddr+memsz>2**32:
+            raise ValueError("OAT LOAD outside bounds")
+        if align not in (0,1) and (align&(align-1) or offset%align!=vaddr%align):
+            raise ValueError("OAT LOAD alignment mismatch")
+        loads.append({"offset":offset,"vaddr":vaddr,"file_bytes":filesz,"memory_bytes":memsz,
+                      "flags":flags,"executable":bool(flags&1)})
+    if not loads:
+        raise ValueError("Missing OAT LOAD segments")
+    return {"load_segments":loads,"executable_file_bytes":sum(x["file_bytes"] for x in loads if x["executable"]),
+            "machine_code_validated":False}
 
 
 def inspect_outputs(directory):
@@ -93,4 +121,9 @@ def inspect_outputs(directory):
                    struct.unpack_from("<H",raw,16)[0]==3 and b"oat\n" in raw)
         rows[name]={"status":"HEADER_OBSERVED" if valid else "REVIEW_REQUIRED",
                     "sha256":sha(raw),"bytes":len(raw),"header_hex":raw[:16].hex()}
+        if name=="boot.oat" and valid:
+            try:
+                rows[name]["elf_segments"]=oat_segments(raw)
+            except ValueError as exc:
+                rows[name].update(status="REVIEW_REQUIRED",reason=str(exc))
     return rows
