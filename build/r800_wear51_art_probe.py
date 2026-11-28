@@ -126,6 +126,24 @@ def evaluate_case(name,rc,out,err,records,timeout,capped,staged):
     return ("ARGUMENT_HANDLER_OBSERVED" if clean and marker else "REVIEW_REQUIRED"),marker,[]
 
 
+def sandbox_command(qemu,bwrap,guest,logdir,args,boot_output=None):
+    # QEMU 6.2 implements /proc/self/{stat,cmdline,maps,auxv} using
+    # mkstemp in TMPDIR (default /tmp), then unlinks the backing file.
+    # A private tmpfs is required even for otherwise read-only probes.
+    command=[bwrap,"--unshare-all","--die-with-parent","--new-session","--clearenv",
+             "--ro-bind",str(guest),"/","--ro-bind",qemu,"/qemu","--dev","/dev",
+             "--ro-bind",str(logdir),"/dev/socket","--proc","/proc",
+             "--tmpfs","/tmp","--setenv","TMPDIR","/tmp","--chdir","/",
+             "/qemu","-cpu","max","-L","/",
+             "-E","ANDROID_ROOT=/system","-E","ANDROID_ART_ROOT=/apex/com.android.art",
+             "-E","ANDROID_RUNTIME_ROOT=/apex/com.android.runtime",
+             "-E","ANDROID_DATA=/data","-E","ANDROID_LOG_TAGS=*:v",*args]
+    if boot_output is not None:
+        where=command.index("--chdir")
+        command[where:where]=["--bind",str(boot_output),"/data"]
+    return command
+
+
 def run_case(qemu,bwrap,guest,scratch,name,args,staged,*,boot_output=None):
     if (name=="boot-image") != (boot_output is not None):
         raise ValueError("Explicit private output required only for boot image probe")
@@ -143,17 +161,9 @@ def run_case(qemu,bwrap,guest,scratch,name,args,staged,*,boot_output=None):
         with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as sink:
             sink.bind(str(Path(logdir)/"logdw"))
             sink.setblocking(False)
-            command=[bwrap,"--unshare-all","--die-with-parent","--new-session","--clearenv",
-                     "--ro-bind",str(guest),"/","--ro-bind",qemu,"/qemu","--dev","/dev",
-                     "--ro-bind",logdir,"/dev/socket","--proc","/proc","--chdir","/",
-                     "/qemu","-cpu","max","-L","/",
-                     "-E","ANDROID_ROOT=/system","-E","ANDROID_ART_ROOT=/apex/com.android.art",
-                     "-E","ANDROID_RUNTIME_ROOT=/apex/com.android.runtime",
-                     "-E","ANDROID_DATA=/data","-E","ANDROID_LOG_TAGS=*:v",*args]
+            command=sandbox_command(qemu,bwrap,guest,logdir,args,boot_output)
             if boot_output is not None:
                 from r800_wear51_art_boot_probe import MAX_OUTPUT
-                where=command.index("--chdir")
-                command[where:where]=["--bind",str(boot_output),"/data"]
                 file_limit=MAX_OUTPUT
             else:
                 file_limit=LIMIT
@@ -197,6 +207,7 @@ def run_case(qemu,bwrap,guest,scratch,name,args,staged,*,boot_output=None):
         combined=out+"\n"+err+"\n"+"\n".join(r["message"] for r in records)
         marker=(rc==0 and not timed_out and not capped and
                 not re.search(r"CANNOT LINK EXECUTABLE|uncaught target signal|Runtime aborting",combined,re.I)
+                and not re.search(r"(?:couldn.t open|failed to load|error opening) /proc/self/",combined,re.I)
                 and all(v["status"]=="HEADER_OBSERVED" for v in artifacts.values()))
         status="BOOT_OUTPUT_HEADERS_OBSERVED" if marker else "REVIEW_REQUIRED"
         paths=[]
@@ -208,6 +219,10 @@ def run_case(qemu,bwrap,guest,scratch,name,args,staged,*,boot_output=None):
             "marker_observed":bool(marker),"resolved_paths":paths,
             "logdw_packets":packets,"logdw_bytes":received,
             "logdw_records":records,"logd_service_emulated":False,
+            "qemu_private_tmpfs":True,
+            "proc_self_access_errors_observed":bool(re.search(
+                r"(?:couldn.t open|failed to load|error opening) /proc/self/",
+                out+"\n"+err+"\n"+"\n".join(r["message"] for r in records),re.I)),
             "output_headers":artifacts}
 
 
@@ -226,7 +241,7 @@ def probe(sources,graph,scratch,source,pin):
         raise ValueError("Missing or excessive original objects")
     guest=scratch/"art-guest"
     guest.mkdir()
-    for path in ("system/bin","system/lib","dev","proc","data","linkerconfig"):
+    for path in ("system/bin","system/lib","dev","proc","tmp","data","linkerconfig"):
         (guest/path).mkdir(parents=True,exist_ok=True)
     (guest/"qemu").touch()
     staged={}
