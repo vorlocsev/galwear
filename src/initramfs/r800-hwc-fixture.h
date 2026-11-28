@@ -239,13 +239,30 @@ static int hwc_window_release_async(void)
            window_dequeue(&q)!=0||window_cancel(&q,0,-1))return 0;
         /* Error completion quarantines the slot, never grants reuse. */
         q.slots[0].state=WINDOW_ACQUIRED;
+        const size_t bytes=sizeof(native_handle_t)+sizeof(int);
+        native_handle_t *raw=calloc(1,bytes);
+        if(!raw)return 0;
+        int pixel=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if(pixel<0){free(raw);return 0;}
+        raw->version=sizeof(*raw);raw->numFds=1;raw->numInts=0;raw->data[0]=pixel;
+        int imported=import_model(raw,bytes,&q.slots[0].handle);
+        int closed=close(pixel);
+        free(raw);
+        if(imported||closed||!q.slots[0].handle)return 0;
+        int owned=q.slots[0].handle->data[0];
         int pipefd[2];
         if(pipe(pipefd)||close(pipefd[1])||window_release_async(&q,0,pipefd[0])||
            window_reap_release(&q,0)!=-EIO||
            q.slots[0].state!=WINDOW_QUARANTINED||window_dequeue(&q)!=-EAGAIN||
            fcntl(pipefd[0],F_GETFD)!=-1||errno!=EBADF||
+           fcntl(owned,F_GETFD)!=FD_CLOEXEC||
            window_cancel(&q,1,-1)||window_dequeue(&q)!=1||
-           window_cancel(&q,1,-1)||fd_count()!=baseline)return 0;
+           window_cancel(&q,1,-1)||q.slots[0].state!=WINDOW_QUARANTINED||
+           fd_count()!=baseline+1)return 0;
+        /* Fixture teardown only: no device is accessing this synthetic file.
+         * A failed real release fence would not establish hardware quiescence. */
+        if(free_model(&q.slots[0].handle)||q.slots[0].handle||
+           fcntl(owned,F_GETFD)!=-1||errno!=EBADF||fd_count()!=baseline)return 0;
     }
     return 1;
 }
@@ -633,6 +650,7 @@ static int hwc_fixture(const hw_module_t *module)
     puts("HAL_HWC_OVERLAY_RECOVERY_PASS reopen=1 format_gate=1 release_dup=1 no_fences_disable=1");
     puts("HAL_HWC_IMPORTED_OVERLAY_FIXTURE_PASS imports=3 source_closed=3 freed=3 overlay_release_handoff=1 fd_stable=1");
     puts("HAL_HWC_DELAYED_OVERLAY_RELEASE_FIXTURE_PASS unsignaled=1 blocked_reuse=1 signaled=1 reclaimed=1");
+    puts("HAL_HWC_IMPORTED_QUARANTINE_FIXTURE_PASS cycles=4 retained=4 blocked_reuse=4 teardown=4 fd_stable=1");
     puts("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1");
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
