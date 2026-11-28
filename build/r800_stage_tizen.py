@@ -10,9 +10,12 @@ import tempfile
 
 from r800_tizen_dependencies import audit, resolve_guest, TARGETS, MAX_FILE, MAX_TOTAL
 from r800_android_userspace_preflight import read_regular
+from r800_tizen_plugins import plugin_paths, selected
 
 
-def stage(root, output, targets=TARGETS):
+def stage(root, output, targets=TARGETS, *, plugins=()):
+    plugins=plugin_paths(plugins)
+    targets=tuple(dict.fromkeys((*targets,*plugins)))
     root = root.resolve(strict=True)
     output = output.absolute()
     if output.exists() or output.is_symlink():
@@ -62,6 +65,7 @@ def stage(root, output, targets=TARGETS):
         result = {"status":"TIZEN_ELF_SUBSET_ONLY","files":inventory,
                   "strict_4k_page_review":True,
                   "version_records_checked":report["version_records_checked"],
+                  "selected_plugins":selected(tree, plugins, inventory),
                   "configuration_complete":False,"plugins_complete":False,
                   "ownership_preserved":False,"runtime_verified":False,
                   "safe_to_flash":False}
@@ -76,8 +80,9 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root",type=Path,required=True)
     p.add_argument("--output",type=Path,required=True)
+    p.add_argument("--plugin",action="append",default=[],help="Explicit absolute guest shared-library path; repeat for each selected plugin")
     a=p.parse_args()
-    print(json.dumps(stage(a.root,a.output),sort_keys=True))
+    print(json.dumps(stage(a.root,a.output,plugins=a.plugin),sort_keys=True))
 
 
 if __name__=="__main__":
