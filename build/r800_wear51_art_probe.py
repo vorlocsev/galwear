@@ -335,17 +335,22 @@ def probe(sources,graph,scratch,source,pin,*,qemu_compare=None):
                                             "speed_executable_file_bytes":speed_bytes,
                                             "result":speed_result,"machine_code_validated":False,"safe_to_flash":False}
                         if comparison.get("speed_experiment",{}).get("status")=="SPEED_EXECUTABLE_SEGMENT_GROWTH_OBSERVED":
-                            from r800_wear51_art_boot_probe import compare_runs
+                            from r800_wear51_art_boot_probe import compare_runs, image_difference
                             deterministic_args=arguments(jars["classpath"],compiler_filter="verify",force_determinism=True)
                             repeats=[]
-                            for index in range(2):
-                                with tempfile.TemporaryDirectory(prefix="wear51-determinism-",dir=scratch) as tmp:
-                                    repeat=Path(tmp)
-                                    (repeat/"data").mkdir()
+                            diff={"status":"NOT_TESTED"}
+                            with tempfile.TemporaryDirectory(prefix="wear51-determinism-",dir=scratch) as tmp:
+                                for index in range(2):
+                                    repeat=Path(tmp)/str(index)
+                                    (repeat/"data").mkdir(parents=True)
                                     repeats.append(run_case(str(alternate),bwrap,guest,repeat,"boot-image",
                                         deterministic_args,staged,boot_output=repeat/"data"))
+                                if all(r["status"]=="BOOT_OUTPUT_HEADERS_OBSERVED" for r in repeats):
+                                    diff=image_difference(Path(tmp)/"0/data/boot.art",Path(tmp)/"1/data/boot.art",
+                                        [r["output_headers"]["boot.art"] for r in repeats])
                             comparison["determinism"]={**compare_runs(*repeats),"arguments":deterministic_args,
                                 "compiler_filter":"verify","force_determinism":True,"runs":repeats,
+                                "image_difference":diff,
                                 "qemu_sha256":meta["qemu_sha256"],"synthetic_config_sha256":sha(cfg.encode()),
                                 "jar_sha256":{n:v["sha256"] for n,v in jars["members"].items()},
                                 "staged_sha256":staged,"source_sha":source,"system_sha256":pin}
