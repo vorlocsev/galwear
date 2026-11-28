@@ -47,7 +47,13 @@ tar --xattrs --xattrs-include='*' -cf - \
   ./etc/media_codecs_google_telephony.xml ./etc/media_profiles_vendor.xml \
   ./etc/init/vndservicemanager.rc ./bin/vndservicemanager ./lib/hw/gralloc.default.so \
   ./default.prop ./build.prop ./lib/hw/android.hardware.graphics.mapper@2.0-impl.so \
-  ./lib/hw/android.hardware.graphics.allocator@2.0-impl.so \n  ./bin/hw/android.hardware.configstore@1.1-service ./etc/init/android.hardware.configstore@1.1-service.rc ./lib/libhwminijail.so \n  ./bin/hw/android.hardware.power@1.0-service ./etc/init/android.hardware.power@1.0-service.rc \n  ./lib/hw/android.hardware.power@1.0-impl.so ./lib/hw/power.default.so \n  ./bin/hw/android.hardware.health@2.0-service ./etc/init/android.hardware.health@2.0-service.rc \n  ./bin/hw/android.hardware.graphics.allocator@2.0-service ./etc/init/android.hardware.graphics.allocator@2.0-service.rc \n  ./etc/seccomp_policy | tar --xattrs --xattrs-include='*' -C $OUT -xpf -
+  ./lib/hw/android.hardware.graphics.allocator@2.0-impl.so \
+  ./bin/hw/android.hardware.configstore@1.1-service ./etc/init/android.hardware.configstore@1.1-service.rc ./lib/libhwminijail.so \
+  ./bin/hw/android.hardware.power@1.0-service ./etc/init/android.hardware.power@1.0-service.rc \
+  ./lib/hw/android.hardware.power@1.0-impl.so ./lib/hw/power.default.so \
+  ./bin/hw/android.hardware.health@2.0-service ./etc/init/android.hardware.health@2.0-service.rc \
+  ./bin/hw/android.hardware.graphics.allocator@2.0-service ./etc/init/android.hardware.graphics.allocator@2.0-service.rc \
+  | tar --xattrs --xattrs-include='*' -C "$OUT" -xpf -
 # vndservicemanager deps that live in vendor/lib
 deps=$(llvm-readelf -d bin/vndservicemanager | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
 for lib in $deps; do
