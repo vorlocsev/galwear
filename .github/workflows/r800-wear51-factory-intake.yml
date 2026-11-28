@@ -197,13 +197,20 @@ jobs:
                           print("WEAR51_ART_BOOT_LOGDW",json.dumps(record,sort_keys=True))
                   if "comparison" in boot:
                       comparison=boot["comparison"]
-                      print("WEAR51_ART_QEMU_COMPARISON",json.dumps({k:v for k,v in comparison.items() if k not in ("result","linker_control")},sort_keys=True))
+                      print("WEAR51_ART_QEMU_COMPARISON",json.dumps({k:v for k,v in comparison.items() if k not in ("result","linker_control","speed_experiment")},sort_keys=True))
                       for name in ("linker_control","result"):
                           if name in comparison:
                               case=comparison[name]
                               print("WEAR51_ART_QEMU_COMPARISON_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                               for record in case.get("logdw_records",[])[:32]:
                                   print("WEAR51_ART_QEMU_COMPARISON_LOGDW",json.dumps({"case":name,**record},sort_keys=True))
+                      if "speed_experiment" in comparison:
+                          speed=comparison["speed_experiment"]
+                          print("WEAR51_ART_SPEED",json.dumps({k:v for k,v in speed.items() if k!="result"},sort_keys=True))
+                          case=speed["result"]
+                          print("WEAR51_ART_SPEED_CASE",json.dumps({k:v for k,v in case.items() if k!="logdw_records"},sort_keys=True))
+                          for record in case.get("logdw_records",[])[:32]:
+                              print("WEAR51_ART_SPEED_LOGDW",json.dumps(record,sort_keys=True))
                   for name,case in startup.get("results",{}).items():
                       print("WEAR51_ART_STARTUP_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                       for record in case.get("logdw_records",[])[:32]:
@@ -391,6 +398,29 @@ jobs:
           assert r["dex_compilation_verified"] is False
           assert r["source_sha"]==os.environ["GITHUB_SHA"] and r["qemu_cpu"]=="max"
           assert r["art_initialized"] is False and r["safe_to_flash"] is False
+          PY
+      - name: Require QEMU 8.2 original ART verify boot output independently of speed experiment
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence=Path(os.environ["RUNNER_TEMP"])/"wear51-evidence"
+          startup=json.loads((evidence/"art-startup.json").read_text())
+          boot=json.loads((evidence/"art-boot-probe.json").read_text())
+          provenance=json.loads((evidence/"qemu-comparator.json").read_text())
+          assert startup["source_sha"]==os.environ["GITHUB_SHA"]
+          assert startup["boot_image_probe"]==boot
+          comparison=boot["comparison"]
+          assert comparison["qemu"]==provenance
+          assert comparison["linker_control"]["status"]=="MARKER_PASS"
+          assert comparison["status"]=="BOOT_OUTPUT_HEADERS_OBSERVED"
+          result=comparison["result"]
+          assert result["exit_code"]==0 and not result["timeout"] and not result["output_capped"]
+          assert set(result["output_headers"])=={"boot.art","boot.oat","boot.vdex"}
+          assert all(v["status"]=="HEADER_OBSERVED" for v in result["output_headers"].values())
+          assert startup["safe_to_flash"] is False
+          print("WEAR51_ART_VERIFY_BOOT_OUTPUT_PASS")
           PY
       - name: Remove original and extracted binary images
         if: always()
