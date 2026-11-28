@@ -19,12 +19,17 @@ from r800_graphics_donor_binding import checkout_sha
 from r800_apex_inventory import protobuf_manifest, json_manifest, MAX_METADATA
 
 NAME = re.compile(r"[A-Za-z0-9_.@+-]{1,255}")
-MODULE = re.compile(r"com\.(?:google\.)?android\.(?:runtime|art|vndk\.v[0-9]+)(?:[@.][A-Za-z0-9_.@+-]+)?")
+MODULE = re.compile(r"com\.(?:google\.)?android\.(?:runtime|art|vndk\.(?:v[0-9]+|current))(?:[@.][A-Za-z0-9_.@+-]+)?")
 WANTED = ("bin/linker", "bin/linker64", "bin/dex2oat", "bin/dex2oat32",
           "lib/libc.so", "lib/libm.so", "lib/libdl.so", "lib/libart.so",
           "lib/libartbase.so", "lib/libhidlbase.so", "lib/libutils.so",
           "lib/libcutils.so", "lib/bionic/libc.so", "lib/bionic/libm.so",
-          "lib/bionic/libdl.so", "javalib/core-oj.jar", "javalib/core-libart.jar",
+          "lib/bionic/libdl.so", "lib/bionic/ld-android.so", "lib/bionic/libdl_android.so",
+          "lib/ld-android.so", "lib/libdl_android.so", "lib/libc++.so", "lib/libbase.so",
+          "lib/liblog.so", "lib/libvndksupport.so",
+          "lib/vndk/libhidlbase.so", "lib/vndk/libutils.so", "lib/vndk/libcutils.so",
+          "lib/vndk-sp/libhidlbase.so", "lib/vndk-sp/libutils.so", "lib/vndk-sp/libcutils.so",
+          "javalib/core-oj.jar", "javalib/core-libart.jar",
           "framework/core-oj.jar", "framework/core-libart.jar")
 
 
