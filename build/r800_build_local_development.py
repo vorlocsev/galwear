@@ -25,6 +25,7 @@ from r800_extract_super import require
 from r800_verify_tizen_stage import MANIFEST, unique_keys
 from r800_display_asset_layer import load_assets
 from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, verify as verify_stock
+from r800_bind_pixel_system import verify as verify_pixel
 
 MAX_REPORT=16*1024**2
 MAX_FILE=64*1024**2
@@ -82,10 +83,11 @@ def stock_bindings(paths,pins,stock_evidence,source_sha):
     return results
 
 
-def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None):
+def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None,pixel_evidence=None):
     require(type(xtra_abi) is int and xtra_abi in (0,1,2),"Explicit supported XTRA ABI required")
     p,output=preflight(paths,pins,output,source_sha)
     stock=stock_bindings(p,pins,stock_evidence,source_sha)
+    pixel=None if pixel_evidence is None else verify_pixel(p["system"],pins["system"],*pixel_evidence,source_sha)
     require((assets is None)==(assets_sha is None),"Asset directory and manifest pin must be supplied together")
     if assets is not None:
         assets=Path(assets).absolute()
@@ -141,6 +143,13 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  (android,"android-build-evidence.json",bp),
                  (android/"android","android-layer-evidence.json",android_pin)]
         copied={}
+        if pixel is not None:
+            require(verify_pixel(p["system"],pins["system"],*pixel_evidence,source_sha)==pixel,
+                    "Pixel donor evidence changed")
+            data=read_regular(Path(pixel_evidence[0]),MAX_REPORT)
+            require(sha(data)==pixel["report_sha256"],"Pixel donor report changed")
+            (evidence/"pixel-system-evidence.json").write_bytes(data)
+            copied["pixel-system-evidence.json"]=pixel["report_sha256"]
         require(stock_bindings(p,pins,stock_evidence,source_sha)==stock,"Stock donor evidence changed")
         for name,row in stock.items():
             report_name="stock-"+name+"-evidence.json"
@@ -182,6 +191,7 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  "source_sha":source_sha,"input_sha256":pins,"xtra_abi":xtra_abi,
                  "assets_manifest_sha256":assets_sha,
                  "stock_donor_bindings":stock,
+                 "pixel_system_binding":pixel,
                  "stage_evidence_sha256":copied,"integrated_evidence_sha256":ip,
                  "missing_inputs_and_gates":i["missing_inputs_and_gates"],
                  "kernel_and_components_compiled_by_this_command":False,
@@ -224,6 +234,7 @@ def main():
     parser.add_argument("--assets-sha256")
     parser.add_argument("--stock-evidence",nargs=4,action="append",
                         metavar=("INPUT","REPORT","REPORT_SHA256","ARCHIVE_SHA256"))
+    parser.add_argument("--pixel-evidence",nargs=2,metavar=("REPORT","REPORT_SHA256"))
     args=parser.parse_args()
     stock=None
     if args.stock_evidence is not None:
@@ -233,7 +244,8 @@ def main():
         stock={n:(Path(p),h,a) for n,p,h,a in args.stock_evidence}
     paths={n:getattr(args,n) for n in names}
     pins={n:getattr(args,n+"_sha256") for n in names if n!="ndk"}
-    print(build(paths,pins,args.output,args.source_sha,args.xtra_abi,assets=args.assets,assets_sha=args.assets_sha256,stock_evidence=stock)["status"],"safe_to_flash=false")
+    print(build(paths,pins,args.output,args.source_sha,args.xtra_abi,assets=args.assets,assets_sha=args.assets_sha256,stock_evidence=stock,
+                pixel_evidence=args.pixel_evidence)["status"],"safe_to_flash=false")
 
 
 if __name__=="__main__":
