@@ -23,6 +23,16 @@ MEMBERS=set("""
 
 
 class VendorBaseTarTests(unittest.TestCase):
+    def test_single_vendor_recipe(self):
+        text=SCRIPT.read_text()
+        for marker in ('#!/usr/bin/env bash',
+                       '# ---- bluetooth HAL',
+                       '# image: 64 MiB ext4',
+                       'mv -- "$IMAGE" "$WORK/vendor.candidate.img"',
+                       'echo "NON-RELEASE vendor candidate: $IMAGE"'):
+            self.assertEqual(text.count(marker),1,marker)
+        self.assertTrue(text.endswith('echo "HAL compatibility and SELinux policy not verified; safe_to_flash=false"\n'))
+
     def test_shell_syntax(self):
         subprocess.run(["bash","-n",str(SCRIPT)],check=True,timeout=10)
 
