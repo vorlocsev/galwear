@@ -116,7 +116,9 @@ SAVED_LITERAL_IDENTITY_CHAIN_ONLY не означает повторную пр�
   "lock": "environment/linux-assembly-lock.json",
   "lock_sha256": "LOCK_SHA256",
   "probe": "environment/synthetic-mount-probe.json",
-  "probe_sha256": "PROBE_SHA256"
+  "probe_sha256": "PROBE_SHA256",
+  "elf": "environment/linux-host-elf-lock.json",
+  "elf_sha256": "ELF_REPORT_SHA256"
 }
 ```
 
@@ -131,3 +133,18 @@ Python, Ubuntu, PATH, наблюдаемые root/CAP_SYS_ADMIN/loop-control и 
 Старые результаты managed build без отчётов требуют повторной сборки для нового gate.
 Сохранённая проба не является подписанной аттестацией и не доказывает текущую
 работоспособность mount, воспроизводимость или полную изоляцию VM.
+
+
+### Static host ELF lock
+
+Managed build дополнительно требует linux-host-elf-lock.json и его SHA-256
+в environment. Отчёт должен относиться к тому же exact HEAD и SHA-256 Linux lock,
+иметь SELECTED_HOST_ELF_CANDIDATES_ONLY без проблем и содержать полный достижимый
+статический граф выбранных инструментов. Перед и после сборки граф повторно
+инвентаризируется без запуска исследуемых ELF. Readiness проверяет сохранённые
+корни, зависимости, загрузчик, допустимые пути, pins и достижимость объектов.
+Манифест без ELF отчёта доступен только для диагностики; предыдущие managed
+результаты требуют повторной сборки для нового gate. Если реальная Ubuntu VM
+покажет нестандартные пути или неоднозначность, сборка блокируется до анализа.
+Это не подтверждает фактическую загрузку, dlopen, Python extensions или
+воспроизводимость. safe_to_flash=false.
