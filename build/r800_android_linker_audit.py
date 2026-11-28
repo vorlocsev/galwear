@@ -605,7 +605,16 @@ def inspect(data: bytes) -> dict:
     if tls is not None:
         addr, off, size, mem = (tls[k] for k in ("address", "file_offset", "file_size", "memory_size"))
         if not any(va <= addr and mem <= span - (addr - va) for va, span, _ in memory):
-            raise ValueError("PT_TLS outside PT_LOAD memory")
+            # LLD can place a pure .tbss template immediately after a file-
+            # backed LOAD, without allocating its per-thread zero-fill bytes
+            # in the process image. Observed in ARM32 Pixel Android 15.
+            # Keep initialized TLS strictly mapped; allow only the observed
+            # zero-file-size, end-of-LOAD form, with a bounded TLS allocation.
+            pure_tbss = (etype == 3 and size == 0 and 0 < mem <= 64*1024**2
+                         and any(fs > 0 and addr == va + fs and off == fo + fs
+                                 for va, fo, fs in loads))
+            if not pure_tbss:
+                raise ValueError("PT_TLS outside PT_LOAD memory")
         if size and not any(va <= addr and size <= fs - (addr - va) and
                             fo + addr - va == off for va, fo, fs in loads):
             raise ValueError("PT_TLS initialization not file-backed")
