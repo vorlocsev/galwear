@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// Opt-in AOSP platform build only. Not added to any product package list.
+cc_binary {
+    name: "android.hardware.lights-service.galwear-r800",
+    vendor: true,
+    relative_install_path: "hw",
+    compile_multilib: "32",
+    srcs: ["service.cpp"],
+    header_libs: ["libhardware_headers"],
+    shared_libs: [
+        "libbinder_ndk",
+        "libdl",
+        "android.hardware.light-V1-ndk_platform",
+    ],
+    cflags: ["-Wall", "-Wextra", "-Werror"],
+    // No init_rc or vintf_fragments until the actual AOSP build, policy
+    // and service registration have passed the integration gates.
+}
