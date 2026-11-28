@@ -16,6 +16,9 @@ on:
       - build/r800_art_apex_mapping.py
       - build/r800_apex_inventory.py
       - build/r800_arm32_runtime_extract.py
+      - build/r800_hal_compile_smoke.sh
+      - build/r800_hal_dlopen_probe.py
+      - 'src/hal/**'
       - tests/test_r800_wear51_tls.py
   workflow_dispatch:
 permissions:
@@ -23,7 +26,7 @@ permissions:
 jobs:
   factory-intake:
     if: github.repository == 'vorlocsev/galwear' && github.ref_name == 'development/r800-integration-20261127'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +36,23 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_r800_extract_wear51_factory.py' -v
       - name: Verify pure TBSS validation before inspecting original libraries
         run: python3 -m unittest discover -s tests -p 'test_r800_wear51_tls.py' -v
+      - name: Verify isolated QEMU host prerequisites before donor download
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends qemu-user-static bubblewrap android-sdk-libsparse-utils e2fsprogs
+          qemu-arm-static --version
+          bwrap --version
+          scratch=$(mktemp -d "$RUNNER_TEMP/wear51-qemu-preflight.XXXXXX")
+          trap 'rm -rf -- "$scratch"' EXIT
+          mkdir "$scratch/dev" "$scratch/proc"
+          touch "$scratch/qemu"
+          qemu=$(realpath "$(command -v qemu-arm-static)")
+          timeout -k 5s 20s bwrap --unshare-all --die-with-parent --new-session \
+            --clearenv --ro-bind "$scratch" / --ro-bind "$qemu" /qemu \
+            --dev /dev --proc /proc --chdir / /qemu --version
+          echo WEAR51_QEMU_ISOLATION_PREFLIGHT_PASS
       - name: Obtain exact October 2025 factory image
         shell: bash
         run: |
@@ -59,8 +79,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends e2fsprogs binutils
+          command -v debugfs
+          command -v readelf
           PYTHONPATH=build python3 - <<'PY'
           import json, os
           from pathlib import Path
@@ -167,6 +187,62 @@ jobs:
           (evidence/"partitions.json").write_text(json.dumps(report,indent=2,sort_keys=True)+"\n")
           print("WEAR51_PARTITIONS",json.dumps({n:{"filesystem":v["filesystem"],"image_sha256":v["image_sha256"],"properties":v["properties"]["unique_values"]} for n,v in report["partitions"].items()},sort_keys=True))
           PY
+      - name: Compile exact-head ARM32 HALs for Android 15 runtime probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/wear51-intake"
+          evidence="$RUNNER_TEMP/wear51-evidence"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          archive="$root/android-ndk-r27c-linux.zip"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --connect-timeout 30 --max-time 600 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -o "$archive"
+          printf '%s  %s\n' 090e8083a715fdb1a3e402d0763c388abb03fb4e "$archive" | sha1sum --check -
+          unzip -q "$archive" -d "$root"
+          rm -f "$archive"
+          git init "$root/tinyalsa"
+          git -C "$root/tinyalsa" remote add origin https://github.com/tinyalsa/tinyalsa.git
+          git -C "$root/tinyalsa" fetch --depth=1 origin 1c5fb68ced57d838f2b7ecd0c00bc1fefc9ab60d
+          git -C "$root/tinyalsa" checkout --detach FETCH_HEAD
+          sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$root/android-ndk-r27c" "$root/tinyalsa" "$root/hal"
+          cp "$root/hal/hal-compile.json" "$evidence/hal-compile.json"
+          python3 build/r800_hal_dlopen_probe.py compile --ndk "$root/android-ndk-r27c" --hals "$root/hal" --source-sha "$GITHUB_SHA" --output "$root/hal-probe"
+      - name: Test five HAL HMI exports with original Wear OS 5.1 Bionic
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          root="$RUNNER_TEMP/wear51-intake"
+          evidence="$RUNNER_TEMP/wear51-evidence"
+          rc=0
+          python3 build/r800_hal_dlopen_probe.py run --probe-dir "$root/hal-probe" --hals "$root/hal" \
+            --runtime "$root/wear51-bionic" --runtime-manifest "$root/wear51-bionic/runtime-manifest.json" \
+            --output "$root/wear51-hal-runtime" || rc=$?
+          if test -f "$root/wear51-hal-runtime/hal-runtime-evidence.json"; then
+            cp "$root/wear51-hal-runtime/hal-runtime-evidence.json" "$evidence/hal-runtime.json"
+          fi
+          test "$rc" -eq 0
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence=Path(os.environ["RUNNER_TEMP"])/"wear51-evidence"
+          source=os.environ["GITHUB_SHA"]
+          runtime=json.loads((evidence/"apex-runtime.json").read_text())
+          report=json.loads((evidence/"hal-runtime.json").read_text())
+          compiled=json.loads((evidence/"hal-compile.json").read_text())
+          assert runtime["source_sha"]==report["source_sha"]==compiled["commit"]==source
+          assert runtime["status"]=="WEAR51_MINIMAL_ARM32_RUNTIME_STATIC_ONLY"
+          assert report["runtime_sha256"]=={k:v["sha256"] for k,v in runtime["minimal_runtime"]["files"].items()}
+          hals={"audio.primary.r800.so","gps.r800.so","hwcomposer.r800.so","lights.r800.so","sensors.r800.so"}
+          assert set(report["results"])==set(report["hal_sha256"])==hals
+          for name in hals:
+              row=compiled["audio_candidate"] if name.startswith("audio.") else compiled["linked_libraries"][name.split(".")[0]]
+              assert report["hal_sha256"][name]==row["sha256"]
+          assert report["status"]=="ARM32_HAL_HMI_QEMU_USER_ONLY"
+          assert all(v["status"]=="HMI_ONLY_PASS" and v["exit_code"]==0 for v in report["results"].values())
+          assert report["hal_open_called"] is False and report["hardware_tested"] is False and report["safe_to_flash"] is False
+          print("WEAR51_ORIGINAL_BIONIC_HAL_HMI_PASS",json.dumps({"source_sha":source,"system_sha256":runtime["system_sha256"],"modules":sorted(hals),"safe_to_flash":False},sort_keys=True))
+          PY
       - name: Remove original and extracted binary images
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/wear51-intake"
@@ -182,5 +258,7 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/runtime-layout.json
             ${{ runner.temp }}/wear51-evidence/elf-tls-diagnostics.json
             ${{ runner.temp }}/wear51-evidence/apex-runtime.json
+            ${{ runner.temp }}/wear51-evidence/hal-compile.json
+            ${{ runner.temp }}/wear51-evidence/hal-runtime.json
           if-no-files-found: warn
           retention-days: 7
