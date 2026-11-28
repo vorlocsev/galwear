@@ -483,6 +483,19 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           sh build/r800_hal_compile_smoke.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/android-ndk-r27c" "$RUNNER_TEMP/tinyalsa" "$RUNNER_TEMP/r800-hal"
+      - name: Compare legacy graphics ABI with pinned Android 11 headers
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_android_graphics_abi.py --ndk "$RUNNER_TEMP/android-ndk-r27c" --output "$RUNNER_TEMP/graphics-abi" --source-sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v4
+        if: always() && github.ref_name == 'development/r800-integration-20261127'
+        with:
+          name: r800-android-graphics-abi-evidence
+          path: ${{ runner.temp }}/graphics-abi/graphics-abi-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Compile pinned Mali KBASE ioctl layouts on ARM32 and ARM64
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |

@@ -192,3 +192,17 @@ release FD из кода HWC overlay (mock DECON) передаётся очер�
 reuse, существующее значение eventfd проверяется через независимый dup.
 Проверка FD baseline и прежние pixel/overlay guards сохранены. Модель
 не подтверждает kernel sync_file или Android BufferQueue.
+
+## Pinned Android 11 legacy graphics ABI
+
+AOSP android-11.0.0_r48: libhardware 1ff69d7299fc441d03b77df5134f3e9bdae50622,
+system/core 348efca472d810d3152568913da41a081893a4e3. 12 headers verified
+by Git blob identity, independent compilation with NDK r27c ARM32/ARM64,
+compare size/alignment/offsets of nine legacy structs and constants.
+Local hardware.h, hwcomposer.h, fb.h match AOSP; gralloc.h predates
+getTransportSize/validateBufferSize in reserved slots; hwcomposer_defs.h
+predates newer display definitions. No header replacement is performed.
+Only shared legacy fields are compared; IMapper2.1 is not validated.
+AOSP ARM32 hwc_layer_1_t is 96 bytes, donor property default 100 remains
+unverified; no donor adapter or real SurfaceFlinger acceptance inferred.
+JSON-only evidence; safe_to_flash=false.
