@@ -74,6 +74,29 @@ class BootProbeTests(unittest.TestCase):
         first["output_headers"]["boot.art"]["sha256"]="not-a-digest"
         self.assertEqual(probe.compare_runs(first,first)["status"],"REVIEW_REQUIRED")
 
+    def test_image_difference_bounds_and_digest_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            a=bytearray(b"art\n111\0"+b"\0"*8192)
+            b=bytearray(a)
+            for i in (100,101,4095,4096,7000):
+                b[i]=1
+            first,second=root/"first",root/"second"
+            first.write_bytes(a)
+            second.write_bytes(b)
+            expected=[{"status":"HEADER_OBSERVED","bytes":len(x),"sha256":probe.sha(x)} for x in (a,b)]
+            r=probe.image_difference(first,second,expected)
+            self.assertEqual(r["different_common_bytes"],5)
+            self.assertEqual(r["different_ranges"],3)
+            self.assertEqual(r["different_pages"],2)
+            self.assertEqual(r["first_difference_offset"],100)
+            self.assertEqual(r["last_common_difference_offset"],7000)
+            self.assertTrue(r["header_first_16_identical"])
+            self.assertFalse(r["semantic_cause_verified"])
+            second.write_bytes(a)
+            with self.assertRaisesRegex(ValueError,"changed"):
+                probe.image_difference(first,second,expected)
+
     def test_reject_empty_and_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
