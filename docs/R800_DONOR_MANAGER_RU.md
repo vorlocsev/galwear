@@ -24,7 +24,12 @@ Git checkout и не в его родительском каталоге. Ука
     "effects": {"path":"vendor/libeffectsconfig.so","sha256":"EFFECTS_SHA256"},
     "tizen": {"path":"tizen/rootfs.img","sha256":"RAW_TIZEN_SHA256"},
     "closure": {"path":"tizen/closure","sha256":"CLOSURE_MANIFEST_SHA256"},
-    "ndk": {"path":"tools/android-ndk-r27c"}
+    "ndk": {"path":"tools/android-ndk-r27c","tools_sha256":{
+      "source.properties":"REVISION_SHA256",
+      "clang":"CLANG_SHA256",
+      "ld.lld":"LLD_SHA256",
+      "llvm-readelf":"READELF_SHA256"
+    }}
   },
   "evidence": {
     "system": {"path":"pixel/raw-donor-evidence.json","sha256":"PIXEL_REPORT_SHA256"},
@@ -39,8 +44,18 @@ Git checkout и не в его родительском каталоге. Ука
 Опциональные assets: объект path/sha256 для каталога и
 assets-evidence.json. Все три отчёта обязательны в managed mode;
 старый CLI сборщика остаётся доступен для диагностики.
-Путь NDK проверяется как каталог, но его содержимое не закреплено
-этим манифестом. Модель base vendor, источник effects, права обработки
+Для managed build обязательны четыре SHA-256 в tools_sha256. Версия NDK
+должна быть 27.2.12479018 (r27c); проверяются source.properties и три
+исполняемых файла GPSBridge до и после сборки. Старый манифест без этих
+pins допускается только в managed check с явным NOT_SUPPLIED.
+Локальные наблюдаемые хеши можно вывести без запуска компилятора:
+
+```sh
+python3 build/r800_ndk_pins.py --ndk /local/galwear-inputs/tools/android-ndk-r27c
+```
+
+Сверять pins с доверенной копией NDK; сам вывод хешей не доказывает
+подлинность. Проверка не охватывает остальные файлы NDK и библиотеки хоста. Модель base vendor, источник effects, права обработки
 и подлинность доноров требуют отдельной проверки. XTRA ABI 0 здесь
 только пример, фактическое значение должно соответствовать входам.
 
