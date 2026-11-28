@@ -158,3 +158,37 @@ GLIBC_LIST_SELECTED_PROVIDERS_MATCH_ONLY не означает проверку 
 запуска, secure-execution, dlopen, Python extensions или воспроизводимости.
 Этот отчёт пока диагностический, не является обязательным gate.
 Реальная VM и её glibc не проверены в рамках текущей разработки.
+
+
+## Python Runtime Lock
+
+Для Ubuntu 24.04 выбран системный Python 3.12 и /usr/lib/python3.12.
+Режим -B отключает создание новых bytecode caches этим процессом;
+существующие .pyc учитываются в инвентаризации.
+
+```sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+/usr/bin/python3 -B build/r800_python_runtime_lock.py \
+  --mode capture --lock /local/galwear-inputs/linux-assembly-lock.json \
+  --lock-sha256 "$LOCK_SHA256" --source-sha "$HEAD_SHA" \
+  > /local/galwear-inputs/python-runtime-lock.json
+sha256sum /local/galwear-inputs/python-runtime-lock.json
+/usr/bin/python3 -B build/r800_python_runtime_lock.py \
+  --mode check --lock /local/galwear-inputs/linux-assembly-lock.json \
+  --lock-sha256 "$LOCK_SHA256" --source-sha "$HEAD_SHA" \
+  --report /local/galwear-inputs/python-runtime-lock.json \
+  --report-sha256 "$PYTHON_REPORT_SHA256"
+```
+
+Инвентаризация фиксирует относительные имена, размеры, SHA-256 обычных
+файлов, включая пустые файлы и существующие caches. Для .so выполняется
+статический анализ ELF-кандидатов через существующий host audit без импорта
+модулей. Символьные ссылки не раскрываются автоматически; они требуют review.
+site-packages и dist-packages намеренно исключены, их наличие отмечается.
+Ограничения числа объектов/размеров и неоднозначные ELF-кандидаты могут
+потребовать доработки на реальной Ubuntu VM.
+
+SELECTED_PYTHON_RUNTIME_BYTES_AND_ELF_CANDIDATES_ONLY не доказывает
+фактический sys.path/import resolution, отсутствие sitecustomize,
+сторонних модулей, dlopen или воспроизводимость.
+Отчёт диагностический, пока не gate управляемой сборки.
