@@ -7,6 +7,10 @@ import re
 import resource
 import shutil
 import subprocess
+import select
+import socket
+import tempfile
+import time
 
 from r800_framework_inventory import ext4_member, MAX_MEMBER
 from r800_wear51_art_dependencies import MAX_BYTES, MAX_OBJECTS, NAME
@@ -18,6 +22,10 @@ DEX="art:/bin/dex2oat32"
 STUB="system:/system/lib/ld-android.so"
 LIMIT=2*1024**2
 TAIL=16384
+LOG_LIMIT=1024*1024
+LOG_RECORDS=512
+INVALID_OPTION="--galwear-unknown-argument-probe"
+USAGE_ERROR="See log for usage error information"
 
 
 def sha(raw):
@@ -74,38 +82,111 @@ def limit_child():
     resource.setrlimit(resource.RLIMIT_FSIZE,(LIMIT,LIMIT))
 
 
-def run_case(qemu,bwrap,guest,scratch,name,args):
-    command=[bwrap,"--unshare-all","--die-with-parent","--new-session","--clearenv",
-             "--ro-bind",str(guest),"/","--ro-bind",qemu,"/qemu","--dev","/dev",
-             "--proc","/proc","--chdir","/","/qemu","-cpu","max","-L","/",
-             "-E","ANDROID_ROOT=/system","-E","ANDROID_ART_ROOT=/apex/com.android.art",
-             "-E","ANDROID_RUNTIME_ROOT=/apex/com.android.runtime",
-             "-E","ANDROID_DATA=/data",*args]
+def decode_log_record(packet):
+    # Android logdw datagrams: packed log ID, TID, timestamp (11 bytes),
+    # followed by priority byte and NUL-terminated tag/message.
+    if len(packet)<15 or packet[11] not in range(2,8):
+        return None
+    parts=packet[12:].split(b"\0",2)
+    if len(parts)<3 or not parts[0] or len(parts[0])>256:
+        return None
+    return {"priority":packet[11],"tag":parts[0].decode("utf-8","replace"),
+            "message":parts[1].decode("utf-8","replace")}
+
+
+def evaluate_case(name,rc,out,err,records,timeout,capped,staged):
+    logs="\n".join(r["message"] for r in records)
+    combined=out+"\n"+err+"\n"+logs
+    clean=not timeout and not capped and not re.search(
+        r"CANNOT LINK EXECUTABLE|cannot locate symbol|uncaught target signal|fatal signal",
+        combined,re.I)
+    if name=="linker-list":
+        resolved=re.findall(r"(?m)^\s*(\S+)\s+=>\s+(/\S+)\s+\(",out)
+        paths={path for _,path in resolved}
+        required={"/apex/com.android.art/lib/libart.so",
+                  "/apex/com.android.art/lib/libc++.so",
+                  "/system/lib/libc++.so",
+                  "/apex/com.android.runtime/lib/bionic/libc.so",
+                  "/apex/com.android.os.statsd/lib/libstatspull.so",
+                  "/apex/com.android.os.statsd/lib/libstatssocket.so"}
+        marker=(rc==0 and required<=paths<=set(staged) and all(
+            path.rsplit("/",1)[-1]==name for name,path in resolved))
+        status="MARKER_PASS" if clean and marker else "REVIEW_REQUIRED"
+        return status,marker,sorted(paths)
+    usage=bool(re.search(r"(?im)^\s*Usage:\s*dex2oat(?:\s|$)",combined))
+    rejected=(rc==1 and USAGE_ERROR in err.splitlines())
+    if name=="dex2oat-invalid":
+        marker=rejected and usage and INVALID_OPTION in combined
+    elif name=="dex2oat-help":
+        marker=usage and (rc==0 or rejected)
+    elif name=="dex2oat-noargs":
+        marker=rejected and usage
+    else:
+        raise ValueError("Unexpected ART probe")
+    return ("ARGUMENT_HANDLER_OBSERVED" if clean and marker else "REVIEW_REQUIRED"),marker,[]
+
+
+def run_case(qemu,bwrap,guest,scratch,name,args,staged):
     stdout=scratch/(name+".stdout")
     stderr=scratch/(name+".stderr")
     rc=None
     timed_out=False
-    with stdout.open("xb") as out,stderr.open("xb") as err:
-        try:
-            rc=subprocess.run(command,stdout=out,stderr=err,timeout=30,
-                              preexec_fn=limit_child).returncode
-        except subprocess.TimeoutExpired:
-            timed_out=True
-    capped=any(p.stat().st_size>=LIMIT for p in (stdout,stderr))
+    log_capped=False
+    packets=0
+    received=0
+    records=[]
+    # A private, pathname-only AF_UNIX datagram sink. It never proxies
+    # to the host logd and never supplies Android service responses.
+    with tempfile.TemporaryDirectory(prefix="wear51-log-") as logdir:
+        with socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM) as sink:
+            sink.bind(str(Path(logdir)/"logdw"))
+            sink.setblocking(False)
+            command=[bwrap,"--unshare-all","--die-with-parent","--new-session","--clearenv",
+                     "--ro-bind",str(guest),"/","--ro-bind",qemu,"/qemu","--dev","/dev",
+                     "--ro-bind",logdir,"/dev/socket","--proc","/proc","--chdir","/",
+                     "/qemu","-cpu","max","-L","/",
+                     "-E","ANDROID_ROOT=/system","-E","ANDROID_ART_ROOT=/apex/com.android.art",
+                     "-E","ANDROID_RUNTIME_ROOT=/apex/com.android.runtime",
+                     "-E","ANDROID_DATA=/data","-E","ANDROID_LOG_TAGS=*:v",*args]
+            with stdout.open("xb") as out,stderr.open("xb") as err:
+                proc=subprocess.Popen(command,stdout=out,stderr=err,preexec_fn=limit_child)
+                deadline=time.monotonic()+30
+                try:
+                    while True:
+                        if time.monotonic()>=deadline:
+                            timed_out=True
+                            proc.kill()
+                            break
+                        ready,_,_=select.select([sink],[],[],0.05)
+                        if ready:
+                            packet=sink.recv(65536)
+                            packets+=1
+                            received+=len(packet)
+                            if received>LOG_LIMIT or packets>LOG_RECORDS:
+                                log_capped=True
+                                proc.kill()
+                                break
+                            record=decode_log_record(packet)
+                            if record is not None:
+                                records.append(record)
+                        elif proc.poll() is not None:
+                            break
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    rc=proc.wait(timeout=5)
+    capped=log_capped or any(p.stat().st_size>=LIMIT for p in (stdout,stderr))
     def tail(path):
         with path.open("rb") as stream:
             stream.seek(max(0,path.stat().st_size-TAIL))
             return stream.read(TAIL).decode("utf-8","replace")
     out,err=tail(stdout),tail(stderr)
-    clean=not timed_out and not capped and not re.search(
-        r"CANNOT LINK EXECUTABLE|cannot locate symbol|uncaught target signal|fatal signal",
-        out+"\n"+err,re.I)
-    # A --help return of 1 is allowed only with an actual dex2oat usage marker.
-    marker=(rc==0 and "libart.so" in out if name=="linker-list" else
-            rc in (0,1) and bool(re.search(r"(?im)^\s*usage:.*dex2oat|^\s*dex2oat\s+usage",out+"\n"+err)))
-    return {"status":"MARKER_PASS" if clean and marker else "REVIEW_REQUIRED",
-            "exit_code":rc,"timeout":timed_out,"output_capped":capped,
-            "stdout_tail":out,"stderr_tail":err,"marker_observed":bool(marker)}
+    status,marker,paths=evaluate_case(name,rc,out,err,records,timed_out,capped,staged)
+    return {"status":status,"exit_code":rc,"timeout":timed_out,
+            "output_capped":capped,"stdout_tail":out,"stderr_tail":err,
+            "marker_observed":bool(marker),"resolved_paths":paths,
+            "logdw_packets":packets,"logdw_bytes":received,
+            "logdw_records":records,"logd_service_emulated":False}
 
 
 def probe(sources,graph,scratch,source,pin):
@@ -153,13 +234,17 @@ def probe(sources,graph,scratch,source,pin):
     # No LD_LIBRARY_PATH, no activation, no host files or writable mounts.
     rows={}
     for name,args in (("linker-list",[guest_path(LINKER),"--list",guest_path(DEX)]),
-                      ("dex2oat-help",[guest_path(DEX),"--help"])):
-        rows[name]=run_case(str(Path(qemu).resolve()),bwrap,guest,scratch,name,args)
-    return {"schema":"galwear-r800-wear51-art-startup-v1","source_sha":source,
+                      ("dex2oat-help",[guest_path(DEX),"--help"]),
+                      ("dex2oat-noargs",[guest_path(DEX)]),
+                      ("dex2oat-invalid",[guest_path(DEX),INVALID_OPTION])):
+        rows[name]=run_case(str(Path(qemu).resolve()),bwrap,guest,scratch,name,args,staged)
+    passed=(rows["linker-list"]["status"]=="MARKER_PASS" and all(
+        rows[name]["status"]=="ARGUMENT_HANDLER_OBSERVED"
+        for name in ("dex2oat-help","dex2oat-noargs","dex2oat-invalid")))
+    return {"schema":"galwear-r800-wear51-art-startup-v2","source_sha":source,
             "system_sha256":pin,"qemu_cpu":"max","staged_sha256":staged,
             "excluded_system_ld_android_sha256":objects[STUB]["sha256"],
             "synthetic_config_sha256":sha(cfg.encode()),"synthetic_config":cfg,
-            "results":rows,"status":"DEX2OAT_STARTUP_PROBE_ONLY" if all(
-                v["status"]=="MARKER_PASS" for v in rows.values()) else "REVIEW_REQUIRED",
+            "results":rows,"status":"DEX2OAT_ARGUMENT_HANDLER_PROBE_ONLY" if passed else "REVIEW_REQUIRED",
             "android_namespace_runtime_verified":False,"art_initialized":False,
             "dex_compilation_verified":False,"hardware_tested":False,"safe_to_flash":False}
