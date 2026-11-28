@@ -23,6 +23,7 @@ from r800_donor_preflight import digest, MAX_DONOR, verify_components
 from r800_graphics_donor_binding import checkout_sha
 from r800_extract_super import require
 from r800_verify_tizen_stage import MANIFEST, unique_keys
+from r800_display_asset_layer import load_assets
 
 MAX_REPORT=16*1024**2
 MAX_FILE=64*1024**2
@@ -69,9 +70,14 @@ def preflight(paths, pins, output, source_sha):
     return paths,output
 
 
-def build(paths,pins,output,source_sha,xtra_abi=0):
+def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None):
     require(type(xtra_abi) is int and xtra_abi in (0,1,2),"Explicit supported XTRA ABI required")
     p,output=preflight(paths,pins,output,source_sha)
+    require((assets is None)==(assets_sha is None),"Asset directory and manifest pin must be supplied together")
+    if assets is not None:
+        assets=Path(assets).absolute()
+        require(not output.resolve().is_relative_to(assets),"Output inside asset input")
+        load_assets(assets,assets_sha)
     with tempfile.TemporaryDirectory(dir=output.parent,prefix="r800-local-build-") as tmp:
         work=Path(tmp)
         # Reject diagnostic/stale kernel before expensive vendor/runtime work.
@@ -81,9 +87,10 @@ def build(paths,pins,output,source_sha,xtra_abi=0):
         adaptation=work/"adaptation"
         android=work/"android-build"
         result=work/"result"
-        d=stage_device(p["components"],device,source_sha)
+        d=stage_device(p["components"],device,source_sha,assets=assets,assets_sha=assets_sha)
         dp=bind(device,"device-layer-evidence.json",d,source_sha,"COMPILED_DEVICE_LAYER_STAGED_ONLY")
         require(d["component_manifest_sha256"]==pins["components"],"Device component pin mismatch")
+        require(d.get("assets_manifest_sha256")==assets_sha,"Device display asset pin mismatch")
         t=stage_runtime(p["tizen"],pins["tizen"],p["closure"],pins["closure"],
                         p["ndk"],runtime,source_sha,xtra_abi)
         tp=bind(runtime,"tizen-runtime-evidence.json",t,source_sha,"LOCAL_TIZEN_ELF_FIRMWARE_RUNTIME_STAGED_ONLY")
@@ -141,12 +148,19 @@ def build(paths,pins,output,source_sha,xtra_abi=0):
             require(sha(data)==pin,"Vendor recipe evidence changed")
             (evidence/name).write_bytes(data)
             copied[name]=pin
+        if assets is not None:
+            load_assets(assets,assets_sha)
+            asset_raw=read_regular(assets/"assets-evidence.json",1024*1024)
+            require(sha(asset_raw)==assets_sha,"Asset evidence changed")
+            (evidence/"assets-evidence.json").write_bytes(asset_raw)
+            copied["assets-evidence.json"]=assets_sha
         handover_raw=(json.dumps(handover,indent=2,sort_keys=True)+"\n").encode()
         (evidence/"handover-review.json").write_bytes(handover_raw)
         copied["handover-review.json"]=sha(handover_raw)
         summary={"schema":"galwear-r800-local-development-build-v1",
                  "status":"LOCAL_GALWEAR_DEVELOPMENT_TREE_BUILT_STATIC_ONLY",
                  "source_sha":source_sha,"input_sha256":pins,"xtra_abi":xtra_abi,
+                 "assets_manifest_sha256":assets_sha,
                  "stage_evidence_sha256":copied,"integrated_evidence_sha256":ip,
                  "missing_inputs_and_gates":i["missing_inputs_and_gates"],
                  "kernel_and_components_compiled_by_this_command":False,
@@ -174,10 +188,12 @@ def main():
     parser.add_argument("--source-sha",required=True)
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--xtra-abi",type=int,choices=(0,1,2),default=0)
+    parser.add_argument("--assets",type=Path)
+    parser.add_argument("--assets-sha256")
     args=parser.parse_args()
     paths={n:getattr(args,n) for n in names}
     pins={n:getattr(args,n+"_sha256") for n in names if n!="ndk"}
-    print(build(paths,pins,args.output,args.source_sha,args.xtra_abi)["status"],"safe_to_flash=false")
+    print(build(paths,pins,args.output,args.source_sha,args.xtra_abi,assets=args.assets,assets_sha=args.assets_sha256)["status"],"safe_to_flash=false")
 
 
 if __name__=="__main__":
