@@ -16,6 +16,7 @@ on:
       - build/r800_wear51_apex_container.py
       - build/r800_wear51_art_dependencies.py
       - build/r800_wear51_art_probe.py
+      - build/r800_wear51_qemu_comparator.sh
       - build/r800_wear51_art_boot_probe.py
       - tests/test_r800_wear51_art_boot_probe.py
       - tests/test_r800_wear51_art_probe.py
@@ -93,6 +94,14 @@ jobs:
           python3 build/r800_extract_wear51_factory.py --archive "$root/factory.zip" --output "$root/extracted"
           cp "$root/extracted/factory-evidence.json" "$RUNNER_TEMP/wear51-evidence/"
           rm -f "$root/factory.zip"
+      - name: Prepare signed-repository QEMU comparator without host installation
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/wear51-intake"
+          bash -n build/r800_wear51_qemu_comparator.sh
+          bash build/r800_wear51_qemu_comparator.sh "$root"
+          cp "$root/qemu-noble/comparator.json" "$RUNNER_TEMP/wear51-evidence/qemu-comparator.json"
       - name: Observe actual Android 15 partition layout and identity
         shell: bash
         run: |
@@ -170,7 +179,7 @@ jobs:
                              for member,row in diagnostics.items()), "Original Android 15 ELF TLS revalidation failed"
                   print("WEAR51_ORIGINAL_TLS_STATIC_PASS")
                   from r800_wear51_apex_runtime import audit as apex_audit
-                  result=apex_audit(path,pin,source,root/"wear51-bionic",probe_art=True)
+                  result=apex_audit(path,pin,source,root/"wear51-bionic",probe_art=True,qemu_compare=root/"qemu-noble")
                   (evidence/"apex-runtime.json").write_text(json.dumps(result,indent=2,sort_keys=True)+"\n")
                   graph=result["art_dependencies"]
                   startup=result["art_startup"]
@@ -178,7 +187,7 @@ jobs:
                   print("WEAR51_ART_STARTUP",json.dumps({k:v for k,v in startup.items() if k not in ("staged_sha256","results","synthetic_config","boot_image_probe")},sort_keys=True))
                   boot=startup.get("boot_image_probe",{"status":"NOT_TESTED"})
                   (evidence/"art-boot-probe.json").write_text(json.dumps(boot,indent=2,sort_keys=True)+"\n")
-                  print("WEAR51_ART_BOOT_PROBE",json.dumps({k:v for k,v in boot.items() if k not in ("boot_jars","result")},sort_keys=True))
+                  print("WEAR51_ART_BOOT_PROBE",json.dumps({k:v for k,v in boot.items() if k not in ("boot_jars","result","comparison")},sort_keys=True))
                   if "boot_jars" in boot:
                       print("WEAR51_ART_BOOT_JARS",json.dumps({k:{"status":v["status"],"sha256":v.get("sha256"),"dex_entries":v.get("dex_entries")} for k,v in boot["boot_jars"]["members"].items()},sort_keys=True))
                   if "result" in boot:
@@ -186,6 +195,15 @@ jobs:
                       print("WEAR51_ART_BOOT_CASE",json.dumps({k:v for k,v in case.items() if k!="logdw_records"},sort_keys=True))
                       for record in case.get("logdw_records",[])[:32]:
                           print("WEAR51_ART_BOOT_LOGDW",json.dumps(record,sort_keys=True))
+                  if "comparison" in boot:
+                      comparison=boot["comparison"]
+                      print("WEAR51_ART_QEMU_COMPARISON",json.dumps({k:v for k,v in comparison.items() if k not in ("result","linker_control")},sort_keys=True))
+                      for name in ("linker_control","result"):
+                          if name in comparison:
+                              case=comparison[name]
+                              print("WEAR51_ART_QEMU_COMPARISON_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
+                              for record in case.get("logdw_records",[])[:32]:
+                                  print("WEAR51_ART_QEMU_COMPARISON_LOGDW",json.dumps({"case":name,**record},sort_keys=True))
                   for name,case in startup.get("results",{}).items():
                       print("WEAR51_ART_STARTUP_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                       for record in case.get("logdw_records",[])[:32]:
@@ -391,6 +409,7 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/apex-runtime.json
             ${{ runner.temp }}/wear51-evidence/art-startup.json
             ${{ runner.temp }}/wear51-evidence/art-boot-probe.json
+            ${{ runner.temp }}/wear51-evidence/qemu-comparator.json
             ${{ runner.temp }}/wear51-evidence/hal-compile.json
             ${{ runner.temp }}/wear51-evidence/hal-runtime.json
             ${{ runner.temp }}/wear51-evidence/hal-lifecycle.json
