@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Isolated original ARM32 dex2oat startup, not ART/Android boot acceptance."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -226,7 +227,7 @@ def run_case(qemu,bwrap,guest,scratch,name,args,staged,*,boot_output=None):
             "output_headers":artifacts}
 
 
-def probe(sources,graph,scratch,source,pin):
+def probe(sources,graph,scratch,source,pin,*,qemu_compare=None):
     if os.geteuid()==0:
         raise ValueError("Non-root execution required")
     qemu,bwrap=shutil.which("qemu-arm-static"),shutil.which("bwrap")
@@ -279,6 +280,7 @@ def probe(sources,graph,scratch,source,pin):
         rows[name]["status"]=="ARGUMENT_HANDLER_OBSERVED"
         for name in ("dex2oat-help","dex2oat-noargs","dex2oat-invalid")))
     boot={"status":"NOT_TESTED"}
+    baseline_qemu=str(Path(qemu).resolve())
     if passed:
         try:
             from r800_wear51_art_boot_probe import stage, arguments
@@ -288,7 +290,37 @@ def probe(sources,graph,scratch,source,pin):
                 with tempfile.TemporaryDirectory(prefix="wear51-boot-",dir=scratch) as outdir:
                     result=run_case(str(Path(qemu).resolve()),bwrap,guest,scratch,"boot-image",
                                     arguments(jars["classpath"]),staged,boot_output=Path(outdir))
-                    boot.update(status=result["status"],result=result)
+                    boot.update(status=result["status"],result=result,
+                                baseline_qemu={"version":subprocess.check_output([baseline_qemu,"--version"],text=True,timeout=10).splitlines()[0],
+                                               "sha256":sha(Path(baseline_qemu).read_bytes())})
+                if qemu_compare is not None:
+                    # Same guest, namespace, JARs, arguments and CPU model.
+                    # Separate output and log directories, no retry fallback.
+                    comparison={"status":"REVIEW_REQUIRED"}
+                    boot["comparison"]=comparison
+                    try:
+                        work=Path(qemu_compare)
+                        alternate=work/"extracted/usr/bin/qemu-arm-static"
+                        meta=json.loads((work/"comparator.json").read_text())
+                        if alternate.is_symlink() or not alternate.is_file() or sha(alternate.read_bytes())!=meta["qemu_sha256"]:
+                            raise ValueError("Comparator binary digest mismatch")
+                        version=subprocess.check_output([str(alternate),"--version"],text=True,timeout=10).splitlines()[0]
+                        if version!=meta["qemu_version"] or not version.startswith("qemu-arm version 8.2.2") or meta["host_install_performed"] is not False:
+                            raise ValueError("Unexpected comparator provenance")
+                        with tempfile.TemporaryDirectory(prefix="wear51-compare-",dir=scratch) as compdir:
+                            comp=Path(compdir)
+                            (comp/"data").mkdir()
+                            control=run_case(str(alternate),bwrap,guest,comp,"linker-list",
+                                [guest_path(LINKER),"--list",guest_path(DEX)],staged)
+                            comparison.update(qemu=meta,linker_control=control)
+                            if control["status"]=="MARKER_PASS":
+                                alternate_result=run_case(str(alternate),bwrap,guest,comp,"boot-image",
+                                    arguments(jars["classpath"]),staged,boot_output=comp/"data")
+                                comparison.update(status=alternate_result["status"],result=alternate_result)
+                        if sha(alternate.read_bytes())!=meta["qemu_sha256"]:
+                            raise ValueError("Comparator binary changed")
+                    except (OSError,ValueError,RuntimeError,KeyError,subprocess.SubprocessError) as exc:
+                        comparison.update(status="REVIEW_REQUIRED",reason=str(exc))
         except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
             boot.update(status="REVIEW_REQUIRED",reason=str(exc),safe_to_flash=False)
     return {"schema":"galwear-r800-wear51-art-startup-v2","source_sha":source,
