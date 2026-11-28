@@ -34,13 +34,29 @@ def jar(entries):
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in entries.items():
-            archive.writestr(name, data)
+            # ZIP defaults to the wall clock, which changes the serialized
+            # bytes every two seconds. Pin fixture metadata, not parser output.
+            entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            entry.create_system = 3
+            entry.external_attr = 0o100644 << 16
+            archive.writestr(entry, data)
     return stream.getvalue()
 
 
 class FrameworkDexTests(unittest.TestCase):
     path = "/framework/framework.jar"
     sha = "a"*40
+
+    def test_fixture_jar_fixed_metadata(self):
+        data = jar({"classes.dex": dex()})
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entry = archive.getinfo("classes.dex")
+            self.assertEqual(entry.date_time, (1980, 1, 1, 0, 0, 0))
+            self.assertEqual(entry.compress_type, zipfile.ZIP_DEFLATED)
+            self.assertEqual(entry.external_attr >> 16, 0o100644)
+            self.assertEqual(archive.read(entry), dex())
+        self.assertEqual(data, jar({"classes.dex": dex()}))
 
     def test_headers_only(self):
         data = jar({"classes.dex": dex(), "classes2.dex": dex(b"035")})
