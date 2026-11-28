@@ -122,6 +122,7 @@ def probe(workspace,lock,pin,source_sha):
         checks=json.loads(child.stdout)
         require(set(checks)==set(CHECKS) and all(v is True for v in checks.values()),
                 "Incomplete synthetic mount checks")
+        require(detached(image),"Synthetic loop association remains before fsck")
         command(["e2fsck","-fn",str(image)],60)
         checks["offline_fsck"]=True
     except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:
@@ -140,6 +141,8 @@ def probe(workspace,lock,pin,source_sha):
     after=verify(lock,pin,source_sha)
     require(before==after,"Host evidence changed during synthetic probe")
     checkout_sha(source_sha)
+    if not cleanup and error is None:
+        error="Synthetic fixture cleanup could not be verified"
     passed=error is None and cleanup
     return {"schema":"galwear-r800-synthetic-mount-probe-v1","source_sha":source_sha,
             "environment_lock_sha256":pin,
