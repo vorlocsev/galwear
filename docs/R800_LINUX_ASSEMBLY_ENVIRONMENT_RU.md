@@ -61,10 +61,38 @@ CAP_SYS_ADMIN и наличие loop-control. Если хотя бы одна п
 не подтверждает private mount namespace, loop mount или SELinux xattrs.
 Никакие монтирования, компиляторы и гостевые бинарники не запускаются.
 
-Следующие работы: безопасная отдельная проверка mount namespace и xattrs
-на синтетическом образе, привязка environment lock к Donor Manager,
+Следующие работы: выполнение синтетической проверки на отдельной VM,
+привязка environment lock и отчёта пробы к Donor Manager,
 проверка динамических библиотек и закрепление версии сборочной VM.
 Текущий lock не является обязательным gate существующего сборщика и не
 доказывает побайтовую воспроизводимость.
 
 NON-RELEASE. safe_to_flash=false.
+
+
+## Синтетическая проверка возможностей VM
+
+Только в отдельной доверенной VM, с явно подтверждённым запуском.
+Не использовать основной компьютер, часы или подключённые физические
+диски. Скрипт не принимает путь к донорскому образу или устройству.
+
+```sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+/usr/bin/python3 build/r800_synthetic_mount_probe.py \
+  --workspace /local/galwear-inputs \
+  --lock /local/galwear-inputs/linux-assembly-lock.json \
+  --lock-sha256 "$LOCK_SHA256" --source-sha "$HEAD_SHA" \
+  --confirm-dedicated-vm
+```
+
+Проба создаёт собственный временный образ EXT4 (32 МиБ), запускает
+private mount namespace, проверяет RW loop mount, SELinux security.selinux,
+перенос xattrs через tar, сохранность данных при RO remount, umount и
+отсутствие loop-ассоциации, затем выполняет e2fsck -fn.
+При невозможности подтвердить очистку временный каталог сохраняется;
+автоматическое отключение чужих loop-устройств запрещено.
+
+SYNTHETIC_EXT4_MOUNT_XATTR_PASS_ONLY относится только к данному тесту VM.
+Реальные mount/xattr проверки ещё не выполнены в рамках разработки;
+модульные тесты используют заглушки. Проба не проверяет сборку vendor,
+изоляцию от враждебного root, оригинальные доноры или железо.
