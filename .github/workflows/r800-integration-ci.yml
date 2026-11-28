@@ -57,6 +57,33 @@ jobs:
           fi
           sha256sum "$out/init"
           echo "HANDOVER_INIT_COMPILE_ONLY; not executed; safe_to_flash=false"
+      - name: Build functional development initramfs without executing guest
+        if: github.ref_name == 'development/r800-integration-20261127'
+        run: |
+          set -eu
+          out="$RUNNER_TEMP/r800-development-init"
+          python3 build/r800_development_initramfs.py --output "$out" --source-sha "$GITHUB_SHA"
+          cmp "$out/init" "$RUNNER_TEMP/r800-handover-init/init"
+          python3 - "$out" <<'PY'
+          import json, pathlib, sys, os
+          root=pathlib.Path(sys.argv[1])
+          r=json.loads((root/"development-initramfs-evidence.json").read_text())
+          assert r["source_sha"] == os.environ["GITHUB_SHA"]
+          assert r["status"] == "FUNCTIONAL_INIT_COMPILED_CPIO_STAGED_ONLY"
+          assert r["cpio"]["embedded_init_exact_match"] is True
+          assert r["storage_write_capable"] is True
+          for flag in ("kernel_compiled","init_executed","android_handover_tested","safe_to_flash"):
+              assert r[flag] is False
+          assert 'CONFIG_INITRAMFS_SOURCE="@DEVELOPMENT_CPIO@"' in (root/"development.config.in").read_text()
+          print("REAL_DEVELOPMENT_INITRAMFS_PASS")
+          PY
+      - name: Upload development initramfs evidence only
+        if: github.ref_name == 'development/r800-integration-20261127'
+        uses: actions/upload-artifact@v4
+        with:
+          name: r800-development-initramfs-evidence-only
+          path: ${{ runner.temp }}/r800-development-init/development-initramfs-evidence.json
+          retention-days: 7
       - name: Verify native GPS bridge helpers and ARM32 objects (no vendor code execution)
         if: github.ref_name == 'development/r800-integration-20261127'
         run: |
