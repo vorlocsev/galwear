@@ -171,7 +171,18 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None)
         publish.mkdir()
         os.rename(result,publish/"development")
         os.rename(evidence,publish/"evidence")
-        (publish/"local-build-evidence.json").write_text(json.dumps(summary,indent=2,sort_keys=True)+"\n")
+        summary_raw=(json.dumps(summary,indent=2,sort_keys=True)+"\n").encode()
+        (publish/"local-build-evidence.json").write_bytes(summary_raw)
+        # Recompute the complete evidence chain from the private final tree
+        # before it is exposed to the caller. A structural HOLD is expected;
+        # it is not acceptance of installation or hardware boot.
+        from r800_development_readiness import readiness
+        final=readiness(publish,sha(summary_raw),source_sha)
+        require(final["checks"]["stage_chain"]=="STATIC_PASS" and
+                final["integrated_evidence_sha256"]==ip and
+                final["status"]=="HOLD_HARDWARE_UNVERIFIED" and
+                final["safe_to_flash"] is False,
+                "Final readiness verification failed")
         checkout_sha(source_sha)
         require(not output.exists() and not output.is_symlink(),"Output already exists")
         os.rename(publish,output)
