@@ -372,6 +372,51 @@ jobs:
             ${{ runner.temp }}/graphics-acceptance.json
           if-no-files-found: warn
           retention-days: 7
+  erofs-framework-fixture:
+    if: github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build pinned host-only erofs-utils 1.8.5
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update
+          sudo apt-get -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y --no-install-recommends build-essential autoconf automake libtool pkg-config uuid-dev liblz4-dev liblzma-dev zlib1g-dev
+          src="$RUNNER_TEMP/erofs-utils"
+          pin=7bc147fafd53a2a9ff7c22399491079e5bfffafc
+          git init "$src"
+          git -C "$src" remote add origin https://github.com/erofs/erofs-utils.git
+          git -C "$src" fetch --depth=1 origin "$pin"
+          git -C "$src" checkout --detach FETCH_HEAD
+          test "$(git -C "$src" rev-parse HEAD)" = "$pin"
+          (
+            cd "$src"
+            autoreconf -fi
+            ./configure --disable-fuse --enable-lz4
+            make -j2
+          )
+          "$src/mkfs/mkfs.erofs" -V
+          "$src/dump/dump.erofs" -V
+      - name: Test actual EROFS readers with plain and LZ4 fixtures
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_erofs_framework_fixture.py \
+            --tool-root "$RUNNER_TEMP/erofs-utils" --source-sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/erofs-framework-evidence.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r800-erofs-framework-evidence
+          path: ${{ runner.temp }}/erofs-framework-evidence.json
+          if-no-files-found: warn
+          retention-days: 7
   phh-reference-cross-host:
     if: github.ref_name == 'development/r800-integration-20261127'
     needs: [arm32-reference-extract, arm32-hal-qemu]
