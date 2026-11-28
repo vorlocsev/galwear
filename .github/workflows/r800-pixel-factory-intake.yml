@@ -408,6 +408,70 @@ jobs:
           assert report["hal_open_called"] is False and report["hardware_tested"] is False and report["safe_to_flash"] is False
           print("PIXEL_ORIGINAL_BIONIC_HAL_HMI_PASS",json.dumps({"source_sha":report["source_sha"],"system_sha256":runtime["raw_system_sha256"],"modules":sorted(report["results"]),"safe_to_flash":False},sort_keys=True))
           PY
+      - name: Exercise HAL lifecycle and synthetic devices with original Pixel Bionic
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/pixel-intake"
+          evidence="$RUNNER_TEMP/pixel-evidence"
+          failed=0
+          for mode in lifecycle lights-fixture sensors-fixture sensors-context sensors-evdev gps-fixture audio-fixture audio-pcm-fixture hwc-fixture namespace-fixture; do
+            rc=0
+            python3 build/r800_hal_dlopen_probe.py run --probe-dir "$root/hal-probe" --hals "$root/hal" \
+              --runtime "$root/pixel-bionic" --runtime-manifest "$root/pixel-bionic/runtime-manifest.json" \
+              --output "$root/pixel-hal-$mode" "--$mode" || rc=$?
+            if test -f "$root/pixel-hal-$mode/hal-runtime-evidence.json"; then
+              cp "$root/pixel-hal-$mode/hal-runtime-evidence.json" "$evidence/pixel-hal-$mode.json"
+            fi
+            if test "$rc" -ne 0; then failed=1; fi
+          done
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence=Path(os.environ["RUNNER_TEMP"])/"pixel-evidence"
+          source=os.environ["GITHUB_SHA"]
+          runtime=json.loads((evidence/"pixel-bionic-extraction.json").read_text())
+          baseline=json.loads((evidence/"pixel-hal-runtime.json").read_text())
+          pins={k:v["sha256"] for k,v in runtime["files"].items()}
+          assert source==runtime["source_sha"]==baseline["source_sha"]
+          assert pins==baseline["runtime_sha256"]
+          modes={
+              "lifecycle":("ARM32_HAL_LIFECYCLE_QEMU_USER_ONLY","LIFECYCLE_ONLY_PASS",set(baseline["results"])),
+              "lights-fixture":("ARM32_LIGHTS_SYNTHETIC_SYSFS_ONLY","LIGHTS_FIXTURE_PASS",{"lights.r800.so"}),
+              "sensors-fixture":("ARM32_SENSORS_SYNTHETIC_SSP_ONLY","SENSORS_FIXTURE_PASS",{"sensors.r800.so"}),
+              "sensors-context":("ARM32_SENSORS_SYNTHETIC_CONTEXT_ONLY","SENSORS_CONTEXT_PASS",{"sensors.r800.so"}),
+              "sensors-evdev":("ARM32_SENSORS_SYNTHETIC_EVDEV_ONLY","SENSORS_EVDEV_PASS",{"sensors.r800.so"}),
+              "gps-fixture":("ARM32_GPS_SYNTHETIC_BRIDGE_ONLY","GPS_FIXTURE_PASS",{"gps.r800.so"}),
+              "audio-fixture":("ARM32_AUDIO_NO_PCM_FALLBACK_ONLY","AUDIO_FIXTURE_PASS",{"audio.primary.r800.so"}),
+              "audio-pcm-fixture":("ARM32_AUDIO_SYNTHETIC_PCM_ONLY","AUDIO_PCM_FIXTURE_PASS",{"audio.primary.r800.so"}),
+              "hwc-fixture":("ARM32_HWC_SYNTHETIC_FB_LIFECYCLE_ONLY","HWC_FIXTURE_PASS",{"hwcomposer.r800.so"}),
+              "namespace-fixture":("ARM32_SYNTHETIC_NAMESPACE_LINK_ONLY","NAMESPACE_FIXTURE_PASS",{"lights.r800.so"})}
+          rows={}
+          for mode,(status,marker,modules) in modes.items():
+              path=evidence/("pixel-hal-"+mode+".json")
+              if not path.is_file():
+                  rows[mode]={"status":"NOT_TESTED","reason":"Missing probe report"}
+                  continue
+              report=json.loads(path.read_text())
+              valid=(report["source_sha"]==source and report["runtime_sha256"]==pins
+                     and report["hal_sha256"]==baseline["hal_sha256"]
+                     and report["hardware_tested"] is False and report["safe_to_flash"] is False
+                     and report["status"]==status and set(report["results"])==modules
+                     and all(v["status"]==marker and v["exit_code"]==0 for v in report["results"].values()))
+              rows[mode]={"status":"PASS" if valid else "REVIEW_REQUIRED",
+                          "probe_status":report["status"],"modules":sorted(report["results"])}
+          passed=all(v["status"]=="PASS" for v in rows.values())
+          summary={"schema":"galwear-r800-pixel-hal-fixtures-v1","source_sha":source,
+                   "system_sha256":runtime["raw_system_sha256"],"runtime_sha256":pins,
+                   "hal_sha256":baseline["hal_sha256"],"modes":rows,
+                   "status":"PIXEL_HAL_SYNTHETIC_FIXTURES_ONLY" if passed else "REVIEW_REQUIRED",
+                   "android_boot_tested":False,"hardware_tested":False,"safe_to_flash":False}
+          (evidence/"pixel-hal-fixtures-summary.json").write_text(json.dumps(summary,indent=2,sort_keys=True)+"\n")
+          print("PIXEL_HAL_FIXTURE_SUMMARY",json.dumps(summary,sort_keys=True))
+          if not passed:
+              raise SystemExit(2)
+          PY
+          test "$failed" -eq 0
       - name: Remove factory archive and all extracted image bytes
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/pixel-intake"
@@ -428,5 +492,16 @@ jobs:
             ${{ runner.temp }}/pixel-evidence/pixel-bionic-extraction.json
             ${{ runner.temp }}/pixel-evidence/pixel-hal-compile.json
             ${{ runner.temp }}/pixel-evidence/pixel-hal-runtime.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-lifecycle.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-lights-fixture.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-sensors-fixture.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-sensors-context.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-sensors-evdev.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-gps-fixture.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-audio-fixture.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-audio-pcm-fixture.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-hwc-fixture.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-namespace-fixture.json
+            ${{ runner.temp }}/pixel-evidence/pixel-hal-fixtures-summary.json
           if-no-files-found: warn
           retention-days: 7
