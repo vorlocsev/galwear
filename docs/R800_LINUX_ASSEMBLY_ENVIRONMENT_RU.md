@@ -192,3 +192,37 @@ SELECTED_PYTHON_RUNTIME_BYTES_AND_ELF_CANDIDATES_ONLY не доказывает
 фактический sys.path/import resolution, отсутствие sitecustomize,
 сторонних модулей, dlopen или воспроизводимость.
 Отчёт диагностический, пока не gate управляемой сборки.
+
+
+## Изолированное наблюдение импортов Python
+
+Только в доверенной отдельной VM, непривилегированным пользователем.
+Проба импортирует код exact-head checkout, поэтому не является sandbox
+для неизвестного репозитория. Сборочные entrypoints не вызываются.
+
+```sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+/usr/bin/python3 -B build/r800_python_import_observation.py \
+  --lock /local/galwear-inputs/linux-assembly-lock.json \
+  --lock-sha256 "$LOCK_SHA256" \
+  --runtime /local/galwear-inputs/python-runtime-lock.json \
+  --runtime-sha256 "$PYTHON_REPORT_SHA256" \
+  --source-sha "$HEAD_SHA" --confirm-trusted-vm \
+  > /local/galwear-inputs/python-import-observation.json
+```
+
+Дочерний Python запускается с -I -S -B, очищенным окружением и фиксированным
+sys.path без site-packages, dist-packages, текущего каталога и каталога build.
+Путь стандартного zip должен отсутствовать. Проектные модули разрешаются
+отдельным finder только по отслеживаемым Git файлам build/*.py,
+с проверкой SHA-256 и компиляцией исходного текста без чтения их .pyc.
+Стандартные модули проверяются по закреплённому инвентарю runtime;
+для .pyc отмечается кандидат кэша, а не доказанный факт его чтения.
+Импортируются Donor Manager, Local Builder и Development Readiness.
+Неизвестный origin, изменение sys.path, site/sitecustomize/usercustomize
+или отсутствие обязательного модуля приводят к отказу.
+
+ISOLATED_IMPORT_ORIGINS_MATCH_ONLY относится к этому import-only сценарию.
+Не подтверждает все динамические импорты во время сборки, обычный режим
+запуска Python, отсутствие сторонних пакетов в других процессах, dlopen,
+или полную воспроизводимость. Отчёт пока диагностический.
