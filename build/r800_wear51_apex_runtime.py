@@ -12,6 +12,7 @@ import zipfile
 
 from r800_art_apex_mapping import ApexReader
 from r800_wear51_apex_container import inspect_container
+from r800_wear51_art_dependencies import audit as art_dependency_audit
 from r800_apex_inventory import package_inventory
 from r800_extract_ext4 import snapshot_image
 from r800_framework_inventory import ext4_member, classify, MAX_MEMBER
@@ -44,10 +45,13 @@ def audit(image,pin,source,output):
     if not tool:
         raise ValueError("debugfs required")
     modules={}
+    art_dependencies={"status":"NOT_TESTED"}
     with tempfile.TemporaryDirectory(prefix="wear51-apex-",dir=output.parent) as tmp:
         scratch=Path(tmp)
         private=scratch/"system.img"
         snapshot_image(image,private,pin)
+        sources={"system":(tool,private,scratch)}
+        readers=[]
         for module,(path,paths) in MODULES.items():
             row={"status":"REVIEW_REQUIRED","members":{}}
             modules[module]=row
@@ -90,12 +94,21 @@ def audit(image,pin,source,output):
                         row["members"][member]={"status":"REVIEW_REQUIRED","reason":str(exc)}
                 reader.verify_unchanged()
                 row["status"]="SELECTED_APEX_MEMBERS_STATIC_ONLY"
+                sources[module.rsplit(".",1)[-1]]=(apex_tool,payload,workspace)
+                readers.append(reader)
             except ERRORS as exc:
                 row["reason"]=str(exc)
+        if set(sources)=={"system","runtime","art"}:
+            try:
+                art_dependencies=art_dependency_audit(sources)
+                for reader in readers:
+                    reader.verify_unchanged()
+            except (OverflowError, *ERRORS) as exc:
+                art_dependencies={"status":"REVIEW_REQUIRED","reason":str(exc)}
         if digest(private,4*1024**3)["sha256"]!=pin or digest(image,4*1024**3)["sha256"]!=pin:
             raise ValueError("System changed")
     result={"schema":"galwear-r800-wear51-apex-runtime-v1","source_sha":source,
-            "system_sha256":pin,"modules":modules,"status":"REVIEW_REQUIRED",
+            "system_sha256":pin,"modules":modules,"art_dependencies":art_dependencies,"status":"REVIEW_REQUIRED",
             "runtime_executed":False,"art_initialized":False,"apex_activation_verified":False,
             "hardware_tested":False,"safe_to_flash":False}
     runtime=modules["com.android.runtime"]
