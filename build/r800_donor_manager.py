@@ -133,7 +133,8 @@ def main():
         result=build(cfg["paths"],cfg["pins"],a.output,a.source_sha,cfg["xtra_abi"],
                      assets=cfg["assets"],assets_sha=cfg["assets_sha"],
                      stock_evidence=cfg["stock_evidence"],pixel_evidence=cfg["pixel_evidence"],
-                     ndk_pins=cfg["ndk_pins"])
+                     ndk_pins=cfg["ndk_pins"],
+                     managed_manifest=(a.workspace,a.manifest,a.manifest_sha256))
     print(json.dumps(result,indent=2,sort_keys=True))
 
 
