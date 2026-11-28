@@ -5,6 +5,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <poll.h>
+#include <sys/eventfd.h>
 #include "r800-window-queue-fixture.h"
 static atomic_int hwc_ticks,hwc_bad;
 static atomic_llong hwc_last;
@@ -201,6 +202,51 @@ static int hwc_cpu_present(hwc_composer_device_1_t *dev,int cycle)
     return fd_count()==before;
 }
 
+/* Independent delayed-release control. Both descriptors share eventfd
+ * state, but only the queue owns the transferred descriptor. */
+static int hwc_window_release_async(void)
+{
+    int baseline=fd_count();
+    for(int i=0;i<4;++i){
+        struct window_queue q={.slots={{.state=WINDOW_ACQUIRED,.fence=-1},
+                                       {.state=WINDOW_DEQUEUED,.fence=-1}}};
+        int producer=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
+        if(producer<0)return 0;
+        int release=fcntl(producer,F_DUPFD_CLOEXEC,0);
+        if(release<0||window_release_async(&q,0,release)||
+           window_reap_release(&q,0)!=-EAGAIN||window_dequeue(&q)!=-EAGAIN||
+           q.slots[0].fence!=release||fcntl(release,F_GETFD)<0)return 0;
+        int rejected=fcntl(producer,F_DUPFD_CLOEXEC,0);
+        if(rejected<0||window_release_async(&q,0,rejected)!=-EINVAL||
+           fcntl(rejected,F_GETFD)<0||close(rejected))return 0;
+        if(eventfd_write(producer,1)||window_reap_release(&q,0)||
+           fcntl(release,F_GETFD)!=-1||errno!=EBADF||
+           fcntl(producer,F_GETFD)<0||close(producer)||
+           window_dequeue(&q)!=0||window_cancel(&q,0,-1))return 0;
+        /* Error completion quarantines the slot, never grants reuse. */
+        q.slots[0].state=WINDOW_ACQUIRED;
+        int pipefd[2];
+        if(pipe(pipefd)||close(pipefd[1])||window_release_async(&q,0,pipefd[0])||
+           window_reap_release(&q,0)!=-EIO||
+           q.slots[0].state!=WINDOW_QUARANTINED||window_dequeue(&q)!=-EAGAIN||
+           fcntl(pipefd[0],F_GETFD)!=-1||errno!=EBADF||
+           window_cancel(&q,1,-1)||window_dequeue(&q)!=1||
+           window_cancel(&q,1,-1)||fd_count()!=baseline)return 0;
+    }
+    return 1;
+}
+/* Consume a genuine output FD from the HWC code (mock DECON provider).
+ * Duplicate for the existing counter assertion before the queue reaps it. */
+static int hwc_queue_overlay_release(int fd)
+{
+    struct window_queue q={.slots={{.state=WINDOW_ACQUIRED,.fence=-1},
+                                   {.state=WINDOW_DEQUEUED,.fence=-1}}};
+    if(window_release_async(&q,0,fd)||window_dequeue(&q)!=-EAGAIN||
+       window_reap_release(&q,0)||fcntl(fd,F_GETFD)!=-1||errno!=EBADF||
+       window_dequeue(&q)!=0||window_cancel(&q,0,-1))return 0;
+    return 1;
+}
+
 /* Synthetic DECON accepts one client-target window. Eventfds stand in for
  * kernel-owned release/retire descriptors, not actual sync_file fences. */
 static int hwc_zero_copy(const hw_module_t *module,unsigned int (*get)(unsigned int),
@@ -326,9 +372,14 @@ static int hwc_overlay(const hw_module_t *module,unsigned int (*get)(unsigned in
                 close(pairs[i][1])) return 0;
             if (round<2 && i<n) {
                 uint64_t v=0;
-                if (l->releaseFenceFd<0 || l->releaseFenceFd==c->retireFenceFd ||
-                    read(l->releaseFenceFd,&v,sizeof(v))!=(ssize_t)sizeof(v) ||
-                    v!=(uint64_t)(21+i) || close(l->releaseFenceFd)) return 0;
+                if (l->releaseFenceFd<0 || l->releaseFenceFd==c->retireFenceFd) return 0;
+                int observe=l->releaseFenceFd;
+                if(round==0&&i==0){
+                    observe=fcntl(l->releaseFenceFd,F_DUPFD_CLOEXEC,0);
+                    if(observe<0||!hwc_queue_overlay_release(l->releaseFenceFd))return 0;
+                }
+                if(read(observe,&v,sizeof(v))!=(ssize_t)sizeof(v) ||
+                   v!=(uint64_t)(21+i) || close(observe))return 0;
             } else if (l->releaseFenceFd!=-1) return 0;
         }
         if (round<2) {
@@ -545,6 +596,8 @@ static int hwc_fixture(const hw_module_t *module)
                 get(13),get(14),get(9),get(8),get(0));
         return 185;
     }
+    if (!hwc_window_release_async()) return 186;
+    puts("HAL_HWC_WINDOW_RELEASE_FIXTURE_PASS cycles=4 delayed=4 signaled=4 rejected=4 quarantined=4 overlay_handoff=1 fd_stable=1");
     puts("HAL_HWC_OVERLAY_RECOVERY_PASS reopen=1 format_gate=1 release_dup=1 no_fences_disable=1");
     puts("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1");
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");

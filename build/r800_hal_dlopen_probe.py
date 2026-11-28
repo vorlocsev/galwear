@@ -431,6 +431,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                                   log.splitlines().count("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8") == 1 and
                                   log.splitlines().count("HAL_HWC_EGL_ACQUIRE_FIXTURE_PASS frames=4 exported=4 consumed=4 provider_unloaded=4 pixel_match=4") == 1 and
                                   log.splitlines().count("HAL_HWC_WINDOW_QUEUE_FIXTURE_PASS cycles=4 slots=2 fifo_frames=8 cancel=4 rejected_transfer=8 backpressure=4 fd_stable=1") == 1 and
+                                  log.splitlines().count("HAL_HWC_WINDOW_RELEASE_FIXTURE_PASS cycles=4 delayed=4 signaled=4 rejected=4 quarantined=4 overlay_handoff=1 fd_stable=1") == 1 and
                                   log.splitlines().count("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1") == 1 and
                                   log.splitlines().count("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1") == 1 and
                                   log.splitlines().count("HAL_HWC_OVERLAY_RECOVERY_PASS reopen=1 format_gate=1 release_dup=1 no_fences_disable=1") == 1 and
@@ -546,6 +547,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "hwc_synthetic_cpu_present_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_synthetic_egl_acquire_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_synthetic_window_queue_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
+        "hwc_synthetic_async_release_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
+        "android_async_buffer_release_verified": False,
         "android_native_window_verified": False, "android_bufferqueue_verified": False,
         "egl_native_fixture_sha256": evidence.get("egl_native_fixture_sha256") if hwc_fixture else None,
         "real_egl_sync_file_verified": False,

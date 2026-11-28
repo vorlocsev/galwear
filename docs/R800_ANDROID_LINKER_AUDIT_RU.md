@@ -179,3 +179,16 @@ Release без fence только для синхронного CPU пути. Н
 ABI, не Binder BufferQueue, не GPU allocation, не asynchronous release.
 Evidence explicitly leaves android_native_window_verified and
 android_bufferqueue_verified false.
+
+## Asynchronous release ownership fixture
+
+Добавлены RELEASE_PENDING и QUARANTINED в двухслотовую модель.
+Консервативное правило модели: unsignaled slot не выдаётся повторно;
+реальный Android BufferQueue может выдавать слот с release fence.
+4 delayed eventfd cycles: EAGAIN, duplicate release rejection с сохранением
+caller FD, signal, закрытие queue-owned FD, повторный dequeue. HUP pipe
+даёт EIO и карантин без повторного использования. Один фактический output
+release FD из кода HWC overlay (mock DECON) передаётся очереди, reaped до
+reuse, существующее значение eventfd проверяется через независимый dup.
+Проверка FD baseline и прежние pixel/overlay guards сохранены. Модель
+не подтверждает kernel sync_file или Android BufferQueue.

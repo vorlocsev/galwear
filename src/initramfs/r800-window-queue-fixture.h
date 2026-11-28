@@ -1,7 +1,10 @@
 /* Test-only two-slot producer/consumer state model. Not ANativeWindow ABI
  * or Android BufferQueue. CPU HWC path completes synchronously (no release FD).
  * On rejected queue/cancel calls caller retains ownership of the supplied FD. */
-enum window_slot_state {WINDOW_FREE,WINDOW_DEQUEUED,WINDOW_QUEUED,WINDOW_ACQUIRED};
+enum window_slot_state {
+    WINDOW_FREE,WINDOW_DEQUEUED,WINDOW_QUEUED,WINDOW_ACQUIRED,
+    WINDOW_RELEASE_PENDING,WINDOW_QUARANTINED
+};
 struct window_slot {
     native_handle_t *handle;
     enum window_slot_state state;
@@ -52,4 +55,31 @@ static int window_release_cpu(struct window_queue *q,int id,int release_fd)
     if(id<0||id>=2||q->slots[id].state!=WINDOW_ACQUIRED||release_fd!=-1)return -EINVAL;
     q->slots[id].state=WINDOW_FREE;
     return 0;
+}
+
+/* Conservative fixture policy: do not dequeue an unsignaled slot. Android
+ * BufferQueue may instead return a fence to the producer for that slot.
+ * Reject invalid inputs without taking caller ownership. */
+static int window_release_async(struct window_queue *q,int id,int fd)
+{
+    if(id<0||id>=2||q->slots[id].state!=WINDOW_ACQUIRED||
+       fd<0||fcntl(fd,F_GETFD)<0)return -EINVAL;
+    q->slots[id].fence=fd;
+    q->slots[id].state=WINDOW_RELEASE_PENDING;
+    return 0;
+}
+static int window_reap_release(struct window_queue *q,int id)
+{
+    if(id<0||id>=2||q->slots[id].state!=WINDOW_RELEASE_PENDING)return -EINVAL;
+    struct window_slot *slot=&q->slots[id];
+    struct pollfd p={.fd=slot->fence,.events=POLLIN};
+    int rc;
+    do {rc=poll(&p,1,0);} while(rc<0&&errno==EINTR);
+    if(rc==0)return -EAGAIN;
+    /* HUP, ERR and NVAL are not successful fence completion. */
+    int ready=rc==1&&(p.revents&POLLIN)&&!(p.revents&(POLLERR|POLLHUP|POLLNVAL));
+    int closed=close(slot->fence);
+    slot->fence=-1;
+    slot->state=ready&&!closed?WINDOW_FREE:WINDOW_QUARANTINED;
+    return slot->state==WINDOW_FREE?0:-EIO;
 }
