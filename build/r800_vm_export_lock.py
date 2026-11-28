@@ -16,7 +16,7 @@ from r800_extract_super import require
 from r800_graphics_donor_binding import checkout_sha
 from r800_stage_adaptation_layer import valid_pin
 from r800_verify_tizen_stage import unique_keys
-from r800_vm_package_lock import PROFILE, MAX_REPORT, required_packages, assess
+from r800_vm_package_lock import PROFILE, MAX_REPORT, MAX_ROWS, PACKAGE, ARCH, VERSION, required_packages, assess
 
 REPO=Path(__file__).resolve().parents[1]
 MAX_FILES=256
@@ -93,7 +93,15 @@ def package_review(report,profile,profile_pin,source):
                  "hardware_tested","safe_to_flash")),"Unexpected saved package lock scope")
     required=required_packages(profile,report["mode"])
     require(report["required_packages"]==required,"Package profile inventory mismatch")
-    checks=assess(report["packages"],required)
+    rows=report["packages"]
+    require(isinstance(rows,dict) and 0<len(rows)<=MAX_ROWS,"Invalid saved package inventory")
+    for key,row in rows.items():
+        require(isinstance(row,dict) and set(row)=={"package","architecture","version"} and
+                all(isinstance(v,str) for v in row.values()) and
+                PACKAGE.fullmatch(row["package"]) and ARCH.fullmatch(row["architecture"]) and
+                VERSION.fullmatch(row["version"]) and key==row["package"]+":"+row["architecture"],
+                "Invalid saved package identity")
+    checks=assess(rows,required)
     require(not any(checks.values()) and all(report.get(k)==v for k,v in checks.items()),
             "Saved package inventory requires review")
 
@@ -107,6 +115,7 @@ def capture(root,declaration,decl_pin,package,package_pin,source):
     profile_raw=read_regular(PROFILE,1024*1024)
     profile=json.loads(profile_raw,object_pairs_hook=unique_keys)
     profile_pin=hashlib.sha256(profile_raw).hexdigest()
+    require(Path(declaration).absolute()!=Path(package).absolute(),"Distinct baseline evidence files required")
     decl_raw,decl=pinned(declaration,decl_pin)
     pkg_raw,pkg=pinned(package,package_pin,MAX_REPORT)
     metadata(decl,source,profile_pin,package_pin)
