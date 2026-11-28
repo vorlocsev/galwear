@@ -54,6 +54,24 @@ class ArtDependenciesTests(unittest.TestCase):
         r=self.run_graph({"root":elf(None,["a.so"]),"b":elf("b.so")},{"a.so":["b"]})
         self.assertEqual(r["edges"][0]["status"],"NO_ELIGIBLE_CANDIDATE")
 
+    def test_observed_dlopen_recurses_without_faking_needed(self):
+        infos={"root":elf(None),"palette":elf("libartpalette-system.so",["dep.so"]),
+               "dep":elf("dep.so")}
+        with patch.object(graph,"inspect",side_effect=lambda raw:infos[raw.decode()]):
+            r=graph.walk(lambda p:p.encode(),
+                         lambda n:{"libartpalette-system.so":["palette"],"dep.so":["dep"]}[n],
+                         ("root",),runtime_loads={"root":("libartpalette-system.so",)})
+        self.assertEqual(r["objects"]["root"]["needed"],[])
+        self.assertEqual([e["kind"] for e in r["edges"]],["OBSERVED_DLOPEN","DT_NEEDED"])
+        self.assertEqual(r["counts"],{"SINGLE_STATIC_CANDIDATE":2})
+
+    def test_missing_observed_dlopen_is_not_success(self):
+        with patch.object(graph,"inspect",return_value=elf(None)):
+            r=graph.walk(lambda p:b"fixture",lambda n:[],("root",),
+                         runtime_loads={"root":("libartpalette-system.so",)})
+        self.assertEqual(r["edges"][0]["kind"],"OBSERVED_DLOPEN")
+        self.assertEqual(r["edges"][0]["status"],"NOT_FOUND_IN_SELECTED_DIRS")
+
     def test_budget(self):
         with patch.object(graph,"MAX_OBJECTS",1):
             with self.assertRaisesRegex(ValueError,"budget"):
