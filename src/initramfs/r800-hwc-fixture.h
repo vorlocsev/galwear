@@ -251,12 +251,15 @@ static int hwc_window_release_async(void)
 }
 /* Consume a genuine output FD from the HWC code (mock DECON provider).
  * Duplicate for the existing counter assertion before the queue reaps it. */
-static int hwc_queue_overlay_release(int fd)
+static int hwc_queue_overlay_release(int fd,native_handle_t *handle)
 {
-    struct window_queue q={.slots={{.state=WINDOW_ACQUIRED,.fence=-1},
+    if(!handle||fcntl(handle->data[0],F_GETFD)!=FD_CLOEXEC)return 0;
+    struct window_queue q={.slots={{.handle=handle,.state=WINDOW_ACQUIRED,.fence=-1},
                                    {.state=WINDOW_DEQUEUED,.fence=-1}}};
     if(window_release_async(&q,0,fd)||window_dequeue(&q)!=-EAGAIN||
+       q.slots[0].handle!=handle||fcntl(handle->data[0],F_GETFD)!=FD_CLOEXEC||
        window_reap_release(&q,0)||fcntl(fd,F_GETFD)!=-1||errno!=EBADF||
+       q.slots[0].handle!=handle||fcntl(handle->data[0],F_GETFD)!=FD_CLOEXEC||
        window_dequeue(&q)!=0||window_cancel(&q,0,-1))return 0;
     return 1;
 }
@@ -332,13 +335,24 @@ static int hwc_overlay(const hw_module_t *module,unsigned int (*get)(unsigned in
     const int formats[]={HAL_PIXEL_FORMAT_RGBA_8888,HAL_PIXEL_FORMAT_RGBX_8888,HAL_PIXEL_FORMAT_BGRA_8888};
     const int blends[]={HWC_BLENDING_NONE,HWC_BLENDING_PREMULT,HWC_BLENDING_COVERAGE};
     for (int i=0;i<3;++i) {
-        buf[i]=calloc(1,sizeof(*buf[i])+5*sizeof(int));
-        if (!buf[i]) return 0;
+        const size_t bytes=sizeof(native_handle_t)+5*sizeof(int);
+        native_handle_t *raw=calloc(1,bytes);
+        if(!raw)return 0;
         int fd=open("/dev/graphics/pixels",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
-        if (fd<0) return 0;
-        buf[i]->version=sizeof(*buf[i]); buf[i]->numFds=1; buf[i]->numInts=4;
-        buf[i]->data[0]=fd; buf[i]->data[1]=formats[i];
-        buf[i]->data[2]=360; buf[i]->data[3]=360; buf[i]->data[4]=368;
+        if(fd<0){free(raw);return 0;}
+        raw->version=sizeof(*raw);raw->numFds=1;raw->numInts=4;
+        raw->data[0]=fd;raw->data[1]=formats[i];
+        raw->data[2]=360;raw->data[3]=360;raw->data[4]=368;
+        int rc=import_model(raw,bytes,&buf[i]);
+        int valid=!rc&&buf[i]&&buf[i]!=raw&&buf[i]->data[0]!=fd&&
+            fcntl(buf[i]->data[0],F_GETFD)==FD_CLOEXEC&&
+            !memcmp(raw->data+1,buf[i]->data+1,4*sizeof(int));
+        int closed=close(fd);
+        free(raw);
+        if(!valid||closed||fcntl(fd,F_GETFD)!=-1||errno!=EBADF){
+            if(buf[i])free_model(&buf[i]);
+            return 0;
+        }
     }
     hwc_display_contents_1_t *c=calloc(1,sizeof(*c)+4*sizeof(hwc_layer_1_t));
     if (!c) return 0;
@@ -390,7 +404,7 @@ static int hwc_overlay(const hw_module_t *module,unsigned int (*get)(unsigned in
                 int observe=l->releaseFenceFd;
                 if(round==0&&i==0){
                     observe=fcntl(l->releaseFenceFd,F_DUPFD_CLOEXEC,0);
-                    if(observe<0||!hwc_queue_overlay_release(l->releaseFenceFd))return 0;
+                    if(observe<0||!hwc_queue_overlay_release(l->releaseFenceFd,buf[i]))return 0;
                 }
                 if(read(observe,&v,sizeof(v))!=(ssize_t)sizeof(v) ||
                    v!=(uint64_t)(21+i) || close(observe))return 0;
@@ -475,8 +489,9 @@ static int hwc_overlay(const hw_module_t *module,unsigned int (*get)(unsigned in
         c->hwLayers[1].compositionType!=HWC_FRAMEBUFFER || get(13)!=9) return 0;
     free(c);
     for (int i=0;i<3;++i) {
-        if (close(buf[i]->data[0])) return 0;
-        free(buf[i]);
+        int imported_fd=buf[i]->data[0];
+        if(free_model(&buf[i])||buf[i]||
+           fcntl(imported_fd,F_GETFD)!=-1||errno!=EBADF)return 0;
     }
     mode(0);
     return base->close(base)==0 && fd_count()==before;
@@ -613,6 +628,7 @@ static int hwc_fixture(const hw_module_t *module)
     if (!hwc_window_release_async()) return 186;
     puts("HAL_HWC_WINDOW_RELEASE_FIXTURE_PASS cycles=4 delayed=4 signaled=4 rejected=4 quarantined=4 overlay_handoff=1 fd_stable=1");
     puts("HAL_HWC_OVERLAY_RECOVERY_PASS reopen=1 format_gate=1 release_dup=1 no_fences_disable=1");
+    puts("HAL_HWC_IMPORTED_OVERLAY_FIXTURE_PASS imports=3 source_closed=3 freed=3 overlay_release_handoff=1 fd_stable=1");
     puts("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1");
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
