@@ -8,6 +8,8 @@ on:
       - build/r800_kernel_compile_development.sh
       - build/r800_development_kernel.py
       - build/r800_development_initramfs.py
+      - build/r800_stage_integrated_development.py
+      - tests/test_r800_stage_integrated_development.py
       - src/initramfs/init.c
       - src/initramfs/build.sh
       - src/kernel/r800.config
@@ -54,6 +56,8 @@ jobs:
               git config --global --add safe.directory /source
               git config --global --add safe.directory /repo
               sh /repo/build/r800_kernel_compile_development.sh /source /repo /scratch/r800-development-build "$GITHUB_SHA"
+              mkdir /scratch/r800-kernel-integration-check
+              PYTHONPATH=/repo/build python3 -c "import os; from pathlib import Path; from r800_stage_integrated_development import kernel_inputs, sha, REPORT; root=Path(\"/scratch/r800-development-build\"); pin=sha((root/REPORT).read_bytes()); raw, report, inputs=kernel_inputs(root,pin,os.environ[\"GITHUB_SHA\"],Path(\"/scratch/r800-kernel-integration-check\")); assert len(inputs)==5; print(\"REAL_KERNEL_INTEGRATION_INPUT_PASS\")"
             '
       - name: Upload only metadata, never kernel, DTB or initramfs
         if: always()
