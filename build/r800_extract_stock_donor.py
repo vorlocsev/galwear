@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import resource
 import shutil
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -57,6 +58,8 @@ def select(archive,role,dest):
 
 
 def decompress_lz4(source,dest):
+    with source.open("rb") as stream:
+        require(stream.read(4) in (b"\x04\x22\x4d\x18",b"\x02\x21\x4c\x18"),"Invalid LZ4 frame magic")
     tool=shutil.which("lz4")
     require(tool is not None,"lz4 tool required for compressed stock member")
     def limits():
@@ -95,6 +98,12 @@ def extract_stock(archive,pin,role,output,source_sha):
             expanded=member
             uncompressed=compressed
         target=stage/("rootfs.img" if role=="r800-rootfs" else "vendor.img")
+        with expanded.open("rb") as stream:
+            header=stream.read(28)
+        if header[:4]==b"\x3a\xff\x26\xed":
+            require(len(header)==28,"Truncated sparse stock header")
+            block,blocks=struct.unpack_from("<II",header,12)
+            require(0<block*blocks<=MAX_DONOR,"Stock sparse expansion exceeds donor budget")
         normalization=normalize(expanded,target,uncompressed["sha256"])
         observed=digest(target,MAX_DONOR)
         require(observed=={"bytes":normalization["raw_bytes"],
