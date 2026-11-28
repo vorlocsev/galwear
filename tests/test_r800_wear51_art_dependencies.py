@@ -72,6 +72,19 @@ class ArtDependenciesTests(unittest.TestCase):
         self.assertEqual(r["edges"][0]["kind"],"OBSERVED_DLOPEN")
         self.assertEqual(r["edges"][0]["status"],"NOT_FOUND_IN_SELECTED_DIRS")
 
+    def test_vm_requires_original_regular_executable(self):
+        sources={"art":("debugfs","image","scratch")}
+        with patch.object(graph,"list_directory",return_value={"entries":{"dalvikvm32":{"type":"symlink"}}}), patch.object(graph,"audit") as audit:
+            result=graph.audit_vm(sources)
+            self.assertEqual(result["status"],"REVIEW_REQUIRED")
+            audit.assert_not_called()
+        root="art:/bin/dalvikvm32"
+        with patch.object(graph,"list_directory",return_value={"entries":{"dalvikvm32":{"type":"regular"}}}), patch.object(graph,"audit",return_value={"objects":{root:{}}, "review":{}, "edges":[]}) as audit:
+            result=graph.audit_vm(sources)
+            self.assertEqual(result["status"],"DALVIKVM32_STATIC_CANDIDATES_ONLY")
+            self.assertFalse(result["java_code_executed"])
+            audit.assert_called_once_with(sources,roots=(root,))
+
     def test_budget(self):
         with patch.object(graph,"MAX_OBJECTS",1):
             with self.assertRaisesRegex(ValueError,"budget"):
