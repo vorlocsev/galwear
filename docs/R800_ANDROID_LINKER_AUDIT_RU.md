@@ -153,3 +153,16 @@ CLOEXEC dup при экспорте, сохранение caller-owned dup по�
 сохранены. eventfd — не sync_file; не проверяются kernel ioctls, actual GPU
 completion, ненулевые timeout, многопоточность или EGL conformance.
 Синтетические provider binaries не входят в vendor overlay.
+
+## EGL export -> HWC / Gralloc acquire handoff
+
+В существующем ARM32 HWC CPU present fixture четыре RGBA no-fence кадра
+остаются контролем, четыре BGRA кадра используют экспорт eventfd через
+синтетический EGL_ANDROID_native_fence_sync. EGL sync/context/surface
+уничтожаются, provider выгружается до передачи FD реальному HWC HAL.
+Проверяются poll readiness, CLOEXEC, закрытие acquire FD после set,
+сохранение buffer FD, все видимые пиксели framebuffer, stride=368,
+8 pan, прежние zero-copy/overlay guards и FD baseline. Fixture EGL
+не производит пиксели: используется исходный regular-file Gralloc.
+Никаких реальных DMA-BUF, GPU, sync_file, Android native window или
+SurfaceFlinger. Provider компилируется только в probe output, не в overlay.

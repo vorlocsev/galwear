@@ -102,6 +102,15 @@ def compile_probe(ndk, hals, output, source_sha):
     gralloc_raw, gralloc_info = check(gralloc, True)
     if not set(gralloc_info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected gralloc test adapter dependency")
+    egl_native = output/"libGLES_galwear_native.so"
+    subprocess.run([str(cc), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O2", "-shared", "-fPIC",
+                    "-DFIXTURE_CONTEXT_GLES", "-DFIXTURE_NATIVE_FENCE",
+                    str(ROOT/"src/initramfs/r800-egl-lifecycle-fixture.c"),
+                    "-Wl,-soname,libGLES_galwear_native.so", "-Wl,--no-undefined", "-o", str(egl_native)],
+                   check=True, timeout=60)
+    egl_native_raw, egl_native_info = check(egl_native, True)
+    if not set(egl_native_info["needed"]) <= HAL_COMPILE_LIBS:
+        raise ValueError("Unexpected EGL native test dependency")
     ns_hashes = {}
     for name, extra, private in (
         ("libgalwear-ns-leaf.so", ["-DR800_NAMESPACE_LEAF"], set()),
@@ -153,7 +162,7 @@ def compile_probe(ndk, hals, output, source_sha):
     if not set(info["needed"]) <= HAL_COMPILE_LIBS:
         raise ValueError("Unexpected probe dependency")
     result = {"status": "ARM32_HAL_DLOPEN_PROBE_COMPILE_ONLY", "source_sha": source_sha,
-              "probe_sha256": sha(raw), "namespace_fixture_sha256": ns_hashes, "gralloc_fixture_sha256": sha(gralloc_raw), "evdev_fixture_sha256": sha(shim_raw), "pcm_fixture_sha256": sha(pcm_raw), "hwc_fixture_sha256": sha(hwc_raw), "hal_sha256": hashes,
+              "probe_sha256": sha(raw), "namespace_fixture_sha256": ns_hashes, "gralloc_fixture_sha256": sha(gralloc_raw), "egl_native_fixture_sha256": sha(egl_native_raw), "evdev_fixture_sha256": sha(shim_raw), "pcm_fixture_sha256": sha(pcm_raw), "hwc_fixture_sha256": sha(hwc_raw), "hal_sha256": hashes,
               "runtime_verified": False, "hardware_tested": False, "safe_to_flash": False}
     (output/"hal-probe-evidence.json").write_text(json.dumps(result, indent=2, sort_keys=True)+"\n")
     return result
@@ -265,6 +274,8 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                 evidence["hwc_fixture_sha256"], True)
             add(probe_dir/"libhardware.so", "system/lib/libhardware.so",
                 evidence["gralloc_fixture_sha256"], True)
+            add(probe_dir/"libGLES_galwear_native.so", "system/lib/libGLES_galwear_native.so",
+                evidence["egl_native_fixture_sha256"], True)
             fixture = Path(tmp)/"hwc-fb"
             fixture.mkdir()
             (fixture/".galwear-fixture").write_text("GALWEAR_HWC_FIXTURE_V1\n")
@@ -418,6 +429,7 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
                     fixture_ok = (log.splitlines().count(fixture_marker) == 1 and
                                   log.splitlines().count("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4") == 1 and
                                   log.splitlines().count("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8") == 1 and
+                                  log.splitlines().count("HAL_HWC_EGL_ACQUIRE_FIXTURE_PASS frames=4 exported=4 consumed=4 provider_unloaded=4 pixel_match=4") == 1 and
                                   log.splitlines().count("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1") == 1 and
                                   log.splitlines().count("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1") == 1 and
                                   log.splitlines().count("HAL_HWC_OVERLAY_RECOVERY_PASS reopen=1 format_gate=1 release_dup=1 no_fences_disable=1") == 1 and
@@ -531,6 +543,9 @@ def run_probe(probe_dir, hals, runtime, runtime_manifest, output, lifecycle=Fals
         "hwc_synthetic_fb_lifecycle_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_fixture_sha256": evidence.get("hwc_fixture_sha256") if hwc_fixture else None,
         "hwc_synthetic_cpu_present_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
+        "hwc_synthetic_egl_acquire_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
+        "egl_native_fixture_sha256": evidence.get("egl_native_fixture_sha256") if hwc_fixture else None,
+        "real_egl_sync_file_verified": False,
         "gralloc_fixture_sha256": evidence.get("gralloc_fixture_sha256") if hwc_fixture else None,
         "hwc_synthetic_decon_zero_copy_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),
         "hwc_synthetic_decon_overlay_verified": hwc_fixture and all(v["status"] == expected_status for v in results.values()),

@@ -1,6 +1,10 @@
 /* Test-only HWC open, power transitions, present guards and timer VSync. */
 #include <stdlib.h>
 #include <hardware/gralloc.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <poll.h>
 static atomic_int hwc_ticks,hwc_bad;
 static atomic_llong hwc_last;
 static void hwc_fixture_vsync(const hwc_procs_t *procs,int disp,int64_t ts)
@@ -82,6 +86,56 @@ static int hwc_fb_matches(int first,int second)
     }
     return close(fd)==0 && ok;
 }
+/* Generate a pollable acquire FD through the separate EGL test provider.
+ * The buffer itself is still the deterministic read-only Gralloc fixture. */
+static int hwc_egl_acquire(void)
+{
+    int before=fd_count();
+    void *lib=dlopen("/system/lib/libGLES_galwear_native.so",RTLD_NOW|RTLD_LOCAL);
+    if (!lib || before<0) return -1;
+#define EGL_RESOLVE(name) __typeof__(&name) p_##name=(__typeof__(&name))dlsym(lib,#name); if(!p_##name)return -1
+    EGL_RESOLVE(eglGetDisplay);
+    EGL_RESOLVE(eglInitialize);
+    EGL_RESOLVE(eglBindAPI);
+    EGL_RESOLVE(eglChooseConfig);
+    EGL_RESOLVE(eglCreateContext);
+    EGL_RESOLVE(eglCreatePbufferSurface);
+    EGL_RESOLVE(eglMakeCurrent);
+    EGL_RESOLVE(eglGetProcAddress);
+    EGL_RESOLVE(eglDestroySurface);
+    EGL_RESOLVE(eglDestroyContext);
+    EGL_RESOLVE(eglTerminate);
+    EGL_RESOLVE(glFlush);
+    EGL_RESOLVE(glGetError);
+#undef EGL_RESOLVE
+    PFNEGLCREATESYNCKHRPROC create=(PFNEGLCREATESYNCKHRPROC)p_eglGetProcAddress("eglCreateSyncKHR");
+    PFNEGLDESTROYSYNCKHRPROC destroy=(PFNEGLDESTROYSYNCKHRPROC)p_eglGetProcAddress("eglDestroySyncKHR");
+    PFNEGLCLIENTWAITSYNCKHRPROC wait=(PFNEGLCLIENTWAITSYNCKHRPROC)p_eglGetProcAddress("eglClientWaitSyncKHR");
+    PFNEGLDUPNATIVEFENCEFDANDROIDPROC export_fd=(PFNEGLDUPNATIVEFENCEFDANDROIDPROC)p_eglGetProcAddress("eglDupNativeFenceFDANDROID");
+    if (!create || !destroy || !wait || !export_fd) return -1;
+    EGLDisplay d=p_eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    EGLConfig config=0; EGLint count=0;
+    if (d==EGL_NO_DISPLAY || !p_eglInitialize(d,NULL,NULL) ||
+        !p_eglBindAPI(EGL_OPENGL_ES_API) ||
+        !p_eglChooseConfig(d,NULL,&config,1,&count) || count!=1 || !config) return -1;
+    const EGLint ca[]={EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE};
+    const EGLint pa[]={EGL_WIDTH,8,EGL_HEIGHT,8,EGL_NONE};
+    EGLContext c=p_eglCreateContext(d,config,EGL_NO_CONTEXT,ca);
+    EGLSurface surface=p_eglCreatePbufferSurface(d,config,pa);
+    if (c==EGL_NO_CONTEXT || surface==EGL_NO_SURFACE || !p_eglMakeCurrent(d,surface,surface,c)) return -1;
+    EGLSyncKHR sync=create(d,EGL_SYNC_NATIVE_FENCE_ANDROID,NULL);
+    if (sync==EGL_NO_SYNC_KHR || wait(d,sync,0,0)!=EGL_TIMEOUT_EXPIRED_KHR) return -1;
+    p_glFlush();
+    if (p_glGetError()!=GL_NO_ERROR || wait(d,sync,0,0)!=EGL_CONDITION_SATISFIED_KHR) return -1;
+    int fd=export_fd(d,sync);
+    if (fd<0 || fcntl(fd,F_GETFD)!=FD_CLOEXEC || !destroy(d,sync) ||
+        !p_eglMakeCurrent(d,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT) ||
+        !p_eglDestroySurface(d,surface) || !p_eglDestroyContext(d,c) ||
+        !p_eglTerminate(d) || dlclose(lib)) return -1;
+    struct pollfd ready={.fd=fd,.events=POLLIN};
+    if (poll(&ready,1,0)!=1 || ready.revents!=POLLIN || fd_count()!=before+1) return -1;
+    return fd;
+}
 static int hwc_cpu_present(hwc_composer_device_1_t *dev,int cycle)
 {
     int before=fd_count();
@@ -101,9 +155,18 @@ static int hwc_cpu_present(hwc_composer_device_1_t *dev,int cycle)
     l->acquireFenceFd=l->releaseFenceFd=c->retireFenceFd=-1;
     for (int i=0;i<2;++i) {
         buf->data[1]=i?HAL_PIXEL_FORMAT_BGRA_8888:HAL_PIXEL_FORMAT_RGBA_8888;
+        /* First frame uses the original no-fence control; second transfers
+         * a live, caller-owned EGL export after its provider is unloaded. */
+        int acquire=-1;
+        if (i) {
+            acquire=hwc_egl_acquire();
+            if (acquire<0) return 0;
+            l->acquireFenceFd=acquire;
+        }
         if (dev->prepare(dev,1,displays) || dev->set(dev,1,displays) ||
             l->acquireFenceFd!=-1 || l->releaseFenceFd!=-1 || c->retireFenceFd!=-1 ||
             fcntl(fd,F_GETFD)<0 || !hwc_fb_matches(i||cycle?1:0,2)) return 0;
+        if (i && (fcntl(acquire,F_GETFD)!=-1 || errno!=EBADF)) return 0;
     }
     free(c); free(buf);
     return close(fd)==0 && fd_count()==before;
@@ -458,6 +521,7 @@ static int hwc_fixture(const hw_module_t *module)
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
     puts("HAL_HWC_CPU_PRESENT_PASS frames=8 rgba=4 bgra=4 stride=368 pan=8");
+    puts("HAL_HWC_EGL_ACQUIRE_FIXTURE_PASS frames=4 exported=4 consumed=4 provider_unloaded=4 pixel_match=4");
     puts("HAL_HWC_FIXTURE_PASS geometry=360x360 cycles=4 invalid_bpp=1 power_recovery=4 timer_vsync=4");
     return 0;
 }
