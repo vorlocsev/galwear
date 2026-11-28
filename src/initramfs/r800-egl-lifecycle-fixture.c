@@ -1,5 +1,6 @@
 /* Test-only, single-threaded EGL lifecycle model; no graphics implementation. */
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 static char display_token,config_token,context_token,surface_token;
 #define DISPLAY ((EGLDisplay)&display_token)
 #define CONFIG ((EGLConfig)&config_token)
@@ -11,6 +12,9 @@ static int initialized,context,surface,current,bound;
 #include <GLES2/gl2.h>
 #include <string.h>
 static GLenum gl_error;
+static char sync_token;
+static int sync_live,sync_signaled;
+#define SYNC ((EGLSyncKHR)&sync_token)
 static int shader,source_ok,compiled,program,linked,active,draws;
 static void reset_gl(void) {
     gl_error=GL_NO_ERROR;
@@ -85,6 +89,9 @@ EGLBoolean eglSwapBuffers(EGLDisplay d,EGLSurface s) {
     if(!surface||s!=SURFACE)return fail(EGL_BAD_SURFACE);
     /* Model successful completion only for this test's bound surface. */
     if(!current)return fail(EGL_BAD_MATCH);
+#ifdef FIXTURE_CONTEXT_GLES
+    if(sync_live)sync_signaled=1;
+#endif
     return EGL_TRUE;
 }
 EGLBoolean eglDestroySurface(EGLDisplay d,EGLSurface s) {
@@ -103,9 +110,63 @@ EGLBoolean eglDestroyContext(EGLDisplay d,EGLContext c) {
 EGLBoolean eglTerminate(EGLDisplay d) {
     if(!ready(d))return EGL_FALSE;
     initialized=context=surface=current=bound=0;reset_gl();
+#ifdef FIXTURE_CONTEXT_GLES
+    sync_live=sync_signaled=0;
+#endif
     return EGL_TRUE;
 }
-__eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *p) {(void)p;return 0;}
+const char *eglQueryString(EGLDisplay d,EGLint name) {
+    if(!ready(d))return 0;
+    if(name!=EGL_EXTENSIONS){fail(EGL_BAD_PARAMETER);return 0;}
+#ifdef FIXTURE_CONTEXT_GLES
+    return "EGL_KHR_fence_sync";
+#else
+    return "";
+#endif
+}
+#ifdef FIXTURE_CONTEXT_GLES
+/* Single-object, zero-timeout fence model. No real sync_file, waits or GPU. */
+static EGLSyncKHR create_sync(EGLDisplay d,EGLenum type,const EGLint *attrs) {
+    if(!ready(d))return EGL_NO_SYNC_KHR;
+    if(type!=EGL_SYNC_FENCE_KHR){fail(EGL_BAD_ATTRIBUTE);return EGL_NO_SYNC_KHR;}
+    if(attrs&&attrs[0]!=EGL_NONE){fail(EGL_BAD_ATTRIBUTE);return EGL_NO_SYNC_KHR;}
+    if(!current){fail(EGL_BAD_MATCH);return EGL_NO_SYNC_KHR;}
+    if(sync_live){fail(EGL_BAD_ALLOC);return EGL_NO_SYNC_KHR;}
+    sync_live=1;sync_signaled=0;return SYNC;
+}
+static EGLBoolean valid_sync(EGLDisplay d,EGLSyncKHR sync) {
+    if(!ready(d))return EGL_FALSE;
+    if(!sync_live||sync!=SYNC)return fail(EGL_BAD_PARAMETER);
+    return EGL_TRUE;
+}
+static EGLBoolean destroy_sync(EGLDisplay d,EGLSyncKHR sync) {
+    if(!valid_sync(d,sync))return EGL_FALSE;
+    sync_live=sync_signaled=0;return EGL_TRUE;
+}
+static EGLint wait_sync(EGLDisplay d,EGLSyncKHR sync,EGLint flags,EGLTimeKHR timeout) {
+    if(!valid_sync(d,sync))return EGL_FALSE;
+    if(flags||timeout!=0){fail(EGL_BAD_PARAMETER);return EGL_FALSE;}
+    return sync_signaled?EGL_CONDITION_SATISFIED_KHR:EGL_TIMEOUT_EXPIRED_KHR;
+}
+static EGLBoolean get_sync(EGLDisplay d,EGLSyncKHR sync,EGLint attribute,EGLint *value) {
+    if(!valid_sync(d,sync))return EGL_FALSE;
+    if(!value)return fail(EGL_BAD_PARAMETER);
+    if(attribute!=EGL_SYNC_STATUS_KHR)return fail(EGL_BAD_ATTRIBUTE);
+    *value=sync_signaled?EGL_SIGNALED_KHR:EGL_UNSIGNALED_KHR;return EGL_TRUE;
+}
+#endif
+__eglMustCastToProperFunctionPointerType eglGetProcAddress(const char *p) {
+#ifdef FIXTURE_CONTEXT_GLES
+    if(!p)return 0;
+    if(strcmp(p,"eglCreateSyncKHR")==0)return (__eglMustCastToProperFunctionPointerType)create_sync;
+    if(strcmp(p,"eglDestroySyncKHR")==0)return (__eglMustCastToProperFunctionPointerType)destroy_sync;
+    if(strcmp(p,"eglClientWaitSyncKHR")==0)return (__eglMustCastToProperFunctionPointerType)wait_sync;
+    if(strcmp(p,"eglGetSyncAttribKHR")==0)return (__eglMustCastToProperFunctionPointerType)get_sync;
+#else
+    (void)p;
+#endif
+    return 0;
+}
 
 #ifdef FIXTURE_CONTEXT_GLES
 /* Deliberately limited state model. No shader compilation or rasterization. */

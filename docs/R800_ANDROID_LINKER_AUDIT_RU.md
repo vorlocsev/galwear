@@ -129,3 +129,15 @@ windows. Реальные EGL, GPU и SurfaceFlinger не инициализир
 реальных GLSL compilation, shader attachment/linking, rasterization или
 pixel output. Даже поведение без current context — исключительно контракт
 fixture, не утверждение о GLES conformance. Evidence хранит отдельный marker.
+
+## EGL extension dispatch fixture
+
+Combined fixture объявляет EGL_KHR_fence_sync, четыре функции sync доступны
+только через eglGetProcAddress, не через dlsym. Plain lifecycle fixture
+не объявляет расширение и возвращает NULL для функций. 4 supported и 5
+unsupported циклов; zero-timeout до условного swap, signaled после swap,
+destroy и rejected stale handle; отсутствие current context проверяется.
+EGL_ANDROID_native_fence_sync не объявляется, FD не выдаются. Ограниченная
+синтетическая модель не доказывает реальное KHR fence semantics или
+kernel sync_file, не проверяет ожидание с ненулевым timeout и не является
+EGL conformance test. Native fence remains unverified.

@@ -28,6 +28,7 @@ INCOMPLETE = "libGLESv2_galwear_incomplete.so"
 MARKER = "EGL_LINK_FIXTURE_PASS cycles=4 split=1 combined=1 missing=1 private_denials=2 recovery=1 fd_stable=1"
 LIFECYCLE_MARKER = "EGL_LIFECYCLE_FIXTURE_PASS cycles=5 swaps=15 errors=35 partial_rollback=5 reload=1 fd_stable=1"
 CONTEXT_MARKER = "EGL_GLES_CONTEXT_FIXTURE_PASS cycles=4 draw_model=12 compile_recovery=4 link_recovery=4 context_reset=4 fd_stable=1"
+EXTENSION_MARKER = "EGL_EXTENSION_FIXTURE_PASS supported=4 absent=5 proc_only=4 timeout=4 signaled=4 destroy=4 native_fence_absent=9"
 
 
 def config():
@@ -113,14 +114,16 @@ def run(ndk, runtime, manifest, output, source_sha):
             "--dev","/dev","--proc","/proc","--chdir","/",
             "/qemu","-cpu","cortex-a15","-L","/","/system/bin/egl-probe"],
             capture_output=True,text=True,timeout=60)
-        if result.returncode or result.stdout.strip().splitlines()!=[MARKER,LIFECYCLE_MARKER,CONTEXT_MARKER]:
+        if result.returncode or result.stdout.strip().splitlines()!=[MARKER,LIFECYCLE_MARKER,CONTEXT_MARKER,EXTENSION_MARKER]:
             raise ValueError("Synthetic EGL link failed: "+str(result.returncode)+" "+result.stderr[:4000])
         report={"status":"ARM32_SYNTHETIC_EGL_LINK_ONLY","source_sha":source_sha,
                 "runtime_sha256":pins,"fixture_libraries":fixtures,"probe_sha256":probe_sha,
                 "namespace_config_sha256":sha(cfg.read_bytes()),"marker":MARKER,
                 "synthetic_dlsym_verified":True,"synthetic_lifecycle_verified":True,
                 "synthetic_lifecycle_marker":LIFECYCLE_MARKER,"synthetic_context_gles_verified":True,
-                "synthetic_context_marker":CONTEXT_MARKER,"donor_driver_loaded":False,
+                "synthetic_context_marker":CONTEXT_MARKER,"synthetic_extension_dispatch_verified":True,
+                "synthetic_extension_marker":EXTENSION_MARKER,"real_native_fence_verified":False,
+                "donor_driver_loaded":False,
                 "egl_initialized":False,"surfaceflinger_started":False,
                 "gpu_hardware_verified":False,"safe_to_flash":False}
         (output/"egl-link-evidence.json").write_text(json.dumps(report,sort_keys=True)+"\n")
