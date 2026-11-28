@@ -27,6 +27,7 @@ from r800_display_asset_layer import load_assets
 from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, verify as verify_stock
 from r800_bind_pixel_system import verify as verify_pixel
 from r800_ndk_pins import verify as verify_ndk
+from r800_base_vendor_identity import audit as audit_base, review_saved as review_base
 
 MAX_REPORT=16*1024**2
 MAX_FILE=64*1024**2
@@ -112,6 +113,13 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                     "pixel_evidence":pixel_evidence,"xtra_abi":xtra_abi,
                     "assets":assets,"assets_sha":assets_sha,"ndk_pins":ndk_pins}
     managed_raw=managed_snapshot(managed_manifest,source_sha,managed_config)
+    base_identity=None
+    if managed_raw is not None:
+        base_identity=audit_base(p["base"],pins["base"],source_sha,
+                                 effects=p["effects"],effects_pin=pins["effects"])
+        require(review_base(base_identity,pins["base"],pins["effects"],source_sha)==
+                "BASE_VENDOR_IDENTITY_FIELDS_OBSERVED_ONLY",
+                "Managed build requires complete literal base vendor identity")
     with tempfile.TemporaryDirectory(dir=output.parent,prefix="r800-local-build-") as tmp:
         work=Path(tmp)
         # Reject diagnostic/stale kernel before expensive vendor/runtime work.
@@ -164,6 +172,11 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  (android,"android-build-evidence.json",bp),
                  (android/"android","android-layer-evidence.json",android_pin)]
         copied={}
+        if base_identity is not None:
+            base_raw=(json.dumps(base_identity,indent=2,sort_keys=True)+"\n").encode()
+            require(len(base_raw)<=MAX_REPORT,"Base vendor evidence exceeds report budget")
+            (evidence/"base-vendor-identity.json").write_bytes(base_raw)
+            copied["base-vendor-identity.json"]=sha(base_raw)
         if managed_raw is not None:
             require(managed_snapshot(managed_manifest,source_sha,managed_config)==managed_raw,
                     "Managed manifest changed during assembly")
@@ -220,6 +233,7 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  "pixel_system_binding":pixel,
                  "ndk_selected_tool_evidence":ndk_evidence,
                  "managed_manifest_sha256":None if managed_raw is None else sha(managed_raw),
+                 "base_vendor_identity_sha256":copied.get("base-vendor-identity.json"),
                  "stage_evidence_sha256":copied,"integrated_evidence_sha256":ip,
                  "missing_inputs_and_gates":i["missing_inputs_and_gates"],
                  "kernel_and_components_compiled_by_this_command":False,
