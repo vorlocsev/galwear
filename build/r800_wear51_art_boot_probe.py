@@ -153,3 +153,60 @@ def compare_runs(first,second):
     return {"status":"TWO_RUN_SHA256_MATCH" if identical else "TWO_RUN_SHA256_DIFFERENT" if complete else "REVIEW_REQUIRED",
             "files":rows,"same_runner_only":True,"cross_host_reproducibility_verified":False,
             "safe_to_flash":False}
+
+
+def image_difference(first,second,expected):
+    """Report differing offsets/counts only; never export donor or compiler bytes."""
+    if len(expected)!=2 or not all(e.get("status")=="HEADER_OBSERVED" for e in expected):
+        raise ValueError("Two successful ART image observations required")
+    images=[]
+    for path,row in zip((first,second),expected):
+        raw=read_regular(path,MAX_OUTPUT)
+        if len(raw)!=row["bytes"] or sha(raw)!=row["sha256"]:
+            raise ValueError("ART image changed since compiler output observation")
+        if raw[:4]!=b"art\n" or len(raw)<16:
+            raise ValueError("Expected ART image")
+        images.append(raw)
+    a,b=images
+    common=min(len(a),len(b))
+    page_size=4096
+    pages=[]
+    changed=0
+    first_offset=None
+    last_offset=None
+    runs=0
+    previous=-2
+    range_samples=[]
+    range_start=None
+    for start in range(0,common,page_size):
+        end=min(start+page_size,common)
+        if a[start:end]==b[start:end]:
+            continue
+        page_count=0
+        for offset in range(start,end):
+            if a[offset]==b[offset]:
+                continue
+            changed+=1
+            page_count+=1
+            if first_offset is None:
+                first_offset=offset
+            last_offset=offset
+            if offset!=previous+1:
+                if range_start is not None and len(range_samples)<64:
+                    range_samples.append({"offset":range_start,"bytes":previous-range_start+1})
+                range_start=offset
+                runs+=1
+            previous=offset
+        pages.append({"page":start//page_size,"changed_bytes":page_count})
+    if range_start is not None and len(range_samples)<64:
+        range_samples.append({"offset":range_start,"bytes":previous-range_start+1})
+    return {"status":"ART_IMAGE_BYTE_DIFFERENCE_OBSERVED" if changed or len(a)!=len(b) else "ART_IMAGE_BYTES_IDENTICAL",
+            "image_sha256":[sha(a),sha(b)],"image_bytes":[len(a),len(b)],
+            "common_bytes":common,"different_common_bytes":changed,
+            "unpaired_tail_bytes":abs(len(a)-len(b)),"first_difference_offset":first_offset,
+            "last_common_difference_offset":last_offset,"different_ranges":runs,
+            "range_samples":range_samples,"range_samples_truncated":runs>len(range_samples),
+            "page_bytes":page_size,"different_pages":len(pages),"page_samples":pages[:128],
+            "page_samples_truncated":len(pages)>128,
+            "header_first_16_identical":a[:16]==b[:16],
+            "semantic_cause_verified":False,"safe_to_flash":False}
