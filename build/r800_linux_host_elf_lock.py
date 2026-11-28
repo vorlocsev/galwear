@@ -9,8 +9,9 @@ import json
 from pathlib import Path
 import os
 
-from r800_gps_host_elf import audit, DEFAULT_DIRS, LOADER, LIMIT
+from r800_gps_host_elf import audit, DEFAULT_DIRS, LOADER, LIMIT, MAX_OBJECTS, MAX_EDGES, MAX_TOTAL, NAME
 from r800_linux_assembly_environment import identity, read_pinned, TOOLS
+from r800_stage_adaptation_layer import valid_pin
 from r800_donor_preflight import digest
 from r800_extract_super import require
 from r800_graphics_donor_binding import checkout_sha
@@ -51,6 +52,64 @@ def inventory(lock,source_sha):
             "loader_search_verified":False,"dlopen_coverage_verified":False,
             "runtime_verified":False,"complete_environment_verified":False,
             "reproducible_build_verified":False,"safe_to_flash":False}
+
+
+def review_saved(lock,report,lock_pin,source_sha):
+    require(lock.get("source_sha")==source_sha and set(lock["tools"])==set(TOOLS),
+            "Expected exact-head selected host tool lock")
+    require(isinstance(report,dict) and set(report)=={
+        "schema","environment_lock_sha256","status","source_sha","roots","objects","bindings",
+        "candidate_directories","problems","loader_search_verified","dlopen_coverage_verified",
+        "runtime_verified","complete_environment_verified","reproducible_build_verified","safe_to_flash"} and
+        report["schema"]=="galwear-r800-linux-host-elf-lock-v1" and
+        report["environment_lock_sha256"]==lock_pin and report["source_sha"]==source_sha and
+        report["status"]=="SELECTED_HOST_ELF_CANDIDATES_ONLY" and report["problems"]==[] and
+        report["roots"]==sorted(TOOLS) and report["candidate_directories"]==list(DEFAULT_DIRS) and
+        all(report[k] is False for k in ("loader_search_verified","dlopen_coverage_verified",
+            "runtime_verified","complete_environment_verified","reproducible_build_verified","safe_to_flash")),
+        "Unexpected saved host ELF scope or lock binding")
+    objects,bindings=report["objects"],report["bindings"]
+    require(isinstance(objects,dict) and 0<len(objects)<=MAX_OBJECTS and
+            isinstance(bindings,dict),"Invalid host ELF inventory")
+    roots={row["resolved"] for row in lock["tools"].values()}
+    for key,row in objects.items():
+        path=Path(key)
+        require(path.is_absolute() and ".." not in path.parts and str(path)==key and
+                (key in roots or any(path.is_relative_to(r) for r in LIBRARY_ROOTS)),
+                "Invalid saved host ELF object path")
+        require(isinstance(row,dict) and set(row)=={"bytes","sha256","needed","interpreter"} and
+                type(row["bytes"]) is int and 0<row["bytes"]<=LIMIT and valid_pin(row["sha256"]) and
+                row["interpreter"] in (None,LOADER) and isinstance(row["needed"],list) and
+                len(row["needed"])<=MAX_EDGES and all(isinstance(n,str) and NAME.fullmatch(n) and
+                n not in (".","..") for n in row["needed"]) and
+                len(set(row["needed"]))==len(row["needed"]),"Invalid saved host ELF object")
+    require(sum(r["bytes"] for r in objects.values())<=MAX_TOTAL and
+            sum(len(r["needed"]) for r in objects.values())<=MAX_EDGES,"Saved ELF budget exceeded")
+    for name,row in lock["tools"].items():
+        target=bindings.get(name)
+        obj=objects.get(target,{})
+        require(target==row["resolved"] and all(obj.get(k)==row[k] for k in ("bytes","sha256")),
+                "Saved host ELF root differs from executable lock")
+    pending=list(TOOLS)
+    used_labels=set()
+    used_objects=set()
+    while pending:
+        label=pending.pop()
+        if label in used_labels:
+            continue
+        used_labels.add(label)
+        target=bindings.get(label)
+        require(isinstance(target,str) and target in objects,"Missing saved host ELF provider")
+        if target in used_objects:
+            continue
+        used_objects.add(target)
+        row=objects[target]
+        pending.extend(row["needed"])
+        if row["interpreter"]:
+            pending.append(LOADER)
+    require(used_labels==set(bindings) and used_objects==set(objects),
+            "Unexpected unreachable host ELF entries")
+    return "SAVED_STATIC_HOST_ELF_CHAIN_ONLY"
 
 
 def capture(lock_path,lock_pin,source_sha):
