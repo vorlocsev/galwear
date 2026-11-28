@@ -23,6 +23,7 @@ from r800_extract_super import ALLOWED, require
 from r800_partition_identity import filesystem, literal_properties, property_inventory
 from r800_donor_preflight import digest
 from r800_android_linker_audit import inspect
+from r800_art_inventory import DEX_NAME, jar_inventory
 
 MAX_PARTITION = 4*1024**3
 MAX_MEMBER = 64*1024**2
@@ -94,17 +95,23 @@ def ext4_member(tool, image, path, limit, scratch):
         dest.unlink(missing_ok=True)
 
 
-def classify(path, raw):
+def classify(path, raw, validate_dex=False, dex_budget=MAX_TOTAL):
     result = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
     if path.endswith(".jar"):
         import io
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             entries = archive.infolist()
             require(len(entries) <= 65536, "JAR inventory exceeds entry budget")
-            dex = [i.filename for i in entries if re.fullmatch(r"classes(?:[2-9][0-9]*)?\.dex", i.filename)]
+            dex = [i.filename for i in entries if DEX_NAME.fullmatch(i.filename)]
             require(len(set(dex)) == len(dex), "Duplicate JAR DEX member")
             result.update(kind="JAR_DIRECTORY_ONLY", dex_entries=sorted(dex),
                           dex_contents_verified=False)
+        if validate_dex:
+            dex_report, used = jar_inventory(raw, dex_budget)
+            require(dex_report["status"] == "DEX_HEADER_INVENTORY_ONLY",
+                    "No embedded DEX; precompiled ART evidence required")
+            result.update(kind="JAR_DEX_HEADER_INVENTORY_ONLY", dex_inventory=dex_report,
+                          dex_bytes=used, dex_headers_checked=True)
     elif path.endswith(".so") or "/bin/" in path:
         elf = inspect(raw)
         result.update(kind="ELF_STATIC_ONLY", abi=elf["abi"], elf_type=elf["elf_type"],
@@ -115,7 +122,7 @@ def classify(path, raw):
 
 
 def audit(image, expected, partition, source_sha, prefix, requested, erofs_tool=None,
-          erofs_tool_sha=None):
+          erofs_tool_sha=None, validate_dex=False):
     require(ALLOWED.fullmatch(partition), "Explicit allowed partition required")
     require(re.fullmatch(r"[0-9a-f]{64}", expected), "Expected image SHA-256")
     require(prefix in ("", "/system", "/vendor", "/product", "/system_ext", "/odm"),
@@ -154,11 +161,13 @@ def audit(image, expected, partition, source_sha, prefix, requested, erofs_tool=
                     continue
                 total += len(raw)
                 require(total <= MAX_TOTAL, "Framework byte budget exceeded")
-                row = classify(path, raw)
+                row = classify(path, raw, validate_dex, MAX_TOTAL-total)
+                total += row.get("dex_bytes", 0)
                 if relative == "build.prop":
                     records.extend(literal_properties(raw, path))
                 rows[path] = {"status": "OBSERVED", **row}
-            except (ValueError, OSError, UnicodeError, zipfile.BadZipFile, subprocess.SubprocessError) as exc:
+            except (ValueError, OSError, UnicodeError, RuntimeError, NotImplementedError,
+                    zipfile.BadZipFile, subprocess.SubprocessError) as exc:
                 rows[path] = {"status": "REVIEW_REQUIRED", "reason": str(exc)}
         require(digest(private, MAX_PARTITION)["sha256"] == expected and
                 digest(image, MAX_PARTITION)["sha256"] == expected, "Partition input changed")
@@ -172,6 +181,7 @@ def audit(image, expected, partition, source_sha, prefix, requested, erofs_tool=
             "source_sha": source_sha, "partition": partition, "image_sha256": expected,
             "filesystem": fs, "root_prefix": prefix, "members": rows,
             "properties": props, "erofs_tool_sha256": erofs_tool_sha if fs["kind"] == "EROFS" else None,
+            "dex_header_check_requested": validate_dex,
             "framework_complete": False, "dex_execution_verified": False,
             "wear_os_runtime_verified": False, "surfaceflinger_runtime_verified": False,
             "hardware_tested": False, "safe_to_flash": False}
@@ -187,10 +197,12 @@ def main():
     p.add_argument("--member", action="append", required=True)
     p.add_argument("--erofs-tool", type=Path)
     p.add_argument("--erofs-tool-sha256")
+    p.add_argument("--validate-dex", action="store_true",
+                   help="Validate embedded standard DEX headers using existing ART inventory")
     p.add_argument("--output", type=Path, required=True)
     a = p.parse_args()
     report = audit(a.image, a.sha256, a.partition, a.source_sha, a.root_prefix,
-                   a.member, a.erofs_tool, a.erofs_tool_sha256)
+                   a.member, a.erofs_tool, a.erofs_tool_sha256, a.validate_dex)
     with a.output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
         stream.write("\n")
