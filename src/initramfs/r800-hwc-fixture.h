@@ -251,14 +251,17 @@ static int hwc_window_release_async(void)
 }
 /* Consume a genuine output FD from the HWC code (mock DECON provider).
  * Duplicate for the existing counter assertion before the queue reaps it. */
-static int hwc_queue_overlay_release(int fd,native_handle_t *handle)
+static int hwc_queue_overlay_release(int fd,int signal_fd,native_handle_t *handle)
 {
     if(!handle||fcntl(handle->data[0],F_GETFD)!=FD_CLOEXEC)return 0;
     struct window_queue q={.slots={{.handle=handle,.state=WINDOW_ACQUIRED,.fence=-1},
                                    {.state=WINDOW_DEQUEUED,.fence=-1}}};
     if(window_release_async(&q,0,fd)||window_dequeue(&q)!=-EAGAIN||
        q.slots[0].handle!=handle||fcntl(handle->data[0],F_GETFD)!=FD_CLOEXEC||
-       window_reap_release(&q,0)||fcntl(fd,F_GETFD)!=-1||errno!=EBADF||
+       window_reap_release(&q,0)!=-EAGAIN||q.slots[0].state!=WINDOW_RELEASE_PENDING||
+       q.slots[0].fence!=fd||fcntl(fd,F_GETFD)<0||window_dequeue(&q)!=-EAGAIN||
+       eventfd_write(signal_fd,21)||window_reap_release(&q,0)||
+       fcntl(fd,F_GETFD)!=-1||errno!=EBADF||
        q.slots[0].handle!=handle||fcntl(handle->data[0],F_GETFD)!=FD_CLOEXEC||
        window_dequeue(&q)!=0||window_cancel(&q,0,-1))return 0;
     return 1;
@@ -370,7 +373,7 @@ static int hwc_overlay(const hw_module_t *module,unsigned int (*get)(unsigned in
     /* 2-layer then 3-layer success, followed by five EIO failures. */
     for (int round=0;round<7;++round) {
         int n=round==1?3:2;
-        mode(round<2?5:6);
+        mode(round==0?9:round==1?5:6);
         c->numHwLayers=n+1;
         c->retireFenceFd=-1;
         int pairs[4][2];
@@ -404,7 +407,7 @@ static int hwc_overlay(const hw_module_t *module,unsigned int (*get)(unsigned in
                 int observe=l->releaseFenceFd;
                 if(round==0&&i==0){
                     observe=fcntl(l->releaseFenceFd,F_DUPFD_CLOEXEC,0);
-                    if(observe<0||!hwc_queue_overlay_release(l->releaseFenceFd,buf[i]))return 0;
+                    if(observe<0||!hwc_queue_overlay_release(l->releaseFenceFd,observe,buf[i]))return 0;
                 }
                 if(read(observe,&v,sizeof(v))!=(ssize_t)sizeof(v) ||
                    v!=(uint64_t)(21+i) || close(observe))return 0;
@@ -629,6 +632,7 @@ static int hwc_fixture(const hw_module_t *module)
     puts("HAL_HWC_WINDOW_RELEASE_FIXTURE_PASS cycles=4 delayed=4 signaled=4 rejected=4 quarantined=4 overlay_handoff=1 fd_stable=1");
     puts("HAL_HWC_OVERLAY_RECOVERY_PASS reopen=1 format_gate=1 release_dup=1 no_fences_disable=1");
     puts("HAL_HWC_IMPORTED_OVERLAY_FIXTURE_PASS imports=3 source_closed=3 freed=3 overlay_release_handoff=1 fd_stable=1");
+    puts("HAL_HWC_DELAYED_OVERLAY_RELEASE_FIXTURE_PASS unsignaled=1 blocked_reuse=1 signaled=1 reclaimed=1");
     puts("HAL_HWC_OVERLAY_PASS windows=2,3 releases=5 retire=2 eio=5 disabled=1 transform_reject=1");
     puts("HAL_HWC_ZERO_COPY_PASS win_config=2 accepted=1 enotty=1 fallback=1 retire=1 release_closed=1");
     puts("HAL_HWC_PRESENT_GUARD_PASS cycles=4 invalid_list=4 ready_null_target=4 hungup=4");
