@@ -54,7 +54,9 @@ def dex_inventory(data):
         raise ValueError("Invalid DEX map size")
     return {"version": data[4:7].decode("ascii"), "bytes": len(data),
             "sections": sections, "map_entries": map_count,
-            "checksum_matches": True, "bytecode_verified": False}
+            "checksum_matches": True, "bytecode_verified": False,
+            "location_checksum": struct.unpack_from("<I", data, 8)[0],
+            "location_checksum_kind": "DEX_HEADER_ADLER32"}
 
 
 def jar_inventory(data, budget):
@@ -88,6 +90,8 @@ def jar_inventory(data, budget):
                     item.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)):
                 raise ValueError("Unsupported DEX ZIP entry")
             result[item.filename] = dex_inventory(archive.read(item))
+            result[item.filename]["location_checksum"] = item.CRC
+            result[item.filename]["location_checksum_kind"] = "ZIP_ENTRY_CRC32"
         return {"status": "DEX_HEADER_INVENTORY_ONLY", "dex": result}, total
 
 
