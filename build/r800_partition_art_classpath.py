@@ -22,6 +22,7 @@ from r800_framework_inventory import ext4_member, erofs_member, bounded_tool, MA
 from r800_graphics_donor_binding import checkout_sha
 from r800_donor_preflight import digest
 from r800_art_apex_mapping import ApexReader
+from r800_art_vdex_binding import compare as compare_vdex, MAX_VDEX
 
 MAX_IMAGE = 4*1024**3
 MAX_IMAGES = 5
@@ -88,14 +89,19 @@ def literal_exports(sources):
     return exports, resolved, imports, errors
 
 
-def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, apex_specs=()):
+VDEX_PATH = re.compile(r"/(?:system|system_ext|product|vendor|odm)/framework/(?:oat/)?(?:arm|arm64)/[A-Za-z0-9_.-]+\.vdex")
+
+
+def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, apex_specs=(), vdex_specs=()):
     checkout_sha(source_sha)
     rows = map_images(specs)
     require(1 <= len(rc_paths) <= MAX_RCS and len(set(rc_paths)) == len(rc_paths)
             and all(RC_PATH.fullmatch(p) for p in rc_paths), "Explicit allowed RC paths required")
     require((erofs_tool is None) == (erofs_tool_sha is None), "EROFS tool and SHA required together")
     artifacts, rc_evidence, sources, errors = {}, {}, [], []
-    inputs = {}
+    inputs, vdex_evidence = {}, {}
+    require(len(vdex_specs) <= 8 and len({s[0] for s in vdex_specs}) == len(vdex_specs),
+            "Invalid VDEX mapping count or duplicate path")
     total = 0
     with tempfile.TemporaryDirectory(prefix="r800-art-partitions-") as tmp:
         scratch = Path(tmp)
@@ -159,6 +165,22 @@ def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, ape
                 # A failed decompression may already have consumed work.
                 # Do not spend the remaining aggregate budget after failure.
                 break
+        for vdex_path, *locations in vdex_specs:
+            try:
+                require(VDEX_PATH.fullmatch(vdex_path), "Unsupported VDEX path")
+                require(all(p in paths for p in locations), "VDEX location outside literal classpath")
+                raw = read_mapped(rows, vdex_path, min(MAX_VDEX, MAX_TOTAL-total), scratch)
+                require(raw is not None, "VDEX member missing")
+                total += len(raw)
+                require(total <= MAX_TOTAL, "ART byte budget exceeded")
+                evidence = compare_vdex(raw, locations, artifacts)
+                vdex_evidence[vdex_path] = evidence
+                if not evidence["ordered_checksums_match"]:
+                    errors.append(vdex_path+": ordered VDEX checksum mismatch")
+            except (OSError, ValueError, RuntimeError) as exc:
+                vdex_evidence[vdex_path] = {"status": "REVIEW_REQUIRED", "reason": str(exc)}
+                errors.append(vdex_path+": "+str(exc))
+                break
         apex.verify_unchanged()
         for row in rows.values():
             require(digest(row["snapshot"], MAX_IMAGE)["sha256"] == row["sha256"] and
@@ -173,7 +195,7 @@ def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, ape
             "partition_inputs": inputs, "rc_inputs": rc_evidence, "exports": exports,
             "resolved_literal_paths": resolved, "unexpanded_imports": imports,
             "artifacts": artifacts, "errors": errors,
-            "apex_packages": apex.evidence,
+            "apex_packages": apex.evidence, "vdex_bindings": vdex_evidence,
             "init_imports_resolved": False, "effective_classpath_verified": False,
             "apex_activation_verified": False, "oat_verified": False, "vdex_verified": False,
             "bytecode_verified": False, "art_initialization_verified": False,
@@ -188,11 +210,13 @@ def main():
     p.add_argument("--source-sha", required=True)
     p.add_argument("--apex", nargs=3, action="append", default=[],
                    metavar=("MODULE", "GUEST_PATH", "SHA256"))
+    p.add_argument("--vdex", nargs="+", action="append", default=[],
+                   metavar="PATH", help="VDEX path followed by explicitly ordered classpath locations")
     p.add_argument("--erofs-tool", type=Path)
     p.add_argument("--erofs-tool-sha256")
     p.add_argument("--output", type=Path, required=True)
     a = p.parse_args()
-    report = audit(a.image, a.rc, a.source_sha, a.erofs_tool, a.erofs_tool_sha256, a.apex)
+    report = audit(a.image, a.rc, a.source_sha, a.erofs_tool, a.erofs_tool_sha256, a.apex, a.vdex)
     with a.output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
         stream.write("\n")
