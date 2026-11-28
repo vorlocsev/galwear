@@ -17,6 +17,7 @@ from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, describe as describe_s
 from r800_bind_pixel_system import STATUS as PIXEL_STATUS, describe as describe_pixel
 from r800_base_vendor_identity import review_saved as review_base
 from r800_linux_assembly_environment import saved_environment, read_pinned
+from r800_linux_host_elf_lock import review_saved as review_host_elf
 from r800_ndk_pins import REVISION as NDK_REVISION, KEYS as NDK_KEYS, BIN as NDK_BIN, LIMIT as NDK_LIMIT
 
 STAGES={
@@ -203,12 +204,17 @@ def managed_chain(summary,evidence,source_sha):
         paths.append(assets["path"])
     if "environment" in data:
         env=data["environment"]
-        require(isinstance(env,dict) and set(env)=={"lock","lock_sha256","probe","probe_sha256"} and
+        require(isinstance(env,dict) and set(env) in ({"lock","lock_sha256","probe","probe_sha256"},
+                    {"lock","lock_sha256","probe","probe_sha256","elf","elf_sha256"}) and
                 env["lock_sha256"]==summary.get("environment_lock_sha256") and
                 env["probe_sha256"]==summary.get("synthetic_mount_probe_sha256") and
                 valid_pin(env["lock_sha256"]) and valid_pin(env["probe_sha256"]) and env["lock"]!=env["probe"],
                 "Managed manifest environment pins mismatch")
         paths.extend((env["lock"],env["probe"]))
+        if "elf" in env:
+            require(valid_pin(env["elf_sha256"]) and env["elf_sha256"]==summary.get("host_elf_lock_sha256") and
+                    env["elf"] not in (env["lock"],env["probe"]),"Managed manifest host ELF pin mismatch")
+            paths.append(env["elf"])
     require(all(isinstance(p,str) and 0<len(p)<=1024 and "\\" not in p and ":" not in p and
                 all(x not in ("",".","..") for x in p.split("/")) for p in paths),
             "Invalid managed relative path")
@@ -239,7 +245,7 @@ def host_chain(summary,evidence,source_sha):
     lock_pin=summary.get("environment_lock_sha256")
     probe_pin=summary.get("synthetic_mount_probe_sha256")
     if lock_pin is None and probe_pin is None:
-        require(not managed,"Managed build missing host environment evidence")
+        require(not managed and summary.get("host_elf_lock_sha256") is None,"Managed build missing host environment evidence")
         return "NOT_SUPPLIED"
     require(managed and valid_pin(lock_pin) and valid_pin(probe_pin),
             "Unexpected host evidence scope")
@@ -250,7 +256,13 @@ def host_chain(summary,evidence,source_sha):
     require("environment" in manifest,"Managed manifest missing environment references")
     _,lock=read_pinned(evidence/"linux-assembly-lock.json",lock_pin)
     _,probe=read_pinned(evidence/"synthetic-mount-probe.json",probe_pin)
-    return saved_environment(lock,probe,lock_pin,source_sha)
+    status=saved_environment(lock,probe,lock_pin,source_sha)
+    elf_pin=summary.get("host_elf_lock_sha256")
+    require(valid_pin(elf_pin) and manifest["environment"].get("elf_sha256")==elf_pin and
+            pins.get("linux-host-elf-lock.json")==elf_pin,"Managed build missing or mismatched host ELF report")
+    _,elf=read_pinned(evidence/"linux-host-elf-lock.json",elf_pin)
+    review_host_elf(lock,elf,lock_pin,source_sha)
+    return status
 
 
 def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
@@ -274,6 +286,8 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
     expected=set(STAGES)|RECIPE|stock_inventory(summary)
     if summary.get("managed_manifest_sha256") is not None:
         expected.add("managed-donor-manifest.json")
+    if summary.get("host_elf_lock_sha256") is not None:
+        expected.add("linux-host-elf-lock.json")
     if summary.get("environment_lock_sha256") is not None:
         expected.add("linux-assembly-lock.json")
     if summary.get("synthetic_mount_probe_sha256") is not None:
@@ -327,6 +341,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
                       "stock_donor_evidence":stock_status,"pixel_system_evidence":pixel_status,
                       "managed_manifest":managed_status,"ndk_selected_tools":ndk_status,
                       "base_vendor_identity":base_status,"host_environment":host_status,
+                      "host_elf":"SAVED_STATIC_HOST_ELF_CHAIN_ONLY" if host_status!="NOT_SUPPLIED" else "NOT_SUPPLIED",
                       "installation_layout":"STATIC_PLAN_ONLY",
                       "recovery_inputs":"OFFLINE_REVIEW_ONLY" if recovery else "NOT_SUPPLIED",
                       "hardware_boot":"NOT_TESTED","wear_os_boot":"NOT_TESTED"},
@@ -336,6 +351,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
             "managed_manifest_sha256":summary.get("managed_manifest_sha256"),
             "base_vendor_identity_sha256":summary.get("base_vendor_identity_sha256"),
             "environment_lock_sha256":summary.get("environment_lock_sha256"),
+            "host_elf_lock_sha256":summary.get("host_elf_lock_sha256"),
             "synthetic_mount_probe_sha256":summary.get("synthetic_mount_probe_sha256"),
             "base_vendor_identity":base_identity,
             "ndk_selected_tool_evidence":summary.get("ndk_selected_tool_evidence"),
