@@ -21,7 +21,7 @@
 static atomic_uint bad, invalid_geometry, fail_power, fixed, variable, wake, blanks, power, vsync_on, vsync_off, pans;
 static atomic_uint zero_copy, fail_win, win_calls, win_success;
 static atomic_int last_release=-1,last_retire=-1;
-static atomic_uint overlays, fail_overlay, overlay_calls, overlay_success, missing_fences;
+static atomic_uint overlays, fail_overlay, overlay_calls, overlay_success, missing_fences, delayed_release;
 unsigned int r800_hwc_fixture_get(unsigned int k)
 {
     switch(k) {
@@ -47,11 +47,12 @@ void r800_hwc_fixture_mode(unsigned int mode)
 {
     invalid_geometry=mode==1;
     fail_power=mode==2;
-    zero_copy=mode>=3 && mode<=8;
+    zero_copy=mode>=3 && mode<=9;
     fail_win=mode==4;
-    overlays=mode>=5 && mode<=8;
+    overlays=mode>=5 && mode<=9;
     fail_overlay=mode==6;
     missing_fences=mode==7?1:mode==8?2:0;
+    delayed_release=mode==9;
 }
 int __system_property_get(const char *name,char *value)
 {
@@ -104,7 +105,7 @@ static int overlay_config(struct r800_win_config_data *d)
     if (missing_fences==2) { ++overlay_success; return 0; }
     for (int i=0;i<n;++i) {
         if (missing_fences==1 && i==0) continue;
-        rel[i]=eventfd(21+i,EFD_CLOEXEC|EFD_NONBLOCK);
+        rel[i]=eventfd(delayed_release&&i==0?0:21+i,EFD_CLOEXEC|EFD_NONBLOCK);
         if (rel[i]<0) goto cleanup;
     }
     retire=eventfd(31,EFD_CLOEXEC|EFD_NONBLOCK);
