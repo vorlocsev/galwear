@@ -15,7 +15,7 @@ MAX_LIBRARIES = 128
 MAX_LIBRARY_BYTES = 256 * 1024 * 1024
 HALS = ("composer", "allocator", "mapper")
 PARTITIONS = ("system", "vendor", "odm", "system_ext", "product")
-LIB_PATTERN = re.compile(r"(?:lib(?:EGL|GLESv1_CM|GLESv2|GLES|Mali|mali|gralloc|hwcomposer)(?:[._-][A-Za-z0-9_.-]+)?|(?:gralloc|hwcomposer)\.[A-Za-z0-9_.-]+|android\.hardware\.graphics\.(?:composer|allocator|mapper)@[0-9.]+(?:-impl)?)\.so")
+LIB_PATTERN = re.compile(r"(?:lib(?:EGL|GLESv1_CM|GLESv2|GLES|Mali|mali|gralloc|hwcomposer)(?:[._-][A-Za-z0-9_.-]+)?|(?:gralloc|hwcomposer)\.[A-Za-z0-9_.-]+|android\.hardware\.graphics\.(?:composer|allocator|mapper)@[0-9.]+(?:-impl(?:-[A-Za-z0-9_.-]+)?)?)\.so")
 DEVICES = ("/dev/mali0", "/dev/mali", "/dev/graphics/fb0", "/dev/dri/card0",
            "/dev/dri/renderD128")
 KERNEL_KEYS = ("CONFIG_DRM", "CONFIG_FB", "CONFIG_DRM_EXYNOS", "CONFIG_MALI_MIDGARD",
@@ -55,6 +55,8 @@ def entrypoint_evidence(path, info):
         required = sorted(set(ENTRYPOINTS["libEGL"] + ENTRYPOINTS["libGLESv2"]))
     elif role in ENTRYPOINTS:
         required = list(ENTRYPOINTS[role])
+    elif re.fullmatch(r"android\.hardware\.graphics\.mapper@2\.[01]-impl(?:-[A-Za-z0-9_.-]+)?\.so", name):
+        role, required = "mapper_factory", ["HIDL_FETCH_IMapper"]
     elif name.startswith(("gralloc.", "hwcomposer.")) and path.rsplit("/",1)[0].endswith("/hw"):
         role, required = "legacy_hal", ["HMI"]
     else:
@@ -114,6 +116,38 @@ def graphics_entrypoints(libraries, groups, abi):
             "abi": abi, "libraries": selected, "groups": complete,
             "review_libraries": blockers, "runtime_resolution_verified": False,
             "egl_initialized": False, "safe_to_flash": False}
+
+
+def mapper_factory_evidence(libraries, abi):
+    """Inspect factory exports without calling HIDL or inferring interfaceChain."""
+    candidates, other_abi, invalid = {}, [], []
+    for path, info in sorted(libraries.items()):
+        name = path.rsplit("/", 1)[-1]
+        if not re.fullmatch(r"android\.hardware\.graphics\.mapper@2\.[01]-impl(?:-[A-Za-z0-9_.-]+)?\.so", name):
+            continue
+        if not info or info.get("abi") not in ("arm", "arm64"):
+            invalid.append(path)
+        elif abi not in ("arm", "arm64") or info["abi"] != abi:
+            other_abi.append(path)
+        else:
+            candidates[path] = info.get("entrypoints", {})
+    direct = sorted(path for path, evidence in candidates.items()
+                    if evidence.get("role") == "mapper_factory"
+                    and evidence.get("status") == "STATIC_MINIMUM_EXPORTS_ONLY"
+                    and "HIDL_FETCH_IMapper" in evidence.get("direct_exports", []))
+    blockers = []
+    if abi not in ("arm", "arm64"):
+        blockers.append("Client ABI unavailable")
+    if len(candidates) != 1 or len(direct) != 1:
+        blockers.append("Missing or ambiguous same-ABI direct mapper factory export")
+    if invalid:
+        blockers.append("Invalid mapper implementation ELF candidates")
+    return {"status": "STATIC_MAPPER_FACTORY_EXPORT_ONLY" if not blockers else "REVIEW_REQUIRED",
+            "client_abi": abi, "candidates": candidates, "direct_factory_candidates": direct,
+            "other_abi_candidates": other_abi, "invalid_candidates": invalid, "blockers": blockers,
+            "factory_called": False, "interface_chain_verified": False,
+            "mapper_2_1_verified": False, "buffer_import_verified": False,
+            "hardware_tested": False, "safe_to_flash": False}
 
 
 def mapper_2_1_evidence(declared, libraries, abi):
@@ -470,6 +504,7 @@ def audit(root, init, vintf, inspect_elf, kernel_config=None, dtb=None):
             "egl_driver_groups": driver_groups,
             "hwc_stride_evidence": hwc_stride_evidence(root),
             "mapper_2_1_evidence": mapper_2_1_evidence(declared["mapper"], libraries, sf_abi),
+            "mapper_factory_evidence": mapper_factory_evidence(libraries, sf_abi),
             "entrypoint_evidence": graphics_entrypoints(libraries, driver_groups, sf_abi),
             "mali_evidence": mali_evidence(libraries, sf_abi, kernel_config, dtb),
             "device_nodes": nodes, "kernel_config": None if kernel_config is None else
