@@ -641,3 +641,16 @@ Also fix independent HWC defects: preserve errno across framebuffer logs;
 DPI*1000 multiplier 25400 (not 25400000), e.g. 360px/33mm -> 277090.
 Add private DSIM cmd_rw fixture for normal recovery after doze, verify '2'.
 No actual sysfs or framebuffer exposed; next exact-head CI required.
+
+
+### Сводный аудит кандидата base vendor
+
+Исторический `build/build_vendor.sh` на коммите `0f865fa6adf01f85d8a5d18ccb8748441c0bb317` использует `/mnt/d/r800/donor/x/images/vendor.img`, но не фиксирует модель, build ID или хеш этого образа. Нельзя считать конкретную модель TicWatch установленной по одному рецепту.
+
+```sh
+python3 build/r800_base_vendor_identity.py --image /local/base-vendor.img \
+  --image-sha256 "$BASE_SHA256" --source-sha "$(git rev-parse HEAD)" \
+  --effects /local/libeffectsconfig.so --effects-sha256 "$EFFECTS_SHA256"
+```
+
+Аудит повторно использует vendor-identity на временном дереве; в stdout остаётся сводка буквальных model/device/build/fingerprint/SDK/VNDK/ABI, групп HIDL и VINTF. Сравнение Effects опционально: совпадение хеша с членом base vendor не доказывает его происхождение или ABI-совместимость. Отсутствие ARM32 в свойствах требует review, но наличие свойства не доказывает запуск ARM32 HAL. Неполные группы HIDL показываются отдельно, поскольку рецепт допускает кандидатов из J4. Это не acceptance gate, не сверка с историческим образом и не разрешение на прошивку. Оригинальный образ пока не предоставлен.
