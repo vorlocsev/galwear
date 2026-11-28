@@ -1,0 +1,95 @@
+{
+  "schema": "galwear-r800-vm-profile-v1",
+  "status": "CANDIDATE_PROFILE_ONLY",
+  "guest": {
+    "distribution": "ubuntu",
+    "release": "24.04",
+    "architecture": "amd64",
+    "edition": "server",
+    "iso_sha256": null,
+    "hypervisor": "operator-selected"
+  },
+  "resources": {
+    "vcpu": 4,
+    "ram_mib": 12288,
+    "virtual_disk_gib": 120,
+    "minimum_free_workspace_gib": 40
+  },
+  "isolation": {
+    "dedicated_vm": true,
+    "physical_disk_passthrough": false,
+    "usb_passthrough": false,
+    "shared_host_folders": false,
+    "shared_clipboard": false,
+    "network_during_provisioning": "NAT",
+    "network_during_build": "disconnected",
+    "snapshot_before_donors": true
+  },
+  "workspace": {
+    "checkout": "/opt/galwear/source",
+    "inputs": "/local/galwear-inputs",
+    "outputs": "/local/galwear-output",
+    "evidence": "/local/galwear-evidence",
+    "scratch": "/local/galwear-scratch"
+  },
+  "packages": {
+    "assembly": [
+      "attr",
+      "bash",
+      "coreutils",
+      "e2fsprogs",
+      "findutils",
+      "git",
+      "grep",
+      "llvm",
+      "python3",
+      "sed",
+      "tar",
+      "util-linux",
+      "mount",
+      "fdisk",
+      "xz-utils",
+      "unzip",
+      "lz4",
+      "android-sdk-libsparse-utils",
+      "selinux-utils",
+      "secilc",
+      "setools",
+      "device-tree-compiler"
+    ],
+    "compilation": [
+      "build-essential",
+      "clang",
+      "lld",
+      "binutils",
+      "gcc-arm-linux-gnueabi",
+      "binutils-arm-linux-gnueabi",
+      "libc6-dev-armel-cross",
+      "flex",
+      "bison",
+      "pkg-config",
+      "autoconf",
+      "automake",
+      "libtool",
+      "uuid-dev",
+      "liblz4-dev",
+      "liblzma-dev",
+      "zlib1g-dev",
+      "libsepol-dev",
+      "imagemagick",
+      "fonts-dejavu-core"
+    ],
+    "optional_guest_tests": [
+      "qemu-user-static",
+      "bubblewrap"
+    ]
+  },
+  "external": {
+    "android_ndk_revision": "27.2.12479018",
+    "android_ndk_separate_lock": true,
+    "donors_separate_pins": true
+  },
+  "vm_created": false,
+  "hardware_tested": false,
+  "safe_to_flash": false
+}
