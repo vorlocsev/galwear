@@ -76,6 +76,18 @@ class StockDonorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"Unsupported partition filesystem"):
             self.extract("r800-rootfs")
 
+    def test_bad_lz4_magic(self):
+        self.pack([("vendor.img.lz4",b"not a compressed frame")])
+        with self.assertRaisesRegex(ValueError,"Invalid LZ4 frame magic"):
+            self.extract("j4-vendor")
+
+    def test_over_budget_sparse_expansion(self):
+        import struct
+        header=struct.pack("<I4H4I",0xed26ff3a,1,0,28,12,4096,1048577,1,0)
+        self.pack([("vendor.img",header)])
+        with self.assertRaisesRegex(ValueError,"Stock sparse expansion exceeds donor budget"):
+            self.extract("j4-vendor")
+
     @unittest.skipUnless(shutil.which("lz4"),"lz4 not available")
     def test_actual_lz4_vendor(self):
         packed=self.root/"vendor.lz4"
