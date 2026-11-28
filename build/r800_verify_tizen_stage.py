@@ -119,6 +119,10 @@ def verify(root, *, expected=None):
         if (not isinstance(canonical, dict) or canonical.get("source") != row["source"]
                 or any(canonical.get(k) != row.get(k) for k in ("bytes", "sha256", "load_review"))):
             raise ValueError("Staged alias evidence mismatch: " + guest)
+    from r800_tizen_plugins import selected
+    plugins = report.get("selected_plugins", {})
+    if not isinstance(plugins, dict) or selected(root, list(plugins), files) != plugins:
+        raise ValueError("Selected plugin evidence mismatch")
     return {"status": "TIZEN_STAGED_TREE_STATIC_ONLY", "file_count": len(files),
             "bytes": total, "manifest_matches_expected": expected is not None,
             "strict_4k_page_review": True, "runtime_verified": False, "safe_to_flash": False}
