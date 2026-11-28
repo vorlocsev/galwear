@@ -16,6 +16,7 @@ from r800_extract_super import require
 from r800_bind_stock_donor import INPUTS as STOCK_INPUTS, describe as describe_stock
 from r800_bind_pixel_system import STATUS as PIXEL_STATUS, describe as describe_pixel
 from r800_base_vendor_identity import review_saved as review_base
+from r800_linux_assembly_environment import saved_environment, read_pinned
 from r800_ndk_pins import REVISION as NDK_REVISION, KEYS as NDK_KEYS, BIN as NDK_BIN, LIMIT as NDK_LIMIT
 
 STAGES={
@@ -161,7 +162,8 @@ def managed_chain(summary,evidence,source_sha):
     raw=read_regular(evidence/name,1024*1024)
     require(sha(raw)==pin,"Managed manifest bytes changed")
     data=json.loads(raw,object_pairs_hook=unique_keys)
-    require(isinstance(data,dict) and set(data)=={"schema","source_sha","inputs","evidence","xtra_abi","assets"}
+    require(isinstance(data,dict) and set(data) in ({"schema","source_sha","inputs","evidence","xtra_abi","assets"},
+                          {"schema","source_sha","inputs","evidence","xtra_abi","assets","environment"})
             and data["schema"]=="galwear-r800-local-donor-manifest-v1" and data["source_sha"]==source_sha,
             "Managed manifest schema or source mismatch")
     rows=data["inputs"]
@@ -199,6 +201,14 @@ def managed_chain(summary,evidence,source_sha):
     paths=[row["path"] for row in rows.values()]+[row["path"] for row in reports.values()]
     if assets is not None:
         paths.append(assets["path"])
+    if "environment" in data:
+        env=data["environment"]
+        require(isinstance(env,dict) and set(env)=={"lock","lock_sha256","probe","probe_sha256"} and
+                env["lock_sha256"]==summary.get("environment_lock_sha256") and
+                env["probe_sha256"]==summary.get("synthetic_mount_probe_sha256") and
+                valid_pin(env["lock_sha256"]) and valid_pin(env["probe_sha256"]) and env["lock"]!=env["probe"],
+                "Managed manifest environment pins mismatch")
+        paths.extend((env["lock"],env["probe"]))
     require(all(isinstance(p,str) and 0<len(p)<=1024 and "\\" not in p and ":" not in p and
                 all(x not in ("",".","..") for x in p.split("/")) for p in paths),
             "Invalid managed relative path")
@@ -224,6 +234,25 @@ def base_chain(summary,evidence,source_sha):
     return "SAVED_LITERAL_IDENTITY_CHAIN_ONLY",report
 
 
+def host_chain(summary,evidence,source_sha):
+    managed=summary.get("managed_manifest_sha256") is not None
+    lock_pin=summary.get("environment_lock_sha256")
+    probe_pin=summary.get("synthetic_mount_probe_sha256")
+    if lock_pin is None and probe_pin is None:
+        require(not managed,"Managed build missing host environment evidence")
+        return "NOT_SUPPLIED"
+    require(managed and valid_pin(lock_pin) and valid_pin(probe_pin),
+            "Unexpected host evidence scope")
+    pins=summary["stage_evidence_sha256"]
+    require(pins["linux-assembly-lock.json"]==lock_pin and pins["synthetic-mount-probe.json"]==probe_pin,
+            "Host evidence inventory pin mismatch")
+    _,manifest=read_pinned(evidence/"managed-donor-manifest.json",summary["managed_manifest_sha256"])
+    require("environment" in manifest,"Managed manifest missing environment references")
+    _,lock=read_pinned(evidence/"linux-assembly-lock.json",lock_pin)
+    _,probe=read_pinned(evidence/"synthetic-mount-probe.json",probe_pin)
+    return saved_environment(lock,probe,lock_pin,source_sha)
+
+
 def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
               pit_path=None,pit_pin=None,artifacts=None,artifact_pins=None):
     checkout_sha(source_sha)
@@ -245,6 +274,10 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
     expected=set(STAGES)|RECIPE|stock_inventory(summary)
     if summary.get("managed_manifest_sha256") is not None:
         expected.add("managed-donor-manifest.json")
+    if summary.get("environment_lock_sha256") is not None:
+        expected.add("linux-assembly-lock.json")
+    if summary.get("synthetic_mount_probe_sha256") is not None:
+        expected.add("synthetic-mount-probe.json")
     if summary.get("base_vendor_identity_sha256") is not None:
         expected.add("base-vendor-identity.json")
     if summary.get("pixel_system_binding") is not None:
@@ -269,6 +302,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
     pixel_status=pixel_chain(summary,evidence,source_sha)
     managed_status,ndk_status=managed_chain(summary,evidence,source_sha)
     base_status,base_identity=base_chain(summary,evidence,source_sha)
+    host_status=host_chain(summary,evidence,source_sha)
     baseline=review(tree,tree_pin,source_sha)
     require(baseline==reports["handover-review.json"],"Saved handover differs from recomputed review")
     layout=prepare(tree,tree_pin,source_sha,capacity_path=capacity_path,capacity_pin=capacity_pin)
@@ -292,7 +326,7 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
             "checks":{"stage_chain":"STATIC_PASS","handover":"STATIC_PASS",
                       "stock_donor_evidence":stock_status,"pixel_system_evidence":pixel_status,
                       "managed_manifest":managed_status,"ndk_selected_tools":ndk_status,
-                      "base_vendor_identity":base_status,
+                      "base_vendor_identity":base_status,"host_environment":host_status,
                       "installation_layout":"STATIC_PLAN_ONLY",
                       "recovery_inputs":"OFFLINE_REVIEW_ONLY" if recovery else "NOT_SUPPLIED",
                       "hardware_boot":"NOT_TESTED","wear_os_boot":"NOT_TESTED"},
@@ -301,6 +335,8 @@ def readiness(root,pin,source_sha,*,capacity_path=None,capacity_pin=None,
             "pixel_system_binding":summary.get("pixel_system_binding"),
             "managed_manifest_sha256":summary.get("managed_manifest_sha256"),
             "base_vendor_identity_sha256":summary.get("base_vendor_identity_sha256"),
+            "environment_lock_sha256":summary.get("environment_lock_sha256"),
+            "synthetic_mount_probe_sha256":summary.get("synthetic_mount_probe_sha256"),
             "base_vendor_identity":base_identity,
             "ndk_selected_tool_evidence":summary.get("ndk_selected_tool_evidence"),
             "original_donor_authenticity_verified":False,"hardware_tested":False,
