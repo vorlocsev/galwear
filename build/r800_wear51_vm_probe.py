@@ -12,7 +12,7 @@ import tempfile
 
 from r800_framework_inventory import ext4_member, MAX_MEMBER
 from r800_pixel_runtime_layout import list_directory
-from r800_wear51_art_dependencies import audit, ROOTS, MAX_BYTES, MAX_OBJECTS
+from r800_wear51_art_dependencies import audit, ROOTS, NAME, VM_MAX_BYTES, VM_MAX_OBJECTS, MAX_PUBLIC_PRELOADS
 from r800_wear51_art_boot_probe import OUTPUTS, MAX_OUTPUT, ART_ROOT
 from r800_wear51_java_fixture import build, CLASS, MISSING_CLASS
 from r800_android_userspace_preflight import read_regular
@@ -27,13 +27,37 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def stage_public_libraries(sources,guest):
-    """Preserve the exact donor NativeLoader configuration, never synthesize it."""
+def read_public_libraries(sources):
     tool,image,workspace=sources["system"]
     raw=ext4_member(tool,image,PUBLIC_LIBRARIES,MAX_PUBLIC_LIBRARIES,workspace)
     if not raw or len(raw)>MAX_PUBLIC_LIBRARIES or b"\0" in raw:
         raise ValueError("Original public.libraries.txt missing or invalid")
     raw.decode("utf-8")
+    return raw
+
+
+def preload_names(raw):
+    """Read ARM32 preload entries; the original config remains untouched."""
+    selected=[]
+    for line in raw.decode("utf-8").splitlines():
+        line=line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name,*flags=line.split(" ")
+        if (not NAME.fullmatch(name) or not name.startswith("lib") or not name.endswith(".so")
+                or len(flags)>2 or len(set(flags))!=len(flags)
+                or set(flags)-{"32","64","nopreload"} or {"32","64"}<=set(flags)):
+            raise ValueError("Malformed public library entry: "+line)
+        if "64" not in flags and "nopreload" not in flags and name not in selected:
+            selected.append(name)
+    if not 0<len(selected)<=MAX_PUBLIC_PRELOADS:
+        raise ValueError("Public preload selection outside budget")
+    return selected
+
+
+def stage_public_libraries(sources,guest):
+    """Preserve the exact donor NativeLoader configuration, never synthesize it."""
+    raw=read_public_libraries(sources)
     target=guest/PUBLIC_LIBRARIES.lstrip("/")
     target.parent.mkdir(parents=True,exist_ok=True)
     with target.open("xb") as stream:
@@ -70,12 +94,15 @@ def experiment(sources,guest,scratch,boot_dir,boot_result,jars,qemu,bwrap):
         listing=list_directory(tool,image,"/lib")["entries"]
         observed=[n for n in NATIVE_CANDIDATES if listing.get(n,{}).get("type")=="regular"]
         result["selected_native_candidates"]=observed
-        graph=audit(sources,roots=(*ROOTS,VM,*("art:/lib/"+n for n in observed)))
+        public_raw=read_public_libraries(sources)
+        names=preload_names(public_raw)
+        result["public_preloads"]={"sha256":sha(public_raw),"names":names,"abi":"arm"}
+        graph=audit(sources,roots=(*ROOTS,VM,*("art:/lib/"+n for n in observed)),public_preloads=names)
         result["graph_summary"]={"roots":graph["roots"],"counts":graph["counts"],
                                  "review":graph["review"],
                                  "unresolved":[e for e in graph["edges"] if not e["eligible_candidates"]]}
         objects=graph["objects"]
-        if not {VM,LINKER,DEX,STUB}<=set(objects) or len(objects)>MAX_OBJECTS or graph["review"] or result["graph_summary"]["unresolved"]:
+        if not {VM,LINKER,DEX,STUB}<=set(objects) or len(objects)>VM_MAX_OBJECTS or graph["review"] or result["graph_summary"]["unresolved"]:
             raise ValueError("VM selected dependency closure requires review")
         with tempfile.TemporaryDirectory(prefix="wear51-vm-",dir=scratch) as tmp:
             work=Path(tmp)
@@ -92,7 +119,7 @@ def experiment(sources,guest,scratch,boot_dir,boot_result,jars,qemu,bwrap):
                 if raw is None or len(raw)!=row["bytes"] or sha(raw)!=row["sha256"]:
                     raise ValueError("VM object digest mismatch: "+key)
                 total+=len(raw)
-                if total>MAX_BYTES:
+                if total>VM_MAX_BYTES:
                     raise ValueError("VM staging budget exceeded")
                 rel=guest_path(key)
                 target=vm_guest/rel.lstrip("/")
@@ -106,6 +133,8 @@ def experiment(sources,guest,scratch,boot_dir,boot_result,jars,qemu,bwrap):
                     target.chmod(0o555 if key in (VM,LINKER,DEX) else 0o444)
                 staged[rel]=row["sha256"]
             result["public_libraries"]=stage_public_libraries(sources,vm_guest)
+            if result["public_libraries"]["sha256"]!=result["public_preloads"]["sha256"]:
+                raise ValueError("Public preload config changed")
             cfg=config(objects,vm_oat=True)
             (vm_guest/"linkerconfig/ld.config.txt").write_text(cfg)
             data=vm_guest/"data"

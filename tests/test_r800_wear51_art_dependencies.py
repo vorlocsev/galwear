@@ -99,6 +99,18 @@ class ArtDependenciesTests(unittest.TestCase):
             r=graph.audit(sources,roots=("art:/bin/dalvikvm32",))
             self.assertEqual(r["edges"][0]["status"],"NOT_FOUND_IN_SELECTED_DIRS")
 
+    def test_public_preloads_include_transitive_dependencies_and_missing(self):
+        infos={"root":elf(None),"android":elf("libandroid.so",["libdep.so"]),"dep":elf("libdep.so")}
+        with patch.object(graph,"inspect",side_effect=lambda raw:infos[raw.decode()]):
+            r=graph.walk(lambda p:p.encode(),lambda n:{"libandroid.so":["android"],"libdep.so":["dep"]}.get(n,()),("root",),public_preloads=("libandroid.so","libmissing.so"))
+        self.assertEqual(r["public_preloads"],["libandroid.so","libmissing.so"])
+        self.assertEqual([e["kind"] for e in r["edges"]],["PUBLIC_PRELOAD","PUBLIC_PRELOAD","DT_NEEDED"])
+        self.assertEqual(r["edges"][1]["status"],"NOT_FOUND_IN_SELECTED_DIRS")
+        self.assertEqual(r["edges"][2]["eligible_candidates"],["dep"])
+        self.assertFalse(r["namespace_resolution_verified"])
+        with self.assertRaises(ValueError):
+            graph.walk(lambda p:b"",lambda n:(),("root",),public_preloads=("../libbad.so",))
+
     def test_budget(self):
         with patch.object(graph,"MAX_OBJECTS",1):
             with self.assertRaisesRegex(ValueError,"budget"):

@@ -38,6 +38,13 @@ class JavaFixtureTests(unittest.TestCase):
         self.assertEqual((ops[0],ops[2],ops[4],ops[6],ops[7]),
                          (0x0062,0x011a,0x206e,0x0010,0x000e))
 
+    def test_arm32_public_preload_selection(self):
+        raw=b"# original\nlibandroid.so\nlib32.so 32\nlib64.so 64\nlibskip.so nopreload\nlibskip32.so 32 nopreload\nlibandroid.so\n"
+        self.assertEqual(vm.preload_names(raw),["libandroid.so","lib32.so"])
+        for invalid in (b"",b"liba.so 32 64",b"../liba.so",b"liba.so unknown",b"liba.so nopreload nopreload"):
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                vm.preload_names(invalid)
+
     def test_original_public_libraries_staging(self):
         raw=b"# original fixture\nlibc.so\nliblog.so\n"
         sources={"system":("debugfs","image","scratch")}

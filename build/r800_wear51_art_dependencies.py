@@ -21,20 +21,40 @@ MAX_OBJECTS=128
 MAX_EDGES=2048
 MAX_BYTES=128*1024**2
 MAX_DEPTH=16
+# The public NDK surface pulls in much more of System than dex2oat.
+# Only the standalone VM experiment may use these separate finite limits.
+VM_MAX_OBJECTS=384
+VM_MAX_EDGES=8192
+VM_MAX_BYTES=384*1024**2
+MAX_PUBLIC_PRELOADS=128
 
 
-def walk(load, candidates, roots=ROOTS, runtime_loads=None):
+def walk(load, candidates, roots=ROOTS, runtime_loads=None, *, public_preloads=()):
     """Explore all eligible candidates, never choose an ambiguous provider."""
     runtime_loads=runtime_loads or {}
     pending=deque((path,0,None) for path in roots)
     objects, edges, reviews={},[],{}
     total=0
     visited=set()
+    public_preloads=tuple(public_preloads)
+    if len(public_preloads)>MAX_PUBLIC_PRELOADS or len(set(public_preloads))!=len(public_preloads):
+        raise ValueError("Invalid public preload list size or duplicate")
+    object_limit=VM_MAX_OBJECTS if public_preloads else MAX_OBJECTS
+    byte_limit=VM_MAX_BYTES if public_preloads else MAX_BYTES
+    edge_limit=VM_MAX_EDGES if public_preloads else MAX_EDGES
+    for name in public_preloads:
+        if not NAME.fullmatch(name) or not name.startswith("lib") or not name.endswith(".so"):
+            raise ValueError("Invalid public preload SONAME")
+        providers=sorted(set(candidates(name)))
+        edges.append({"consumer":"/system/etc/public.libraries.txt","needed":name,
+                      "kind":"PUBLIC_PRELOAD","candidates":providers})
+        for provider in providers:
+            pending.append((provider,0,name))
     while pending:
         path,depth,expected=pending.popleft()
         if path in visited:
             continue
-        if depth>MAX_DEPTH or len(visited)>=MAX_OBJECTS:
+        if depth>MAX_DEPTH or len(visited)>=object_limit:
             raise ValueError("ART dependency graph exceeds object/depth budget")
         visited.add(path)
         try:
@@ -42,7 +62,7 @@ def walk(load, candidates, roots=ROOTS, runtime_loads=None):
             if raw is None:
                 raise ValueError("Selected member missing")
             total+=len(raw)
-            if total>MAX_BYTES:
+            if total>byte_limit:
                 raise OverflowError("ART dependency graph byte budget exceeded")
             info=inspect(raw)
             if info["abi"]!="arm" or info["elf_type"]!="ET_DYN" or not info["has_dynamic"] or info["custom_search_path"]:
@@ -59,7 +79,7 @@ def walk(load, candidates, roots=ROOTS, runtime_loads=None):
         for name,kind in dependencies:
             if not NAME.fullmatch(name) or name in (".",".."):
                 raise ValueError("Invalid dependency name")
-            if len(edges)>=MAX_EDGES:
+            if len(edges)>=edge_limit:
                 raise ValueError("ART dependency graph edge budget exceeded")
             providers=sorted(set(candidates(name)))
             edges.append({"consumer":path,"needed":name,"kind":kind,"candidates":providers})
@@ -89,12 +109,12 @@ def walk(load, candidates, roots=ROOTS, runtime_loads=None):
             row["consumers"].append(edge["consumer"])
     return {"status":"SELECTED_ART_DEPENDENCY_CANDIDATES_ONLY",
             "ambiguous_names":duplicates,
-            "roots":list(roots),"objects":objects,"edges":edges,"review":reviews,
+            "roots":list(roots),"public_preloads":list(public_preloads),"objects":objects,"edges":edges,"review":reviews,
             "counts":counts,"inspected_bytes":total,"namespace_resolution_verified":False,
             "symbol_resolution_verified":False,"art_initialized":False,"safe_to_flash":False}
 
 
-def audit(sources,*,roots=ROOTS):
+def audit(sources,*,roots=ROOTS,public_preloads=()):
     """sources: fixed labels -> (debugfs, private image, private scratch)."""
     if not {"system","runtime","art"} <= set(sources) <= {"system","runtime","art","statsd","i18n"}:
         raise ValueError("Expected selected System, Runtime, ART and optional StatsD and i18n filesystems")
@@ -123,7 +143,7 @@ def audit(sources,*,roots=ROOTS):
         label,path=key.split(":",1)
         tool,image,scratch=sources[label]
         return ext4_member(tool,image,path,MAX_MEMBER,scratch)
-    result=walk(load,candidates,roots=roots,runtime_loads=RUNTIME_LOADS)
+    result=walk(load,candidates,roots=roots,runtime_loads=RUNTIME_LOADS,public_preloads=public_preloads)
     result["selected_directories"]={p:{"status":v["status"],"entries":len(v["entries"])}
                                     for p,v in listings.items()}
     return result
