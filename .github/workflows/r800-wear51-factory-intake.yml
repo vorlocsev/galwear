@@ -213,14 +213,25 @@ jobs:
                               print("WEAR51_ART_SPEED_LOGDW",json.dumps(record,sort_keys=True))
                       if "determinism" in comparison:
                           det=comparison["determinism"]
-                          print("WEAR51_ART_DETERMINISM",json.dumps({k:v for k,v in det.items() if k not in ("runs","staged_sha256")},sort_keys=True))
+                          print("WEAR51_ART_DETERMINISM",json.dumps({k:v for k,v in det.items() if k not in ("runs","staged_sha256","image_difference")},sort_keys=True))
+                          print("WEAR51_ART_IMAGE_DIFFERENCE",json.dumps(det["image_difference"],sort_keys=True))
                           for index,case in enumerate(det["runs"]):
                               print("WEAR51_ART_DETERMINISM_CASE",json.dumps({"run":index+1,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                   for name,case in startup.get("results",{}).items():
                       print("WEAR51_ART_STARTUP_CASE",json.dumps({"case":name,**{k:v for k,v in case.items() if k!="logdw_records"}},sort_keys=True))
                       for record in case.get("logdw_records",[])[:32]:
                           print("WEAR51_ART_LOGDW",json.dumps({"case":name,**record},sort_keys=True))
-                  print("WEAR51_APEX_RUNTIME",json.dumps({k:v for k,v in result.items() if k not in ("art_dependencies","art_startup")},sort_keys=True))
+                  vm=result["dalvikvm"]
+                  (evidence/"dalvikvm-static.json").write_text(json.dumps(vm,indent=2,sort_keys=True)+"\n")
+                  print("WEAR51_DALVIKVM_STATIC",json.dumps({k:v for k,v in vm.items() if k!="graph"},sort_keys=True))
+                  if "graph" in vm:
+                      vg=vm["graph"]
+                      print("WEAR51_DALVIKVM_GRAPH",json.dumps({k:v for k,v in vg.items() if k not in ("objects","edges")},sort_keys=True))
+                      print("WEAR51_DALVIKVM_ROOT",json.dumps(vg["objects"].get("art:/bin/dalvikvm32"),sort_keys=True))
+                      for edge in vg["edges"]:
+                          if not edge["eligible_candidates"]:
+                              print("WEAR51_DALVIKVM_MISSING",json.dumps(edge,sort_keys=True))
+                  print("WEAR51_APEX_RUNTIME",json.dumps({k:v for k,v in result.items() if k not in ("art_dependencies","art_startup","dalvikvm")},sort_keys=True))
                   print("WEAR51_ART_DEPENDENCIES",json.dumps({k:v for k,v in graph.items() if k not in ("objects","edges")},sort_keys=True))
                   if graph["status"]=="SELECTED_ART_DEPENDENCY_CANDIDATES_ONLY":
                       for edge in graph["edges"]:
@@ -458,6 +469,11 @@ jobs:
           observed=compare_runs(*det["runs"])
           assert all(det[k]==v for k,v in observed.items())
           assert observed["status"] in ("TWO_RUN_SHA256_MATCH","TWO_RUN_SHA256_DIFFERENT")
+          diff=det["image_difference"]
+          assert diff["image_sha256"]==[r["output_headers"]["boot.art"]["sha256"] for r in det["runs"]]
+          assert diff["image_bytes"]==[r["output_headers"]["boot.art"]["bytes"] for r in det["runs"]]
+          assert diff["status"]==("ART_IMAGE_BYTES_IDENTICAL" if observed["files"]["boot.art"]["status"]=="IDENTICAL" else "ART_IMAGE_BYTE_DIFFERENCE_OBSERVED")
+          assert diff["semantic_cause_verified"] is False
           print("WEAR51_ART_DETERMINISM_OBSERVATION",json.dumps(observed,sort_keys=True))
           PY
       - name: Remove original and extracted binary images
@@ -477,6 +493,7 @@ jobs:
             ${{ runner.temp }}/wear51-evidence/apex-runtime.json
             ${{ runner.temp }}/wear51-evidence/art-startup.json
             ${{ runner.temp }}/wear51-evidence/art-boot-probe.json
+            ${{ runner.temp }}/wear51-evidence/dalvikvm-static.json
             ${{ runner.temp }}/wear51-evidence/qemu-comparator.json
             ${{ runner.temp }}/wear51-evidence/hal-compile.json
             ${{ runner.temp }}/wear51-evidence/hal-runtime.json
