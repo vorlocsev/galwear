@@ -21,6 +21,7 @@ from r800_stage_adaptation_layer import DEVICE, RUNTIME_REQUIRED, valid_pin, MAX
 from r800_stage_development_tree import ANDROID, inspect_pair, verify_overlay
 from r800_tizen_config_layout import layout, verify_dir, MOUNTPOINTS
 from r800_payload_candidate import ASSET_SIZES
+from r800_display_asset_layer import asset_modes
 from r800_runtime_loader_qemu import LOCAL
 from r800_runtime_entry_qemu import LOCAL_COMMANDS
 from r800_verify_tizen_stage import unique_keys
@@ -126,7 +127,11 @@ def review(root,pin,source_sha,*,runtime_path=None,runtime_pin=None,loader_path=
             i["userspace_bytes"]==u["total_bytes"]==sum(r["bytes"] for r in files.values()),
             "Integrated inventory identity mismatch")
     dirs=layout(u,files)
+    display=asset_modes(u,files)
     verify_inventory(root,{**files,**k},dirs)
+    if display:
+        raw=read_regular(root/"r800dev/splash.raw",ASSET_SIZES["splash.raw"])
+        require(all(v==255 for v in raw[3::4]),"Splash BGRA alpha must be opaque")
     with tempfile.TemporaryDirectory(prefix="r800-handover-review-") as tmp:
         scratch=Path(tmp)
         system=root/"r800dev/android/system.img"
@@ -160,9 +165,11 @@ def review(root,pin,source_sha,*,runtime_path=None,runtime_pin=None,loader_path=
                       "vendor_overlay":"STATIC_PASS",
                       "chroot_mountpoints":"STATIC_PASS" if dirs==MOUNTPOINTS else "MISSING",
                       "local_runtime_startup":observations,
+                      "display_assets":"STATIC_PASS" if display else "MISSING",
                       "kernel_boot":"NOT_TESTED","android_switch_root":"NOT_TESTED",
                       "android_framework_boot":"NOT_TESTED","gnss":"NOT_TESTED"},
             "missing_display_assets":missing_assets,
+            "display_rendering_verified":False,
             "blockers":["Original donor provenance and complete Tizen plugin/configuration review",
                         "Partition capacity, installation/recovery contract and persistent-state policy",
                         "Actual kernel boot, switch_root and Android framework startup",
