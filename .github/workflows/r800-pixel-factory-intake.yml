@@ -100,6 +100,61 @@ jobs:
           (evidence/"pixel-binding.json").write_text(json.dumps(binding,indent=2,sort_keys=True)+"\n")
           print("PIXEL_FACTORY_SYSTEM_STATIC_ONLY",json.dumps({"partition":name,"bytes":row["bytes"],"sha256":row["sha256"],"filesystem":row["filesystem"]["kind"],"identity_status":identity["status"],"safe_to_flash":False},sort_keys=True))
           PY
+      - name: Inspect actual Android framework ELF and JAR candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=build python3 - <<'PY'
+          import json, os, hashlib
+          from pathlib import Path
+          from r800_framework_inventory import audit
+          from r800_bind_pixel_system import verify
+          root=Path(os.environ["RUNNER_TEMP"])/"pixel-intake"
+          evidence=root.parent/"pixel-evidence"
+          source=os.environ["GITHUB_SHA"]
+          report_path=evidence/"pixel-raw-donor.json"
+          raw=report_path.read_bytes()
+          report=json.loads(raw)
+          assert report["source_sha"]==source
+          assert len(report["partitions"])==1
+          name,row=next(iter(report["partitions"].items()))
+          image=root/row["file"] if report["mode"]=="direct" else root/"logical"/row["file"]
+          verify(image,row["sha256"],report_path,hashlib.sha256(raw).hexdigest(),source)
+          identity=row["identity"]
+          assert identity["status"]=="EXT4_LITERAL_PROPERTIES_ONLY"
+          properties=identity["properties"]
+          print("PIXEL_LITERAL_PROPERTIES", json.dumps({
+              "values":properties["unique_values"],
+              "android11_hint":properties["literal_android_11_hint"],
+              "arm32_hint":properties["literal_arm32_hint"],
+              "watch_hint":properties["literal_watch_hint"]},sort_keys=True))
+          members=identity["property_members"]
+          prefixes=[prefix for prefix in ("","/system") if prefix+"/build.prop" in members]
+          assert prefixes, "No observed system build.prop root"
+          requested=["bin/app_process32","bin/app_process64","bin/surfaceflinger",
+                     "framework/framework.jar","framework/services.jar","framework/android.test.base.jar",
+                     "lib/libandroid_runtime.so","lib64/libandroid_runtime.so","lib/libgui.so",
+                     "lib64/libgui.so","etc/permissions/android.hardware.type.watch.xml"]
+          reports={}
+          for prefix in prefixes:
+              result=audit(image,row["sha256"],name,source,prefix,requested,validate_dex=False)
+              strict=audit(image,row["sha256"],name,source,prefix,
+                           ["framework/framework.jar","framework/services.jar"],validate_dex=True)
+              reports[prefix]={"framework":result,"dex":strict}
+              summary={p:{k:v for k,v in item.items() if k in
+                          ("status","kind","abi","needed","dex_entries","reason")}
+                       for p,item in result["members"].items()}
+              print("PIXEL_FRAMEWORK_MEMBERS",json.dumps(summary,sort_keys=True))
+              print("PIXEL_DEX_REVIEW",json.dumps({p:{k:v for k,v in item.items()
+                    if k in ("status","kind","reason","dex_entries")} for p,item in strict["members"].items()},sort_keys=True))
+          (evidence/"pixel-framework-inventory.json").write_text(json.dumps({
+              "schema":"galwear-r800-pixel-framework-observation-v1",
+              "source_sha":source,"image_sha256":row["sha256"],
+              "status":"SELECTED_FRAMEWORK_OBSERVATIONS_ONLY",
+              "reports":reports,"bionic_runtime_verified":False,
+              "art_initialization_verified":False,"hardware_tested":False,
+              "safe_to_flash":False},indent=2,sort_keys=True)+"\n")
+          PY
       - name: Remove factory archive and all extracted image bytes
         if: always()
         run: rm -rf -- "$RUNNER_TEMP/pixel-intake"
@@ -113,5 +168,6 @@ jobs:
             ${{ runner.temp }}/pixel-evidence/super-inventory.json
             ${{ runner.temp }}/pixel-evidence/pixel-raw-donor.json
             ${{ runner.temp }}/pixel-evidence/pixel-binding.json
+            ${{ runner.temp }}/pixel-evidence/pixel-framework-inventory.json
           if-no-files-found: warn
           retention-days: 7
