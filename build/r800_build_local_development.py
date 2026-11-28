@@ -84,7 +84,20 @@ def stock_bindings(paths,pins,stock_evidence,source_sha):
     return results
 
 
-def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None,pixel_evidence=None,ndk_pins=None):
+def managed_snapshot(managed,source_sha,config):
+    if managed is None:
+        return None
+    # Lazy import: manager uses this builder.
+    from r800_donor_manager import load, LIMIT
+    root,path,pin=managed
+    require(load(root,path,pin,source_sha)==config,
+            "Managed manifest differs from build arguments")
+    raw=read_regular(Path(path),LIMIT)
+    require(sha(raw)==pin,"Managed manifest changed")
+    return raw
+
+
+def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,stock_evidence=None,pixel_evidence=None,ndk_pins=None,managed_manifest=None):
     require(type(xtra_abi) is int and xtra_abi in (0,1,2),"Explicit supported XTRA ABI required")
     p,output=preflight(paths,pins,output,source_sha)
     ndk_evidence=None if ndk_pins is None else verify_ndk(p["ndk"],ndk_pins)
@@ -95,6 +108,10 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
         assets=Path(assets).absolute()
         require(not output.resolve().is_relative_to(assets),"Output inside asset input")
         load_assets(assets,assets_sha)
+    managed_config={"paths":p,"pins":pins,"stock_evidence":stock_evidence,
+                    "pixel_evidence":pixel_evidence,"xtra_abi":xtra_abi,
+                    "assets":assets,"assets_sha":assets_sha,"ndk_pins":ndk_pins}
+    managed_raw=managed_snapshot(managed_manifest,source_sha,managed_config)
     with tempfile.TemporaryDirectory(dir=output.parent,prefix="r800-local-build-") as tmp:
         work=Path(tmp)
         # Reject diagnostic/stale kernel before expensive vendor/runtime work.
@@ -147,6 +164,11 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  (android,"android-build-evidence.json",bp),
                  (android/"android","android-layer-evidence.json",android_pin)]
         copied={}
+        if managed_raw is not None:
+            require(managed_snapshot(managed_manifest,source_sha,managed_config)==managed_raw,
+                    "Managed manifest changed during assembly")
+            (evidence/"managed-donor-manifest.json").write_bytes(managed_raw)
+            copied["managed-donor-manifest.json"]=sha(managed_raw)
         if pixel is not None:
             require(verify_pixel(p["system"],pins["system"],*pixel_evidence,source_sha)==pixel,
                     "Pixel donor evidence changed")
@@ -197,6 +219,7 @@ def build(paths,pins,output,source_sha,xtra_abi=0,*,assets=None,assets_sha=None,
                  "stock_donor_bindings":stock,
                  "pixel_system_binding":pixel,
                  "ndk_selected_tool_evidence":ndk_evidence,
+                 "managed_manifest_sha256":None if managed_raw is None else sha(managed_raw),
                  "stage_evidence_sha256":copied,"integrated_evidence_sha256":ip,
                  "missing_inputs_and_gates":i["missing_inputs_and_gates"],
                  "kernel_and_components_compiled_by_this_command":False,
