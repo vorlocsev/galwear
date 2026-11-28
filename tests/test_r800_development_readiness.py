@@ -1,5 +1,7 @@
 """Synthetic stage graph tests, not actual donor provenance or hardware evidence."""
 import copy
+import json
+import tempfile
 from pathlib import Path
 import sys
 import unittest
@@ -101,6 +103,94 @@ class DevelopmentReadinessTests(unittest.TestCase):
         self.summary["assets_manifest_sha256"]="a"*64
         with self.assertRaisesRegex(ValueError,"Display asset chain"):
             self.verify()
+
+
+    def managed_fixture(self):
+        source="a"*40
+        stock={n:{"report_sha256":"b"*64,"reported_archive_sha256":"c"*64}
+               for n in ("j4","tizen")}
+        pixel={"report_sha256":"d"*64}
+        tools={n:"e"*64 for n in ready.NDK_KEYS}
+        ndk={"schema":"galwear-r800-ndk-selected-tools-v1",
+             "status":"SELECTED_NDK_TOOL_PINS_MATCH_ONLY","revision":ready.NDK_REVISION,
+             "files":{n:{"bytes":32,"sha256":v,
+                         "resolved":n if n=="source.properties" else (ready.NDK_BIN/n).as_posix()}
+                      for n,v in tools.items()},
+             **{k:False for k in ("complete_ndk_verified","host_libraries_verified",
+                                   "upstream_authenticity_verified","safe_to_flash")}}
+        self.summary.update(stock_donor_bindings=stock,pixel_system_binding=pixel,
+                            ndk_selected_tool_evidence=ndk,xtra_abi=0)
+        data={"schema":"galwear-r800-local-donor-manifest-v1","source_sha":source,
+              "inputs":{**{n:{"path":"inputs/"+n,"sha256":h}
+                           for n,h in self.summary["input_sha256"].items()},
+                        "ndk":{"path":"tools/ndk","tools_sha256":tools}},
+              "evidence":{"system":{"path":"reports/pixel.json","sha256":pixel["report_sha256"]},
+                          **{n:{"path":"reports/"+n+".json","sha256":row["report_sha256"],
+                                "archive_sha256":row["reported_archive_sha256"]} for n,row in stock.items()}},
+              "xtra_abi":0,"assets":None}
+        return source,data
+
+    def managed_review(self,source,data):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            name="managed-donor-manifest.json"
+            raw=json.dumps(data).encode()
+            (root/name).write_bytes(raw)
+            pin=ready.sha(raw)
+            self.summary["managed_manifest_sha256"]=pin
+            self.summary["stage_evidence_sha256"][name]=pin
+            return ready.managed_chain(self.summary,root,source)
+
+    def test_managed_manifest_exact_chain(self):
+        source,data=self.managed_fixture()
+        self.assertEqual(self.managed_review(source,data),
+                         ("SAVED_MANIFEST_CHAIN_ONLY","SAVED_SELECTED_TOOL_PINS_MATCH_MANIFEST"))
+
+    def test_managed_manifest_rehashed_input_mismatch(self):
+        source,data=self.managed_fixture()
+        data["inputs"]["system"]["sha256"]="f"*64
+        with self.assertRaisesRegex(ValueError,"Managed manifest input pin mismatch"):
+            self.managed_review(source,data)
+
+    def test_managed_manifest_rehashed_ndk_mismatch(self):
+        source,data=self.managed_fixture()
+        data["inputs"]["ndk"]["tools_sha256"]["clang"]="f"*64
+        with self.assertRaisesRegex(ValueError,"Managed manifest NDK pin mismatch"):
+            self.managed_review(source,data)
+
+    def test_managed_manifest_rehashed_report_mismatch(self):
+        source,data=self.managed_fixture()
+        data["evidence"]["j4"]["sha256"]="f"*64
+        with self.assertRaisesRegex(ValueError,"Managed report pin mismatch"):
+            self.managed_review(source,data)
+
+    def test_managed_manifest_archive_mismatch(self):
+        source,data=self.managed_fixture()
+        data["evidence"]["tizen"]["archive_sha256"]="f"*64
+        with self.assertRaisesRegex(ValueError,"Managed archive pin mismatch"):
+            self.managed_review(source,data)
+
+    def test_managed_manifest_xtra_mismatch(self):
+        source,data=self.managed_fixture()
+        data["xtra_abi"]=1
+        with self.assertRaisesRegex(ValueError,"Managed manifest XTRA ABI mismatch"):
+            self.managed_review(source,data)
+
+    def test_managed_manifest_unsafe_path(self):
+        source,data=self.managed_fixture()
+        data["inputs"]["ndk"]["path"]="../ndk"
+        with self.assertRaisesRegex(ValueError,"Invalid managed relative path"):
+            self.managed_review(source,data)
+
+    def test_managed_manifest_ndk_scope(self):
+        source,data=self.managed_fixture()
+        self.summary["ndk_selected_tool_evidence"]["complete_ndk_verified"]=True
+        with self.assertRaisesRegex(ValueError,"Unexpected NDK evidence scope"):
+            self.managed_review(source,data)
+
+    def test_unmanaged_no_manifest(self):
+        self.assertEqual(ready.managed_chain(self.summary,Path("."),"a"*40),
+                         ("NOT_SUPPLIED","NOT_SUPPLIED"))
 
 
 if __name__=="__main__":
