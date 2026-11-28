@@ -1,0 +1,110 @@
+name: SM-R800 Pixel Watch factory donor intake (NON-RELEASE)
+on:
+  push:
+    branches:
+      - development/r800-integration-20261127
+    paths:
+      - .github/workflows/r800-pixel-factory-intake.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  factory-intake:
+    if: github.repository == 'vorlocsev/galwear' && github.ref_name == 'development/r800-integration-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Obtain exact Android 11 Bluetooth/Wi-Fi factory archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/pixel-intake" "$RUNNER_TEMP/pixel-evidence"
+          pin=eb4977308b8fe6a25bbe0c4918d95e6e79b9f05ae608f48ac2f04b65c42f0b52
+          archive="$RUNNER_TEMP/pixel-intake/factory.zip"
+          name=r11btwifi-rwdc.230905.003-factory-eb497730.zip
+          for base in https://dl.google.com/dl/android/aosp https://googledownloads.cn/dl/android/aosp; do
+            rm -f "$archive.part"
+            if curl --fail --location --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 420 --retry 1 --max-filesize 8589934592 "$base/$name" -o "$archive.part" &&
+              printf '%s  %s\n' "$pin" "$archive.part" | sha256sum -c -; then
+              mv "$archive.part" "$archive"
+              echo "FACTORY_ARCHIVE_SHA256_MATCH $pin"
+              break
+            fi
+          done
+          test -s "$archive"
+          python3 build/r800_extract_pixel_factory.py --archive "$archive" --output "$RUNNER_TEMP/pixel-intake/extracted"
+          cp "$RUNNER_TEMP/pixel-intake/extracted/pixel-evidence.json" "$RUNNER_TEMP/pixel-evidence/"
+      - name: Inspect selected system partition without mounting or execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends e2fsprogs
+          PYTHONPATH=build python3 - <<'PY'
+          import json, os, hashlib
+          from pathlib import Path
+          from r800_extract_super import normalize, extract
+          from r800_super_inventory import inventory
+          from r800_partition_identity import inspect_partition
+          from r800_bind_pixel_system import describe
+          from r800_extract_pixel_factory import FACTORY_SHA256
+          root=Path(os.environ["RUNNER_TEMP"])/"pixel-intake"
+          evidence=root.parent/"pixel-evidence"
+          source=os.environ["GITHUB_SHA"]
+          extracted=root/"extracted"
+          factory=json.loads((extracted/"pixel-evidence.json").read_text())
+          assert factory["factory_sha256"]==FACTORY_SHA256
+          images=factory["images"]
+          if "system.img" in images and "super.img" not in images:
+              mode,slot,name="direct",None,"system"
+              target=root/"system.img"
+              origin=normalize(extracted/"system.img",target,images["system.img"]["sha256"])
+              row={"file":target.name,"bytes":origin["raw_bytes"],"sha256":origin["raw_sha256"],"provenance":origin}
+              sup=None
+          elif "super.img" in images and "system.img" not in images:
+              mode,slot="super",0
+              raw=root/"super-inventory.raw"
+              origin=normalize(extracted/"super.img",raw,images["super.img"]["sha256"])
+              meta=inventory(raw,origin["raw_sha256"],slot,source)
+              (evidence/"super-inventory.json").write_text(json.dumps(meta,indent=2,sort_keys=True))
+              raw.unlink()
+              names=[n for n in ("system","system_a") if n in meta["partitions"] and meta["partitions"][n]["bytes"]>0 and not meta["partitions"][n]["disabled"]]
+              assert len(names)==1, "Explicit slot 0: expected one enabled nonempty system partition"
+              name=names[0]
+              sup=extract(extracted/"super.img",images["super.img"]["sha256"],slot,[name],root/"logical",source)
+              target=root/"logical"/(name+".img")
+              row={**sup["partitions"][name],"provenance":{"source":"super.img","metadata_slot":slot,"raw_bytes":sup["partitions"][name]["bytes"],"raw_sha256":sup["partitions"][name]["sha256"]}}
+          else:
+              raise ValueError("Ambiguous factory system source")
+          identity=inspect_partition(target,row["sha256"],name,source)
+          row.update(filesystem=identity["filesystem"],identity=identity)
+          report={"schema":"galwear-r800-pixel-raw-donor-v1","status":"SELECTED_PIXEL_RAW_DONOR_PARTITIONS_ONLY","source_sha":source,"factory_sha256":FACTORY_SHA256,"documented_factory_pin_matched":True,"factory_extraction":factory,"partitions":{name:row},"mode":mode,"metadata_slot":slot,"super_extraction":sup}
+          for flag in ("system_adaptation_verified","donor_authenticity_verified","wear_os_runtime_verified","r800_compatibility_verified","hardware_tested","safe_to_flash"):
+              report[flag]=False
+          data=(json.dumps(report,indent=2,sort_keys=True)+"\n").encode()
+          (evidence/"pixel-raw-donor.json").write_bytes(data)
+          binding=describe(report,row["sha256"],hashlib.sha256(data).hexdigest(),source)
+          (evidence/"pixel-binding.json").write_text(json.dumps(binding,indent=2,sort_keys=True)+"\n")
+          print("PIXEL_FACTORY_SYSTEM_STATIC_ONLY",json.dumps({"partition":name,"bytes":row["bytes"],"sha256":row["sha256"],"filesystem":row["filesystem"]["kind"],"identity_status":identity["status"],"safe_to_flash":False},sort_keys=True))
+          PY
+      - name: Remove factory archive and all extracted image bytes
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/pixel-intake"
+      - name: Upload selected JSON metadata only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixel-factory-intake-evidence-only
+          path: |
+            ${{ runner.temp }}/pixel-evidence/pixel-evidence.json
+            ${{ runner.temp }}/pixel-evidence/super-inventory.json
+            ${{ runner.temp }}/pixel-evidence/pixel-raw-donor.json
+            ${{ runner.temp }}/pixel-evidence/pixel-binding.json
+          if-no-files-found: warn
+          retention-days: 7
