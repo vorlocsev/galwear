@@ -21,6 +21,7 @@ from r800_partition_identity import filesystem
 from r800_framework_inventory import ext4_member, erofs_member, bounded_tool, MAX_TOOL, MAX_META
 from r800_graphics_donor_binding import checkout_sha
 from r800_donor_preflight import digest
+from r800_art_apex_mapping import ApexReader
 
 MAX_IMAGE = 4*1024**3
 MAX_IMAGES = 5
@@ -87,7 +88,7 @@ def literal_exports(sources):
     return exports, resolved, imports, errors
 
 
-def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None):
+def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None, apex_specs=()):
     checkout_sha(source_sha)
     rows = map_images(specs)
     require(1 <= len(rc_paths) <= MAX_RCS and len(set(rc_paths)) == len(rc_paths)
@@ -129,13 +130,16 @@ def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None):
         errors.extend(export_errors)
         paths = list(dict.fromkeys(p for group in resolved.values() for p in group))
         require(len(paths) <= MAX_PATHS, "Aggregate classpath path budget exceeded")
+        apex = ApexReader(apex_specs, lambda path, limit: read_mapped(rows, path, limit, scratch), scratch)
         for path in paths:
-            if APEX_PATH.fullmatch(path):
+            is_apex = bool(APEX_PATH.fullmatch(path))
+            if is_apex and path.split("/")[2] not in apex.specs:
                 artifacts[path] = {"status": "APEX_PAYLOAD_NOT_MAPPED"}
                 errors.append(path+": APEX activation and payload mapping not established")
                 continue
             try:
-                raw = read_mapped(rows, path, min(64*1024**2, MAX_TOTAL-total), scratch)
+                limit = min(64*1024**2, MAX_TOTAL-total)
+                raw = apex.read(path, limit) if is_apex else read_mapped(rows, path, limit, scratch)
                 require(raw is not None, "Classpath member missing")
                 total += len(raw)
                 require(total <= MAX_TOTAL, "ART byte budget exceeded")
@@ -155,6 +159,7 @@ def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None):
                 # A failed decompression may already have consumed work.
                 # Do not spend the remaining aggregate budget after failure.
                 break
+        apex.verify_unchanged()
         for row in rows.values():
             require(digest(row["snapshot"], MAX_IMAGE)["sha256"] == row["sha256"] and
                     digest(row["image"], MAX_IMAGE)["sha256"] == row["sha256"],
@@ -168,6 +173,7 @@ def audit(specs, rc_paths, source_sha, erofs_tool=None, erofs_tool_sha=None):
             "partition_inputs": inputs, "rc_inputs": rc_evidence, "exports": exports,
             "resolved_literal_paths": resolved, "unexpanded_imports": imports,
             "artifacts": artifacts, "errors": errors,
+            "apex_packages": apex.evidence,
             "init_imports_resolved": False, "effective_classpath_verified": False,
             "apex_activation_verified": False, "oat_verified": False, "vdex_verified": False,
             "bytecode_verified": False, "art_initialization_verified": False,
@@ -180,11 +186,13 @@ def main():
                    metavar=("PARTITION", "FILE", "SHA256", "PREFIX"))
     p.add_argument("--rc", action="append", required=True)
     p.add_argument("--source-sha", required=True)
+    p.add_argument("--apex", nargs=3, action="append", default=[],
+                   metavar=("MODULE", "GUEST_PATH", "SHA256"))
     p.add_argument("--erofs-tool", type=Path)
     p.add_argument("--erofs-tool-sha256")
     p.add_argument("--output", type=Path, required=True)
     a = p.parse_args()
-    report = audit(a.image, a.rc, a.source_sha, a.erofs_tool, a.erofs_tool_sha256)
+    report = audit(a.image, a.rc, a.source_sha, a.erofs_tool, a.erofs_tool_sha256, a.apex)
     with a.output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2, sort_keys=True)
         stream.write("\n")
