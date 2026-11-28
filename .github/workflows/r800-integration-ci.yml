@@ -337,6 +337,17 @@ jobs:
             --hwc "$RUNNER_TEMP/r800-hwc-fixture/hal-runtime-evidence.json" \
             --egl "$RUNNER_TEMP/r800-egl-link/egl-link-evidence.json" \
             --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/graphics-fixture-summary.json"
+      - name: Combine same-head graphics ABI and fixture evidence
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 build/r800_android_graphics_abi.py \
+            --ndk "$RUNNER_TEMP/android-ndk-r27c" --output "$RUNNER_TEMP/graphics-abi-qemu" \
+            --source-sha "$GITHUB_SHA"
+          python3 build/r800_graphics_acceptance.py \
+            --abi "$RUNNER_TEMP/graphics-abi-qemu/graphics-abi-evidence.json" \
+            --fixture "$RUNNER_TEMP/graphics-fixture-summary.json" \
+            --source-sha "$GITHUB_SHA" --output "$RUNNER_TEMP/graphics-acceptance.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -357,6 +368,8 @@ jobs:
             ${{ runner.temp }}/r800-namespace-fixture/hal-runtime-evidence.json
             ${{ runner.temp }}/r800-egl-link/egl-link-evidence.json
             ${{ runner.temp }}/graphics-fixture-summary.json
+            ${{ runner.temp }}/graphics-abi-qemu/graphics-abi-evidence.json
+            ${{ runner.temp }}/graphics-acceptance.json
           if-no-files-found: warn
           retention-days: 7
   overlay-independent:
