@@ -9,6 +9,8 @@ on:
       - build/r800_extract_super.py
       - build/r800_super_inventory.py
       - build/r800_partition_identity.py
+      - build/r800_dex_hiddenapi_observation.py
+      - tests/test_r800_dex_hiddenapi_observation.py
       - build/r800_bind_pixel_system.py
       - tests/test_r800_partition_identity.py
   workflow_dispatch:
@@ -53,6 +55,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends e2fsprogs
           python3 -m unittest discover -s tests -p 'test_r800_partition_identity.py' -v
+          python3 -m unittest discover -s tests -p 'test_r800_dex_hiddenapi_observation.py' -v
           PYTHONPATH=build python3 - <<'PY'
           import json, os, hashlib
           from pathlib import Path
@@ -153,6 +156,7 @@ jobs:
           from r800_extract_ext4 import snapshot_image
           from r800_framework_inventory import ext4_member
           from r800_art_inventory import DEX_NAME, MAX_JAR, MAX_DEX, MAX_TOTAL, dex_inventory
+          from r800_dex_hiddenapi_observation import observe as observe_hiddenapi
           diagnostics={}
           with tempfile.TemporaryDirectory(dir=root) as tmp:
               scratch=Path(tmp)
@@ -184,6 +188,11 @@ jobs:
                                   item["status"]="STRICT_HEADER_PASS"
                               except ValueError as exc:
                                   item.update(status="REVIEW_REQUIRED",reason=str(exc))
+                              if not item["header_sha1_matches"] and item["header_adler32_matches"]:
+                                  try:
+                                      item["hiddenapi_observation"]=observe_hiddenapi(data)
+                                  except ValueError as exc:
+                                      item["hiddenapi_observation"]={"status":"REVIEW_REQUIRED","reason":str(exc)}
                               rows[e.filename]=item
                           diagnostics[path]=rows
           (evidence/"pixel-dex-diagnostics.json").write_text(json.dumps({
