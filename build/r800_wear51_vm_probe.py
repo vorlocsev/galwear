@@ -135,7 +135,7 @@ def experiment(sources,guest,scratch,boot_dir,boot_result,jars,qemu,bwrap):
             result["public_libraries"]=stage_public_libraries(sources,vm_guest)
             if result["public_libraries"]["sha256"]!=result["public_preloads"]["sha256"]:
                 raise ValueError("Public preload config changed")
-            cfg=config(objects,vm_oat=True)
+            cfg=config(objects,vm_oat=True,public_preloads=names)
             (vm_guest/"linkerconfig/ld.config.txt").write_text(cfg)
             data=vm_guest/"data"
             arm=data/"arm"

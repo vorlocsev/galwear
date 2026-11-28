@@ -50,7 +50,7 @@ def guest_path(key):
     return PREFIX[label]+path
 
 
-def config(objects, *, vm_oat=False):
+def config(objects, *, vm_oat=False, public_preloads=()):
     names={label:set() for label in PREFIX}
     for key,row in objects.items():
         guest_path(key)
@@ -86,11 +86,19 @@ def config(objects, *, vm_oat=False):
     # libharfbuzz_ng.so needed libicu.so from i18n. Build an explicit
     # allowlist from staged DT_NEEDED records, not a global search path.
     overrides={}
+    public_preloads=tuple(public_preloads)
+    if public_preloads and not vm_oat:
+        raise ValueError("Public preload imports require VM configuration")
+    if len(public_preloads)>128 or len(set(public_preloads))!=len(public_preloads) or any(
+            not NAME.fullmatch(n) or not n.startswith("lib") or not n.endswith(".so")
+            for n in public_preloads):
+        raise ValueError("Invalid public preload import list")
     if vm_oat:
         system_needed={n for key,row in objects.items()
                        if key.startswith("system:") and key!=STUB
                        for n in row.get("needed",())}
-        external=system_needed-names["system"]-names["runtime"]
+        # NativeLoader also requests public SONAMEs directly in System.
+        external=(system_needed | set(public_preloads))-names["system"]-names["runtime"]
         targets=("i18n","neuralnetworks","statsd")
         for dst in targets:
             eligible={n for n in external & names[dst]

@@ -71,6 +71,23 @@ class ArtProbeTests(unittest.TestCase):
         self.assertNotIn("namespace.system.link.neuralnetworks.",cfg)
         self.assertNotIn("allow_all_shared_libs",cfg)
 
+    def test_public_preloads_link_only_unique_staged_apex_sonames(self):
+        data=objects()
+        data["i18n:/lib/libicui18n.so"]={"soname":"libicui18n.so"}
+        data["i18n:/lib/libicuuc.so"]={"soname":"libicuuc.so"}
+        data["neuralnetworks:/lib/libneuralnetworks.so"]={"soname":"libneuralnetworks.so"}
+        data["i18n:/lib/libprivate.so"]={"soname":"libprivate.so"}
+        data["i18n:/lib/libambiguous.so"]={"soname":"libambiguous.so"}
+        data["neuralnetworks:/lib/libambiguous.so"]={"soname":"libambiguous.so"}
+        cfg=probe.config(data,vm_oat=True,public_preloads=(
+            "libicui18n.so","libicuuc.so","libneuralnetworks.so","libambiguous.so","libc.so","libmissing.so"))
+        self.assertIn("namespace.system.link.i18n.shared_libs = libicui18n.so:libicuuc.so\n",cfg)
+        self.assertIn("namespace.system.link.neuralnetworks.shared_libs = libneuralnetworks.so\n",cfg)
+        with self.assertRaises(ValueError):
+            probe.config(data,public_preloads=("libicuuc.so",))
+        with self.assertRaises(ValueError):
+            probe.config(data,vm_oat=True,public_preloads=("../libbad.so",))
+
     def test_vm_oat_export_is_scoped_to_private_boot_directory(self):
         baseline=probe.config(objects())
         self.assertNotIn("namespace.system.visible",baseline)
