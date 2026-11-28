@@ -31,7 +31,10 @@ import r800_power_inventory
 import r800_selinux_inventory
 from r800_android_userspace_preflight import parse_kernel_config, MAX_CONFIG
 
-NAME = re.compile(r"[A-Za-z0-9_.+~-]{1,255}")
+# Android HIDL shared libraries use names such as
+# android.hardware.graphics.composer@2.1.so. '@' is a basename character,
+# not a path separator; slashes, traversal and controls remain rejected.
+NAME = re.compile(r"[A-Za-z0-9_.+~@-]{1,255}")
 TARGETS = ("/init", "/system/bin/servicemanager", "/system/bin/hwservicemanager",
            "/vendor/bin/vndservicemanager", "/system/bin/app_process32")
 MAX_NODES = 512
