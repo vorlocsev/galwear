@@ -116,6 +116,42 @@ def graphics_entrypoints(libraries, groups, abi):
             "egl_initialized": False, "safe_to_flash": False}
 
 
+def hwc_stride_evidence(root):
+    """Inventory static property assignments, never infer the donor caller ABI."""
+    key = "debug.r800.layer_stride"
+    hints, errors = [], []
+    for source in EGL_PROPERTY_FILES:
+        try:
+            raw = read_regular(guest_path(root, source), 1024 * 1024).decode("utf-8")
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            errors.append(source + ": " + str(exc))
+            continue
+        for number, line in enumerate(raw.splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = (v.strip() for v in line.split("=", 1))
+            if name != key:
+                continue
+            hints.append({"source": source, "line": number, "value": value})
+            if value not in ("96", "100"):
+                errors.append(source + ":" + str(number) + ": invalid HWC stride hint")
+    values = sorted({hint["value"] for hint in hints})
+    conflict = len(values) > 1
+    observed = int(values[0]) if not errors and len(values) == 1 and values[0] in ("96", "100") else None
+    # A property only chooses a stride. It cannot establish the caller's
+    # actual allocation size, field offsets or ABI at runtime.
+    return {"status": "REVIEW_REQUIRED", "property": key, "assignments": hints,
+            "conflicting_assignments": conflict, "errors": errors,
+            "observed_explicit_stride": observed,
+            "historical_default_stride": 100, "aosp_arm32_layer_bytes": 96,
+            "runtime_effective_stride": None, "donor_layer_layout_verified": False,
+            "donor_layer_stride_100_verified": False, "mapper_2_1_verified": False,
+            "hardware_tested": False, "safe_to_flash": False}
+
+
 def egl_driver_candidates(root, libraries, abi):
     """Group drivers by ABI, directory and suffix; do not predict runtime priority."""
     hints, errors, groups = {}, [], {}
@@ -380,6 +416,7 @@ def audit(root, init, vintf, inspect_elf, kernel_config=None, dtb=None):
             "surfaceflinger_abi": sf_abi, "services": services, "declared_hals": declared,
             "missing_hal_declarations": missing, "libraries": libraries, "candidates": candidates,
             "egl_driver_groups": driver_groups,
+            "hwc_stride_evidence": hwc_stride_evidence(root),
             "entrypoint_evidence": graphics_entrypoints(libraries, driver_groups, sf_abi),
             "mali_evidence": mali_evidence(libraries, sf_abi, kernel_config, dtb),
             "device_nodes": nodes, "kernel_config": None if kernel_config is None else
