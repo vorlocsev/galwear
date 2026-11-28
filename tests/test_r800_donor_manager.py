@@ -156,5 +156,28 @@ class DonorManagerTests(unittest.TestCase):
         self.assertFalse(report["safe_to_flash"])
 
 
+    def test_environment_mapping(self):
+        for name in ("lock.json","probe.json"):
+            (self.root/name).write_text("{}")
+        self.data["environment"]={"lock":"lock.json","lock_sha256":PIN,
+                                  "probe":"probe.json","probe_sha256":"c"*64}
+        cfg=self.load()
+        self.assertEqual(cfg["environment"],(self.root/"lock.json",PIN,
+                                             self.root/"probe.json","c"*64))
+        with patch.object(manager,"preflight"), \
+             patch.object(manager,"verify_pixel",return_value={}), \
+             patch.object(manager,"stock_bindings",return_value={}), \
+             patch.object(manager,"audit_base",return_value={"identity_blockers":[]}), \
+             patch.object(manager,"verify_bundle",return_value=(b"lock",b"probe",{"fixture":True})) as verify:
+            result=manager.check(cfg,self.output,SOURCE)
+        verify.assert_called_once_with(cfg["environment"],SOURCE)
+        self.assertEqual(result["host_environment_status"],"SAVED_PROBE_AND_LIVE_SELECTED_TOOLS_ONLY")
+
+    def test_invalid_environment_pins(self):
+        self.data["environment"]={"lock":"lock.json","lock_sha256":PIN}
+        with self.assertRaisesRegex(ValueError,"Invalid environment lock and probe pins"):
+            self.load()
+
+
 if __name__=="__main__":
     unittest.main()
